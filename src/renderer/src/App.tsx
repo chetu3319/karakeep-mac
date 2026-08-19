@@ -141,7 +141,7 @@ function Library({
   }, [])
 
   return (
-    <div className="grid h-full grid-cols-[220px_360px_1fr]">
+    <div className="grid h-full grid-cols-[220px_360px_1fr] grid-rows-[minmax(0,1fr)]">
       <Sidebar selected={selection} onSelect={onSelectionChange} />
       <BookmarkList selection={selection} selectedId={selectedBookmark?.id ?? null} onSelectBookmark={onSelectBookmark} />
       <DetailPane bookmark={selectedBookmark} />
