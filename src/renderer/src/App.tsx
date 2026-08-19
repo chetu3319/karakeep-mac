@@ -44,7 +44,14 @@ export default function App(): React.JSX.Element {
         {auth.status === 'ready' && (
           <Library
             selection={selection}
-            onSelectionChange={setSelection}
+            onSelectionChange={(s) => {
+              // A sidebar list/tag switch must clear the current selection —
+              // otherwise the detail pane (and, worse, the live
+              // WebContentsView it drives) keeps showing a bookmark that's
+              // no longer even in the filtered list.
+              setSelection(s)
+              setSelectedBookmark(null)
+            }}
             selectedBookmark={selectedBookmark}
             onSelectBookmark={setSelectedBookmark}
           />
@@ -104,8 +111,16 @@ function Library({
     window.kk.dev.onSmokeStart(() => setSmokeStarted(true))
   }, [])
 
+  // One-shot: only auto-select at smoke-test startup. Without this guard,
+  // the effect would re-fire (and re-select bookmarks[0] from the
+  // unfiltered "all" list) every time selectedBookmark goes back to null —
+  // which is exactly what the list-switch fix now does on purpose, and
+  // that re-selection would silently mask the very bug it's meant to prove
+  // fixed in the step-4 screenshot.
+  const autoSelectedRef = useRef(false)
   useEffect(() => {
-    if (smokeStarted && !selectedBookmark && bookmarks.length > 0) {
+    if (smokeStarted && !autoSelectedRef.current && !selectedBookmark && bookmarks.length > 0) {
+      autoSelectedRef.current = true
       onSelectBookmark(bookmarks[0])
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

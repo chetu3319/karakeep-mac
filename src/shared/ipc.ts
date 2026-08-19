@@ -32,6 +32,7 @@ export const IPC = {
   WEBPANE_RELOAD: 'webpane:reload',
   WEBPANE_STOP: 'webpane:stop',
   WEBPANE_OPEN_EXTERNAL: 'webpane:open-external',
+  WEBPANE_IS_ATTACHED: 'webpane:is-attached', // dev/smoke diagnostic — confirms actual detach, not just visual hide
   WEBPANE_STATE_EVENT: 'webpane:state', // main -> renderer push
   WEBPANE_HIGHLIGHTS_CHANGED_EVENT: 'webpane:highlights-changed' // main -> renderer push
 } as const

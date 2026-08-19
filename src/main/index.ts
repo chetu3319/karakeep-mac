@@ -119,6 +119,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.WEBPANE_SET_BOUNDS, (_e, bounds: WebPaneBounds) => webPane?.setBounds(bounds))
   ipcMain.handle(IPC.WEBPANE_SHOW, () => webPane?.show())
   ipcMain.handle(IPC.WEBPANE_HIDE, () => webPane?.hide())
+  ipcMain.handle(IPC.WEBPANE_IS_ATTACHED, () => webPane?.isAttached() ?? false)
   ipcMain.handle(IPC.WEBPANE_DESTROY, () => webPane?.destroy())
   ipcMain.handle(IPC.WEBPANE_BACK, () => webPane?.back())
   ipcMain.handle(IPC.WEBPANE_FORWARD, () => webPane?.forward())
@@ -171,9 +172,30 @@ async function runSmokeMode(win: BrowserWindow, pane: WebPaneManager): Promise<v
 
   async function shot(name: string): Promise<void> {
     await new Promise((r) => setTimeout(r, 600))
-    const image = await win.webContents.capturePage()
-    writeFileSync(join(dir, name), image.toPNG())
-    console.log('[smoke] saved', name)
+    // macOS's screen-capture surface can transiently throw
+    // "Current display surface not available for capture" — retry once
+    // rather than losing a whole smoke run (and, for 04, the evidence the
+    // stale-selection fix actually needs) to a flake.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        // Best-effort: force a fresh paint before capturing. Note this
+        // session's capturePage() has been observed to occasionally return
+        // a stale/cached compositor frame — see the report in this run's
+        // summary. Do NOT shell out to an OS-level screen-capture tool as
+        // a workaround: it captures the user's real physical display, not
+        // this app's window, which is a privacy problem, not a fix.
+        win.webContents.invalidate()
+        await new Promise((r) => setTimeout(r, 400))
+        const image = await win.webContents.capturePage()
+        writeFileSync(join(dir, name), image.toPNG())
+        console.log('[smoke] saved', name)
+        return
+      } catch (err) {
+        console.error(`[smoke] capture attempt ${attempt} failed for ${name}`, err instanceof Error ? err.message : err)
+        if (attempt === 2) throw err
+        await new Promise((r) => setTimeout(r, 800))
+      }
+    }
   }
 
   // Register these listeners immediately — the renderer may fire its
@@ -208,10 +230,18 @@ async function runSmokeMode(win: BrowserWindow, pane: WebPaneManager): Promise<v
   // Also capture the live WebContentsView's own compositor output
   // directly, since capturing the parent BrowserWindow's webContents does
   // not necessarily include an overlaid child WebContentsView's pixels.
-  const paneOnly = await pane.capturePaneOnly()
-  if (paneOnly) {
-    writeFileSync(join(dir, '03b-web-pane-only.png'), paneOnly)
-    console.log('[smoke] saved 03b-web-pane-only.png')
+  // Best-effort: macOS's screen-capture surface can transiently be
+  // unavailable, and that must not abort the rest of this sequence (in
+  // particular step 4 below, which is the one that matters for verifying
+  // the pane actually detaches).
+  try {
+    const paneOnly = await pane.capturePaneOnly()
+    if (paneOnly) {
+      writeFileSync(join(dir, '03b-web-pane-only.png'), paneOnly)
+      console.log('[smoke] saved 03b-web-pane-only.png')
+    }
+  } catch (err) {
+    console.error('[smoke] pane-only capture failed (non-fatal)', err instanceof Error ? err.message : err)
   }
 
   // Step 4: select the first list in the sidebar and prove server-side
@@ -219,6 +249,19 @@ async function runSmokeMode(win: BrowserWindow, pane: WebPaneManager): Promise<v
   // results shown, not just cosmetically highlighting the sidebar row.
   win.webContents.send('dev:smoke-select-list')
   await listReady
+
+  // The list switch must have cleared the previously-selected bookmark,
+  // which unmounts the Web tab and should have actually detached the
+  // WebContentsView (contentView.removeChildView), not just hidden it
+  // behind the (now list-only) detail pane. Verify the real attached
+  // state directly on the manager rather than trusting a screenshot.
+  await new Promise((r) => setTimeout(r, 300))
+  if (pane.isAttached()) {
+    console.error('[smoke] FAIL: web pane still attached after switching lists — stale-selection bug regressed')
+  } else {
+    console.log('[smoke] ok: web pane detached after switching lists')
+  }
+
   await shot('04-list-filtered.png')
 
   clearTimeout(safety)

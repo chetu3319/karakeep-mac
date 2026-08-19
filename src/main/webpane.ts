@@ -121,6 +121,10 @@ export class WebPaneManager {
     })
   }
 
+  isAttached(): boolean {
+    return this.attached
+  }
+
   show(): void {
     if (this.win.isDestroyed()) return
     const view = this.ensureView()

@@ -85,7 +85,10 @@ const api = {
     },
     notifyDetailReady: (): void => ipcRenderer.send('dev:smoke-detail-ready'),
     notifyWebReady: (): void => ipcRenderer.send('dev:smoke-web-ready'),
-    notifyListReady: (): void => ipcRenderer.send('dev:smoke-list-ready')
+    notifyListReady: (): void => ipcRenderer.send('dev:smoke-list-ready'),
+    // Diagnostic-only: confirms the WebContentsView was actually removed
+    // from the window's contentView, not just resized to zero / covered.
+    isPaneAttached: (): Promise<boolean> => ipcRenderer.invoke(IPC.WEBPANE_IS_ATTACHED)
   }
 }
 
