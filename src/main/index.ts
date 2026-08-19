@@ -128,23 +128,45 @@ function registerIpc(): void {
   ipcMain.handle(IPC.WEBPANE_OPEN_EXTERNAL, (_e, url: string) => shell.openExternal(url))
 }
 
+// Reconciles preload-local highlight ids to server-assigned ids within a
+// session. A highlight created this session is known to the preload only by
+// its client-generated `kh-...` id until POST /highlights resolves; a
+// PATCH/DELETE for a note edited or deleted in the same beat (e.g. "select
+// text, add a note immediately") must not silently no-op just because the
+// server id hasn't come back yet — it must wait for the in-flight creation
+// and then target the real id. Highlights that were loaded *from* the
+// server (existing highlights applied to the page on load) already carry
+// the server id as their preload-side `id`, so they need no reconciliation
+// at all; the `serverIdByKey` map only ever gains entries for
+// session-created highlights, so falling through to `p.id` is correct for
+// the pre-existing case.
+const serverIdByKey = new Map<string, string>()
+const pendingCreations = new Map<string, Promise<{ id: string }>>()
+
+function highlightKey(bookmarkId: string, clientId: string): string {
+  return `${bookmarkId}:${clientId}`
+}
+
 async function onHighlightEvent(
   type: 'created' | 'updated' | 'removed',
   payload: unknown,
   bookmarkId: string | null
 ): Promise<void> {
   if (!apiClient || !bookmarkId) return
+  const client = apiClient
+  const p = payload as {
+    id: string
+    text?: string
+    color?: string
+    note?: string
+    startOffset: number
+    endOffset: number
+  }
+  const key = highlightKey(bookmarkId, p.id)
+
   try {
-    const p = payload as {
-      id: string
-      text?: string
-      color?: string
-      note?: string
-      startOffset: number
-      endOffset: number
-    }
     if (type === 'created') {
-      await apiClient.createHighlight({
+      const promise = client.createHighlight({
         bookmarkId,
         startOffset: p.startOffset,
         endOffset: p.endOffset,
@@ -152,17 +174,39 @@ async function onHighlightEvent(
         text: p.text,
         note: p.note
       })
-    } else if (type === 'updated') {
-      // Client-side highlight ids from the preload aren't server ids yet in
-      // this vertical slice's create-then-update-note flow within the same
-      // session; best-effort — a full id-reconciliation pass is follow-up work.
-      console.log('[highlights] update event (not yet reconciled to server id)', p.id)
-    } else if (type === 'removed') {
-      console.log('[highlights] remove event (not yet reconciled to server id)', p.id)
+      pendingCreations.set(key, promise)
+      try {
+        const created = await promise
+        serverIdByKey.set(key, created.id)
+      } finally {
+        pendingCreations.delete(key)
+      }
+    } else if (type === 'updated' || type === 'removed') {
+      let serverId = serverIdByKey.get(key)
+      if (serverId === undefined) {
+        const inFlight = pendingCreations.get(key)
+        if (inFlight) {
+          // A PATCH/DELETE raced ahead of its own creation — wait for the
+          // server id rather than dropping the edit/delete on the floor.
+          const created = await inFlight
+          serverId = created.id
+        }
+      }
+      // Falls through to the client id itself for highlights that were
+      // never created this session (loaded from the server already
+      // carrying their real id) — see the function-level comment.
+      if (serverId === undefined) serverId = p.id
+
+      if (type === 'updated') {
+        await client.updateHighlight(serverId, { color: p.color, note: p.note })
+      } else {
+        await client.deleteHighlight(serverId)
+        serverIdByKey.delete(key)
+      }
     }
     mainWindow?.webContents.send(IPC.WEBPANE_HIGHLIGHTS_CHANGED_EVENT, { bookmarkId })
   } catch (err) {
-    console.error('[highlights] sync failed', err instanceof Error ? err.message : err)
+    console.error(`[highlights] ${type} sync failed`, err instanceof Error ? err.message : err)
   }
 }
 

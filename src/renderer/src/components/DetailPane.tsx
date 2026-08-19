@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import type { Bookmark } from '../../../shared/types'
 import { useHighlightsForBookmark } from '../lib/queries'
 import { displayForBookmark } from '../lib/bookmarkDisplay'
@@ -8,6 +9,20 @@ import WebPane from './WebPane'
 export default function DetailPane({ bookmark }: { bookmark: Bookmark | null }): React.JSX.Element {
   const [tab, setTab] = useState<'preview' | 'web'>('preview')
   const highlights = useHighlightsForBookmark(bookmark?.id)
+  const queryClient = useQueryClient()
+
+  // The Web pane's preload posts highlight create/update/delete events to
+  // main, which syncs them to the server and then pushes this event back.
+  // Without this, a note edited or deleted in the live pane would keep
+  // showing its old text in the Preview tab's highlight list until the
+  // bookmark was reselected or the app reloaded.
+  useEffect(() => {
+    return window.kk.webpane.onHighlightsChanged(({ bookmarkId }) => {
+      if (bookmark && bookmarkId === bookmark.id) {
+        void queryClient.invalidateQueries({ queryKey: ['highlights', 'all'] })
+      }
+    })
+  }, [bookmark, queryClient])
 
   useEffect(() => {
     setTab('preview')
