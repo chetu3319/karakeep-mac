@@ -12,8 +12,7 @@ import { ipcRenderer } from 'electron'
 
 const HIGHLIGHT_CLASS = 'karakeep-hl'
 const TOOLBAR_ID = 'karakeep-toolbar'
-const NOTE_DIALOG_ID = 'karakeep-note-dialog'
-const OVERLAY_ID = 'karakeep-overlay'
+const NOTE_HOST_ID = 'karakeep-note-host'
 const STYLE_ID = 'karakeep-hl-styles'
 
 interface StoredHighlight {
@@ -45,13 +44,22 @@ function getStylesheet(): string {
     .${HIGHLIGHT_CLASS}[data-kh-color="blue"]:hover { background: rgba(59,130,246,0.4) !important; }
     .${HIGHLIGHT_CLASS}[data-kh-color="purple"] { background: rgba(168,85,247,0.25) !important; border-bottom-color: rgba(168,85,247,0.5); }
     .${HIGHLIGHT_CLASS}[data-kh-color="purple"]:hover { background: rgba(168,85,247,0.4) !important; }
-    .${HIGHLIGHT_CLASS}[data-kh-note="1"]::after { content: '\\1F4DD'; font-size: 10px; vertical-align: super; margin-left: 2px; }
+    .${HIGHLIGHT_CLASS}[data-kh-note="1"] {
+      cursor: help;
+    }
+    .${HIGHLIGHT_CLASS}[data-kh-note="1"]::after {
+      content: '\\1F4DD'; font-size: 10px; vertical-align: super; margin-left: 2px;
+    }
     #${TOOLBAR_ID} {
+      /* Visible immediately — do not gate the toolbar's visibility on a CSS
+         animation. A backgrounded/occluded WebContentsView can leave a
+         forwards-filled keyframe animation stuck at its 0% frame (opacity:
+         0) indefinitely, producing an invisible-but-interactive toolbar.
+         See the note dialog fix below for the empirical repro. */
       position: absolute; z-index: 2147483647; display: flex; gap: 4px; padding: 6px 8px;
       background: #1f2937; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.25);
-      font-family: system-ui, -apple-system, sans-serif; opacity: 0; animation: kh-appear 0.12s ease-out forwards;
+      font-family: system-ui, -apple-system, sans-serif; opacity: 1;
     }
-    @keyframes kh-appear { to { opacity: 1; } }
     #${TOOLBAR_ID} button {
       border: none; background: transparent; color: #e5e7eb; cursor: pointer; padding: 4px 8px;
       border-radius: 4px; font-size: 13px; font-family: inherit; display: flex; align-items: center;
@@ -61,14 +69,46 @@ function getStylesheet(): string {
     #${TOOLBAR_ID} .kh-dot { width: 16px; height: 16px; border-radius: 50%; padding: 0; border: 2px solid transparent; flex-shrink: 0; }
     #${TOOLBAR_ID} .kh-dot:hover { border-color: #fff; }
     #${TOOLBAR_ID} .kh-sep { width: 1px; background: rgba(255,255,255,0.2); margin: 0 2px; }
-    #${OVERLAY_ID} { position: fixed; inset: 0; background: rgba(0,0,0,0.3); z-index: 2147483646; }
-    #${NOTE_DIALOG_ID} {
-      position: fixed; z-index: 2147483647; top: 50%; left: 50%; transform: translate(-50%,-50%);
+  `
+}
+
+/**
+ * Styles for the note overlay + dialog. Injected inside a *closed shadow
+ * root*, not document.head, and the host element lives outside document.body
+ * (see openNote()). Two independent problems this fixes, confirmed via a
+ * standalone Electron repro against the live arxiv bookmark page:
+ *
+ * 1. The dialog previously depended on a `forwards`-filled CSS keyframe
+ *    animation (`kh-dialog-in`) to ever reach opacity: 1. When the
+ *    WebContentsView's compositor doesn't pump a frame right after the
+ *    dialog is inserted (observed: a WebContentsView added to a hidden/
+ *    unfocused BrowserWindow never advances the animation at all), the
+ *    dialog is permanently stuck at its 0% keyframe — opacity: 0, fully
+ *    rendered, fully hit-testable. That exactly matches the reported
+ *    symptom: overlay visibly darkens the page, dialog is present and
+ *    blocking clicks, but nothing is visible or usable. Fix: the dialog is
+ *    opacity: 1 by default; no animation gates its visibility.
+ * 2. The dialog and overlay were appended to the live page's own
+ *    document.body/document.head, sharing the page's global CSS cascade.
+ *    A hostile or merely coincidental page rule (transform/filter on an
+ *    ancestor, an ID collision, `mark { all: unset }`, a global
+ *    `* { opacity: 0 }` transition-in framework, etc.) can break this in
+ *    ways we can't audit for up front. A closed shadow root, hung off a
+ *    host element appended to document.documentElement (not body — body is
+ *    the ancestor most commonly given a transform by page frameworks),
+ *    isolates our styles from the page's cascade in both directions.
+ */
+function getDialogStylesheet(): string {
+  return `
+    :host { all: initial; }
+    .kh-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.3); }
+    .kh-dialog {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
       background: #fff; border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.3); padding: 0; border: none;
-      width: 400px; max-width: 90vw; font-family: system-ui, -apple-system, sans-serif; opacity: 0;
-      animation: kh-dialog-in 0.15s ease-out forwards;
+      width: 400px; max-width: 90vw; font-family: system-ui, -apple-system, sans-serif;
+      /* Visible immediately — see the file-level comment above. */
+      opacity: 1;
     }
-    @keyframes kh-dialog-in { from { opacity:0; transform: translate(-50%,-50%) scale(0.96); } to { opacity:1; transform: translate(-50%,-50%) scale(1); } }
     .kh-hdr { padding: 12px 16px; border-bottom: 1px solid #e5e7eb; font-weight: 600; font-size: 14px; color: #111827; display: flex; justify-content: space-between; align-items: center; }
     .kh-body { padding: 12px 16px; }
     .kh-quote { background: #f3f4f6; border-left: 3px solid #10b981; padding: 8px 12px; margin-bottom: 12px; border-radius: 0 6px 6px 0; font-size: 13px; color: #374151; max-height: 80px; overflow-y: auto; white-space: pre-wrap; }
@@ -85,7 +125,7 @@ function getStylesheet(): string {
     .kh-close { background: none; border: none; cursor: pointer; font-size: 18px; color: #9ca3af; padding: 0; line-height: 1; }
     .kh-close:hover { color: #374151; }
     @media (prefers-color-scheme: dark) {
-      #${NOTE_DIALOG_ID} { background: #1f2937; }
+      .kh-dialog { background: #1f2937; }
       .kh-hdr { color: #f9fafb; border-bottom-color: #374151; }
       .kh-quote { background: #111827; color: #d1d5db; }
       .kh-ta { background: #111827; border-color: #4b5563; color: #f9fafb; }
@@ -294,16 +334,46 @@ function karakeepInit(): void {
     document.getElementById(TOOLBAR_ID)?.remove()
   }
 
+  let noteHost: HTMLElement | null = null
+
+  /** Sets the note dataset/tooltip on every mark for a given highlight id
+   * so the note is genuinely visible on the live page — a hover tooltip
+   * with the actual text, not just the pencil-emoji marker — without
+   * requiring the (previously broken) dialog to work at all. */
+  function applyNoteAffordance(id: string, note: string | undefined): void {
+    document.querySelectorAll(`[data-kh-id="${id}"]`).forEach((m) => {
+      const el = m as HTMLElement
+      el.dataset.khNote = note ? '1' : ''
+      if (note) el.title = note
+      else el.removeAttribute('title')
+    })
+  }
+
   function openNote(hl: StoredHighlight): void {
     closeNote()
 
+    // Host lives outside document.body (on <html> itself) with a closed
+    // shadow root, so the page's own stylesheets can't reach in and the
+    // page's own script can't reach the dialog's DOM. See the file-level
+    // comment on getDialogStylesheet() for why.
+    const host = document.createElement('div')
+    host.id = NOTE_HOST_ID
+    host.style.cssText = 'all: initial; position: fixed; inset: 0; z-index: 2147483647;'
+    document.documentElement.appendChild(host)
+    noteHost = host
+    const root = host.attachShadow({ mode: 'closed' })
+
+    const styleEl = document.createElement('style')
+    styleEl.textContent = getDialogStylesheet()
+    root.appendChild(styleEl)
+
     const ov = document.createElement('div')
-    ov.id = OVERLAY_ID
+    ov.className = 'kh-overlay'
     ov.addEventListener('click', closeNote)
-    document.body.appendChild(ov)
+    root.appendChild(ov)
 
     const dlg = document.createElement('div')
-    dlg.id = NOTE_DIALOG_ID
+    dlg.className = 'kh-dialog'
 
     const hdr = document.createElement('div')
     hdr.className = 'kh-hdr'
@@ -359,16 +429,14 @@ function karakeepInit(): void {
     saveBtn.textContent = 'Save Note'
     saveBtn.addEventListener('click', () => {
       hl.note = ta.value.trim()
-      document.querySelectorAll(`[data-kh-id="${hl.id}"]`).forEach((m) => {
-        ;(m as HTMLElement).dataset.khNote = hl.note ? '1' : ''
-      })
+      applyNoteAffordance(hl.id, hl.note)
       sendHost('kk:highlight-updated', hl)
       closeNote()
     })
     ftr.appendChild(saveBtn)
     dlg.appendChild(ftr)
 
-    document.body.appendChild(dlg)
+    root.appendChild(dlg)
     ta.focus()
 
     ta.addEventListener('keydown', (e) => {
@@ -384,8 +452,8 @@ function karakeepInit(): void {
   }
 
   function closeNote(): void {
-    document.getElementById(NOTE_DIALOG_ID)?.remove()
-    document.getElementById(OVERLAY_ID)?.remove()
+    noteHost?.remove()
+    noteHost = null
   }
 
   function normalizeForMatch(str: string): string {
@@ -513,9 +581,9 @@ function karakeepInit(): void {
       const marks = wrapRange(found, h.id, h.color || 'green')
       if (!marks.length) return
       marks.forEach((m) => {
-        if (h.note) m.dataset.khNote = '1'
         m.addEventListener('click', () => openNote(h))
       })
+      applyNoteAffordance(h.id, h.note || undefined)
       pageHighlights.push(h)
     })
   }
@@ -529,7 +597,11 @@ function karakeepInit(): void {
       if (s && !s.isCollapsed && s.toString().trim()) {
         let anchor: Node | null = s.anchorNode
         if (anchor && anchor.nodeType !== Node.ELEMENT_NODE) anchor = anchor.parentElement
-        if (anchor && (anchor as Element).closest?.(`#${TOOLBAR_ID}, #${NOTE_DIALOG_ID}`)) return
+        // The note dialog now lives in a closed shadow root outside
+        // document.body, so a selection made inside it can't be reached via
+        // a light-DOM closest() lookup in the first place — only the
+        // toolbar (still light-DOM) needs guarding here.
+        if (anchor && (anchor as Element).closest?.(`#${TOOLBAR_ID}`)) return
         showToolbar(s)
       } else {
         hideToolbar()
