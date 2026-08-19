@@ -5,3 +5,6 @@ release/
 .env.local
 .vite/
 *.log
+tmp-screenshots/
+out/
+*.tsbuildinfo
