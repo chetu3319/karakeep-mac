@@ -1,20 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useBookmarksList, useBookmarksSearch, flattenBookmarks } from '../lib/queries'
+import {
+  useBookmarksList,
+  useBookmarksSearch,
+  useListBookmarks,
+  useTagBookmarks,
+  flattenBookmarks
+} from '../lib/queries'
 import type { Bookmark } from '../../../shared/types'
-import AssetImage from './AssetImage'
+import { displayForBookmark } from '../lib/bookmarkDisplay'
+import BookmarkThumb from './BookmarkThumb'
 
 type Selection = { type: 'all' } | { type: 'list'; id: string } | { type: 'tag'; id: string }
-
-function faviconFallback(url?: string | null): string {
-  try {
-    if (!url) return ''
-    const u = new URL(url)
-    return `${u.protocol}//${u.host}/favicon.ico`
-  } catch {
-    return ''
-  }
-}
 
 function useDebounced(value: string, ms: number): string {
   const [debounced, setDebounced] = useState(value)
@@ -38,18 +35,36 @@ export default function BookmarkList({
   const debouncedQuery = useDebounced(query, 350)
   const isSearching = debouncedQuery.trim().length > 0
 
-  const listQuery = useBookmarksList()
+  // Each of these hooks is always called (rules-of-hooks) but only the one
+  // matching the current mode is "enabled" / actually fetches. Search takes
+  // priority over the sidebar selection, matching most bookmark apps' UX.
+  const allQuery = useBookmarksList(!isSearching && selection.type === 'all')
   const searchQuery = useBookmarksSearch(debouncedQuery)
-  const active = isSearching ? searchQuery : listQuery
+  const listQuery = useListBookmarks(
+    selection.type === 'list' ? selection.id : '__none__',
+    !isSearching && selection.type === 'list'
+  )
+  const tagQuery = useTagBookmarks(
+    selection.type === 'tag' ? selection.id : '__none__',
+    !isSearching && selection.type === 'tag'
+  )
 
-  const bookmarks = useMemo(() => {
-    const all = flattenBookmarks(active.data?.pages)
-    if (isSearching) return all
-    if (selection.type === 'tag') {
-      return all.filter((b) => b.tags?.some((t) => t.id === selection.id))
+  const active = isSearching
+    ? searchQuery
+    : selection.type === 'list'
+      ? listQuery
+      : selection.type === 'tag'
+        ? tagQuery
+        : allQuery
+
+  const bookmarks = useMemo(() => flattenBookmarks(active.data?.pages), [active.data])
+
+  useEffect(() => {
+    if (window.kk.dev.isSmoke && selection.type === 'list' && !active.isLoading) {
+      window.kk.dev.notifyListReady()
     }
-    return all
-  }, [active.data, isSearching, selection])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selection, active.isLoading])
 
   const parentRef = useRef<HTMLDivElement>(null)
   const rowVirtualizer = useVirtualizer({
@@ -90,19 +105,12 @@ export default function BookmarkList({
 
       <div ref={parentRef} className="flex-1 overflow-y-auto" data-testid="bookmark-list">
         {active.isLoading && <div className="p-4 text-sm text-neutral-400">Loading…</div>}
-        {selection.type === 'list' && !isSearching && (
-          <div className="border-b border-neutral-100 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-neutral-800 dark:bg-amber-950/30 dark:text-amber-400">
-            Filtering by list isn&apos;t wired up yet (no documented list-membership field on
-            bookmarks) — showing all bookmarks.
-          </div>
-        )}
         <div style={{ height: rowVirtualizer.getTotalSize(), position: 'relative' }}>
           {rowVirtualizer.getVirtualItems().map((vi) => {
             const b = bookmarks[vi.index]
             if (!b) return null
             const isSelected = b.id === selectedId
-            const title = b.title || b.content?.title || b.content?.url || 'Untitled'
-            const url = b.content?.url || ''
+            const display = displayForBookmark(b)
             return (
               <button
                 key={b.id}
@@ -121,19 +129,13 @@ export default function BookmarkList({
                 }`}
               >
                 <div className="mt-0.5 h-10 w-10 flex-shrink-0 overflow-hidden rounded-md bg-neutral-100 dark:bg-neutral-800">
-                  {b.content?.imageAssetId ? (
-                    <AssetImage assetId={b.content.imageAssetId} className="h-full w-full object-cover" />
-                  ) : b.content?.favicon ? (
-                    <img src={b.content.favicon} className="h-full w-full object-contain p-1.5" alt="" />
-                  ) : (
-                    <img src={faviconFallback(url)} className="h-full w-full object-contain p-1.5" alt="" />
-                  )}
+                  <BookmarkThumb bookmark={b} display={display} />
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-medium text-neutral-900 dark:text-neutral-100">
-                    {title}
+                    {display.title}
                   </div>
-                  <div className="truncate text-xs text-neutral-500">{url}</div>
+                  <div className="truncate text-xs text-neutral-500">{display.subtitle}</div>
                   {b.tags && b.tags.length > 0 && (
                     <div className="mt-1 flex flex-wrap gap-1">
                       {b.tags.slice(0, 3).map((t) => (
