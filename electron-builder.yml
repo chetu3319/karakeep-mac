@@ -1,0 +1,22 @@
+appId: com.karakeep.desktop
+productName: Karakeep
+directories:
+  output: release
+  buildResources: build-resources
+files:
+  - out/**/*
+  - package.json
+  # Never ship dev credentials or verification artifacts.
+  - '!.env.local'
+  - '!tmp-screenshots/**'
+  - '!reference/**'
+  - '!scripts/**'
+  - '!src/**'
+mac:
+  target:
+    - target: dir
+      arch: [arm64]
+  category: public.app-category.productivity
+  # Unsigned local build: no Developer ID account yet, so no signing or
+  # notarization. Gatekeeper will require right-click > Open on first launch.
+  identity: null
