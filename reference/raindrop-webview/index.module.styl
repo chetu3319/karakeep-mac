@@ -1,0 +1,45 @@
+.container {
+    position: relative
+    overflow: hidden
+
+    .webView {
+        width: 100%
+        height: 100%
+        appearance: none
+        border: 0
+        box-shadow: none
+        transition: opacity .3s ease-in
+    }
+}
+
+.error, .preloader {
+    opacity: 0
+    pointer-events: none
+    transition: opacity .3s ease-in
+}
+
+.container {
+    &[data-status='loaded'] {
+        .webView {
+            background: white
+        }
+    }
+
+    &[data-status='loading'] {
+        .preloader {
+            opacity: 1
+        }
+    }
+
+    &[data-status='error'] {
+        .webView {
+            opacity: 0
+            pointer-events: none
+        }
+
+        .error {
+            opacity: 1
+            pointer-events: auto
+        }
+    }
+}
