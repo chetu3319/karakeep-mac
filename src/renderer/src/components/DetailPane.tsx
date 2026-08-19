@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import type { Bookmark } from '../../../shared/types'
 import { useHighlightsForBookmark } from '../lib/queries'
+import { displayForBookmark } from '../lib/bookmarkDisplay'
 import AssetImage from './AssetImage'
 import WebPane from './WebPane'
 
@@ -41,8 +42,9 @@ export default function DetailPane({ bookmark }: { bookmark: Bookmark | null }):
   }
 
   const content = bookmark.content
-  const title = bookmark.title || content?.title || content?.url || 'Untitled'
-  const url = content?.url || ''
+  const display = displayForBookmark(bookmark)
+  const title = display.title
+  const url = display.url
 
   return (
     <div className="flex h-full flex-col">
@@ -100,6 +102,24 @@ export default function DetailPane({ bookmark }: { bookmark: Bookmark | null }):
             {content?.description && (
               <p className="mb-4 text-sm text-neutral-600 dark:text-neutral-300">{content.description}</p>
             )}
+            {display.kind === 'text' && content?.text && (
+              <blockquote className="mb-4 rounded-lg border-l-4 border-neutral-300 bg-neutral-50 p-3 text-sm text-neutral-700 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-300">
+                {content.text}
+              </blockquote>
+            )}
+            {display.kind === 'asset' && (
+              <div className="mb-4 flex items-center gap-3 rounded-lg border border-neutral-200 bg-neutral-50 p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900">
+                <span className="text-2xl">{content?.assetType === 'pdf' ? '📄' : '📎'}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-medium text-neutral-800 dark:text-neutral-200">
+                    {display.subtitle || 'Attached file'}
+                  </div>
+                  {content?.size && (
+                    <div className="text-xs text-neutral-500">{(content.size / 1024 / 1024).toFixed(1)} MB</div>
+                  )}
+                </div>
+              </div>
+            )}
             {bookmark.summary && (
               <div className="mb-4 rounded-lg bg-neutral-50 p-3 text-sm text-neutral-700 dark:bg-neutral-900 dark:text-neutral-300">
                 <div className="mb-1 text-xs font-semibold uppercase text-neutral-400">Summary</div>
@@ -138,7 +158,13 @@ export default function DetailPane({ bookmark }: { bookmark: Bookmark | null }):
           {url ? (
             <WebPane active={tab === 'web'} url={url} bookmarkId={bookmark.id} highlights={highlights} />
           ) : (
-            <div className="p-5 text-sm text-neutral-400">This bookmark has no URL to load.</div>
+            <div className="p-5 text-sm text-neutral-400">
+              {display.kind === 'asset'
+                ? 'This bookmark is a stored file with no source URL to load live.'
+                : display.kind === 'text'
+                  ? 'This note has no source URL to load live.'
+                  : 'This bookmark has no URL to load.'}
+            </div>
           )}
         </div>
       </div>

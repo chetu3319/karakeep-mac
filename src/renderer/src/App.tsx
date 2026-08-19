@@ -1,9 +1,9 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import Onboarding from './components/Onboarding'
 import Sidebar from './components/Sidebar'
 import BookmarkList from './components/BookmarkList'
 import DetailPane from './components/DetailPane'
-import { useBookmarksList, flattenBookmarks } from './lib/queries'
+import { useBookmarksList, useLists, flattenBookmarks } from './lib/queries'
 import type { Bookmark, User } from '../../shared/types'
 
 type AuthState = { status: 'loading' } | { status: 'onboarding' } | { status: 'ready'; user: User }
@@ -92,6 +92,8 @@ function Library({
   // Also used to drive the dev smoke script's auto bookmark selection.
   const listQuery = useBookmarksList()
   const bookmarks = flattenBookmarks(listQuery.data?.pages)
+  const listsQuery = useLists()
+  const lists = listsQuery.data || []
   const [smokeStarted, setSmokeStarted] = useState(false)
 
   useEffect(() => {
@@ -108,6 +110,20 @@ function Library({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [smokeStarted, bookmarks.length, selectedBookmark])
+
+  const listsRef = useRef(lists)
+  listsRef.current = lists
+
+  useEffect(() => {
+    if (!window.kk.dev.isSmoke) return
+    // Registered once; reads the latest lists via a ref so it doesn't need
+    // to re-subscribe (and leak listeners) every time the lists query updates.
+    window.kk.dev.onSelectList(() => {
+      const current = listsRef.current
+      if (current.length > 0) onSelectionChange({ type: 'list', id: current[0].id })
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <div className="grid h-full grid-cols-[220px_360px_1fr]">
