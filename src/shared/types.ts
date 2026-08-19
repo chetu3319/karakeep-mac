@@ -46,7 +46,12 @@ export const BookmarkContentSchema = z
     dateModified: z.string().nullable().optional(),
     // text / asset content types
     text: z.string().nullable().optional(),
-    htmlContent: z.string().nullable().optional()
+    htmlContent: z.string().nullable().optional(),
+    sourceUrl: z.string().nullable().optional(),
+    assetType: z.string().nullable().optional(),
+    assetId: z.string().nullable().optional(),
+    fileName: z.string().nullable().optional(),
+    size: z.number().nullable().optional()
   })
   .passthrough()
 export type BookmarkContent = z.infer<typeof BookmarkContentSchema>

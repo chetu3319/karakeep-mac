@@ -12,6 +12,8 @@ export const IPC = {
   API_GET_LISTS: 'api:get-lists',
   API_GET_TAGS: 'api:get-tags',
   API_GET_HIGHLIGHTS: 'api:get-highlights',
+  API_GET_LIST_BOOKMARKS: 'api:get-list-bookmarks',
+  API_GET_TAG_BOOKMARKS: 'api:get-tag-bookmarks',
   API_GET_ASSET: 'api:get-asset',
 
   // Window chrome

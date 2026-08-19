@@ -28,10 +28,14 @@ const api = {
       ipcRenderer.invoke(IPC.API_SEARCH_BOOKMARKS, params)
   },
   lists: {
-    get: (): Promise<KKList[]> => ipcRenderer.invoke(IPC.API_GET_LISTS)
+    get: (): Promise<KKList[]> => ipcRenderer.invoke(IPC.API_GET_LISTS),
+    getBookmarks: (listId: string, params: { limit?: number; cursor?: string }): Promise<BookmarksPage> =>
+      ipcRenderer.invoke(IPC.API_GET_LIST_BOOKMARKS, { listId, ...params })
   },
   tags: {
-    get: (): Promise<KKTag[]> => ipcRenderer.invoke(IPC.API_GET_TAGS)
+    get: (): Promise<KKTag[]> => ipcRenderer.invoke(IPC.API_GET_TAGS),
+    getBookmarks: (tagId: string, params: { limit?: number; cursor?: string }): Promise<BookmarksPage> =>
+      ipcRenderer.invoke(IPC.API_GET_TAG_BOOKMARKS, { tagId, ...params })
   },
   highlights: {
     get: (params: { cursor?: string; limit?: number }): Promise<{ highlights: Highlight[]; nextCursor?: string | null }> =>
@@ -76,8 +80,12 @@ const api = {
     onSwitchToWeb: (cb: () => void): void => {
       ipcRenderer.on('dev:smoke-switch-to-web', () => cb())
     },
+    onSelectList: (cb: () => void): void => {
+      ipcRenderer.on('dev:smoke-select-list', () => cb())
+    },
     notifyDetailReady: (): void => ipcRenderer.send('dev:smoke-detail-ready'),
-    notifyWebReady: (): void => ipcRenderer.send('dev:smoke-web-ready')
+    notifyWebReady: (): void => ipcRenderer.send('dev:smoke-web-ready'),
+    notifyListReady: (): void => ipcRenderer.send('dev:smoke-list-ready')
   }
 }
 

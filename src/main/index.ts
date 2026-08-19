@@ -98,6 +98,12 @@ function registerIpc(): void {
   ipcMain.handle(IPC.API_GET_HIGHLIGHTS, (_e, params: { cursor?: string; limit?: number }) =>
     requireClient().getHighlights(params)
   )
+  ipcMain.handle(IPC.API_GET_LIST_BOOKMARKS, (_e, args: { listId: string; limit?: number; cursor?: string }) =>
+    requireClient().getListBookmarks(args.listId, { limit: args.limit, cursor: args.cursor })
+  )
+  ipcMain.handle(IPC.API_GET_TAG_BOOKMARKS, (_e, args: { tagId: string; limit?: number; cursor?: string }) =>
+    requireClient().getTagBookmarks(args.tagId, { limit: args.limit, cursor: args.cursor })
+  )
   ipcMain.handle(IPC.API_GET_ASSET, (_e, assetId: string) => requireClient().getAssetDataUrl(assetId))
 
   ipcMain.on(IPC.WINDOW_MINIMIZE, () => mainWindow?.minimize())
@@ -175,6 +181,7 @@ async function runSmokeMode(win: BrowserWindow, pane: WebPaneManager): Promise<v
   // late `ipcMain.once` would miss an event that already fired.
   const detailReady = new Promise<void>((resolve) => ipcMain.once('dev:smoke-detail-ready', () => resolve()))
   const webReady = new Promise<void>((resolve) => ipcMain.once('dev:smoke-web-ready', () => resolve()))
+  const listReady = new Promise<void>((resolve) => ipcMain.once('dev:smoke-list-ready', () => resolve()))
 
   // Safety timeout in case the renderer-driven steps stall.
   const safety = setTimeout(() => {
@@ -206,6 +213,13 @@ async function runSmokeMode(win: BrowserWindow, pane: WebPaneManager): Promise<v
     writeFileSync(join(dir, '03b-web-pane-only.png'), paneOnly)
     console.log('[smoke] saved 03b-web-pane-only.png')
   }
+
+  // Step 4: select the first list in the sidebar and prove server-side
+  // list-scoped filtering (GET /lists/{id}/bookmarks) actually narrows the
+  // results shown, not just cosmetically highlighting the sidebar row.
+  win.webContents.send('dev:smoke-select-list')
+  await listReady
+  await shot('04-list-filtered.png')
 
   clearTimeout(safety)
   if (process.env['KK_SMOKE_HOLD'] === '1') {

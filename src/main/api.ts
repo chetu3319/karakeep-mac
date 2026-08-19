@@ -110,6 +110,24 @@ export class KarakeepApiClient {
     return BookmarksPageSchema.parse(data)
   }
 
+  async getListBookmarks(listId: string, params: { limit?: number; cursor?: string } = {}): Promise<BookmarksPage> {
+    const qs = new URLSearchParams()
+    if (params.limit) qs.set('limit', String(params.limit))
+    if (params.cursor) qs.set('cursor', params.cursor)
+    const suffix = qs.toString() ? `?${qs.toString()}` : ''
+    const data = await this.request<unknown>(`/lists/${listId}/bookmarks${suffix}`)
+    return BookmarksPageSchema.parse(data)
+  }
+
+  async getTagBookmarks(tagId: string, params: { limit?: number; cursor?: string } = {}): Promise<BookmarksPage> {
+    const qs = new URLSearchParams()
+    if (params.limit) qs.set('limit', String(params.limit))
+    if (params.cursor) qs.set('cursor', params.cursor)
+    const suffix = qs.toString() ? `?${qs.toString()}` : ''
+    const data = await this.request<unknown>(`/tags/${tagId}/bookmarks${suffix}`)
+    return BookmarksPageSchema.parse(data)
+  }
+
   async getLists(): Promise<KKList[]> {
     const data = await this.request<unknown>('/lists')
     return ListsResponseSchema.parse(data).lists
