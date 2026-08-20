@@ -2,8 +2,10 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/ipc'
 import type {
   AppConfig,
+  AssetUploadInput,
   AuthResult,
   Bookmark,
+  BookmarkListFilter,
   BookmarksPage,
   CreateBookmarkInput,
   CreateHighlightInput,
@@ -12,8 +14,10 @@ import type {
   KKList,
   KKTag,
   ListOrder,
+  UpdateBookmarkInput,
   UpdateListInput,
   UpdateTagInput,
+  UploadedAsset,
   WebPaneBounds,
   WebPaneState
 } from '../shared/types'
@@ -29,11 +33,16 @@ const api = {
     test: (): Promise<AuthResult> => ipcRenderer.invoke(IPC.AUTH_TEST)
   },
   bookmarks: {
-    list: (params: { limit?: number; cursor?: string }): Promise<BookmarksPage> =>
+    list: (params: { limit?: number; cursor?: string } & BookmarkListFilter): Promise<BookmarksPage> =>
       ipcRenderer.invoke(IPC.API_LIST_BOOKMARKS, params),
     search: (params: { q: string; limit?: number; cursor?: string }): Promise<BookmarksPage> =>
       ipcRenderer.invoke(IPC.API_SEARCH_BOOKMARKS, params),
-    create: (input: CreateBookmarkInput): Promise<Bookmark> => ipcRenderer.invoke(IPC.API_CREATE_BOOKMARK, input)
+    get: (id: string): Promise<Bookmark> => ipcRenderer.invoke(IPC.API_GET_BOOKMARK, id),
+    create: (input: CreateBookmarkInput): Promise<Bookmark> => ipcRenderer.invoke(IPC.API_CREATE_BOOKMARK, input),
+    update: (id: string, input: UpdateBookmarkInput): Promise<Bookmark> =>
+      ipcRenderer.invoke(IPC.API_UPDATE_BOOKMARK, { id, input }),
+    delete: (id: string): Promise<void> => ipcRenderer.invoke(IPC.API_DELETE_BOOKMARK, id),
+    getLists: (bookmarkId: string): Promise<KKList[]> => ipcRenderer.invoke(IPC.API_GET_BOOKMARK_LISTS, bookmarkId)
   },
   lists: {
     get: (): Promise<KKList[]> => ipcRenderer.invoke(IPC.API_GET_LISTS),
@@ -75,7 +84,8 @@ const api = {
   },
   assets: {
     get: (assetId: string): Promise<string> => ipcRenderer.invoke(IPC.API_GET_ASSET, assetId),
-    getBytes: (assetId: string): Promise<ArrayBuffer> => ipcRenderer.invoke(IPC.API_GET_ASSET_BYTES, assetId)
+    getBytes: (assetId: string): Promise<ArrayBuffer> => ipcRenderer.invoke(IPC.API_GET_ASSET_BYTES, assetId),
+    upload: (input: AssetUploadInput): Promise<UploadedAsset> => ipcRenderer.invoke(IPC.API_UPLOAD_ASSET, input)
   },
   window: {
     minimize: (): void => ipcRenderer.send(IPC.WINDOW_MINIMIZE),

@@ -8,10 +8,13 @@ import { buildAppMenu } from './menu'
 import { WebPaneManager } from './webpane'
 import { IPC } from '../shared/ipc'
 import type {
+  AssetUploadInput,
   AuthResult,
+  BookmarkListFilter,
   CreateBookmarkInput,
   CreateListInput,
   ListOrder,
+  UpdateBookmarkInput,
   UpdateListInput,
   UpdateTagInput,
   WebPaneBounds
@@ -95,7 +98,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle(IPC.API_LIST_BOOKMARKS, (_e, params: { limit?: number; cursor?: string }) =>
+  ipcMain.handle(IPC.API_LIST_BOOKMARKS, (_e, params: { limit?: number; cursor?: string } & BookmarkListFilter) =>
     requireClient().listBookmarks(params)
   )
   ipcMain.handle(IPC.API_SEARCH_BOOKMARKS, (_e, params: { q: string; limit?: number; cursor?: string }) =>
@@ -115,6 +118,10 @@ function registerIpc(): void {
   ipcMain.handle(IPC.API_GET_TAG_BOOKMARKS, (_e, args: { tagId: string; limit?: number; cursor?: string }) =>
     requireClient().getTagBookmarks(args.tagId, { limit: args.limit, cursor: args.cursor })
   )
+  ipcMain.handle(IPC.API_GET_BOOKMARK, (_e, id: string) => requireClient().getBookmark(id))
+  ipcMain.handle(IPC.API_GET_BOOKMARK_LISTS, (_e, bookmarkId: string) =>
+    requireClient().getBookmarkLists(bookmarkId)
+  )
   ipcMain.handle(IPC.API_GET_ASSET, (_e, assetId: string) => requireClient().getAssetDataUrl(assetId))
   ipcMain.handle(IPC.API_GET_ASSET_BYTES, (_e, assetId: string) => requireClient().getAssetBytes(assetId))
 
@@ -131,6 +138,11 @@ function registerIpc(): void {
   ipcMain.handle(IPC.API_DELETE_HIGHLIGHT, (_e, id: string) => requireClient().deleteHighlight(id))
 
   ipcMain.handle(IPC.API_CREATE_BOOKMARK, (_e, input: CreateBookmarkInput) => requireClient().createBookmark(input))
+  ipcMain.handle(IPC.API_UPDATE_BOOKMARK, (_e, args: { id: string; input: UpdateBookmarkInput }) =>
+    requireClient().updateBookmark(args.id, args.input)
+  )
+  ipcMain.handle(IPC.API_DELETE_BOOKMARK, (_e, id: string) => requireClient().deleteBookmark(id))
+  ipcMain.handle(IPC.API_UPLOAD_ASSET, (_e, input: AssetUploadInput) => requireClient().uploadAsset(input))
   ipcMain.handle(IPC.API_CREATE_LIST, (_e, input: CreateListInput) => requireClient().createList(input))
   ipcMain.handle(IPC.API_UPDATE_LIST, (_e, args: { id: string; input: UpdateListInput }) =>
     requireClient().updateList(args.id, args.input)

@@ -12,19 +12,26 @@ import {
   TagSchema,
   TagsResponseSchema,
   UserSchema,
+  type AssetUploadInput,
   type Bookmark,
+  type BookmarkListFilter,
   type BookmarksPage,
   type CreateBookmarkInput,
   type CreateListInput,
   type Highlight,
   type KKList,
   type KKTag,
+  type UpdateBookmarkInput,
   type UpdateListInput,
   type UpdateTagInput,
+  type UploadedAsset,
   type User
 } from '../shared/types'
 
 const DEFAULT_TIMEOUT_MS = 15000
+// Uploads carry whole files, so they get a longer leash than a JSON call —
+// a 40MB PDF over a home connection will not finish inside 15 seconds.
+const UPLOAD_TIMEOUT_MS = 120000
 
 export interface ApiClientConfig {
   baseUrl: string
@@ -95,18 +102,78 @@ export class KarakeepApiClient {
     }
   }
 
+  /**
+   * Multipart sibling of `request`. Deliberately does NOT go through it: the
+   * shared helper hard-codes `Content-Type: application/json`, and a
+   * multipart POST needs fetch to generate its own boundary header, which it
+   * only does when no Content-Type is supplied.
+   */
+  private async requestMultipart<T>(endpoint: string, form: FormData, timeout?: number): Promise<T> {
+    const { baseUrl, apiKey, customHeaders } = this.config
+    if (!baseUrl || !apiKey) {
+      throw new ApiError('Karakeep is not configured. Please set the server address and API key.')
+    }
+
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), timeout || UPLOAD_TIMEOUT_MS)
+    try {
+      const response = await fetch(`${baseUrl.replace(/\/$/, '')}/api/v1${endpoint}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, ...(customHeaders || {}) },
+        body: form,
+        signal: controller.signal
+      })
+      if (!response.ok) {
+        const text = await response.text().catch(() => '')
+        throw new ApiError(`API error ${response.status}: ${text || response.statusText}`, response.status)
+      }
+      return (await response.json()) as T
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') {
+        throw new ApiError('Upload timed out. Check your server address and network connection.')
+      }
+      throw e
+    } finally {
+      clearTimeout(timeoutId)
+    }
+  }
+
   async getMe(): Promise<User> {
     const data = await this.request<unknown>('/users/me')
     return UserSchema.parse(data)
   }
 
-  async listBookmarks(params: { limit?: number; cursor?: string } = {}): Promise<BookmarksPage> {
+  async listBookmarks(
+    params: { limit?: number; cursor?: string } & BookmarkListFilter = {}
+  ): Promise<BookmarksPage> {
     const qs = new URLSearchParams()
     if (params.limit) qs.set('limit', String(params.limit))
     if (params.cursor) qs.set('cursor', params.cursor)
+    // Sent only when defined: `archived=false` and "no archived filter" are
+    // genuinely different queries here, so an undefined flag must not
+    // stringify into the URL as one or the other.
+    if (params.archived !== undefined) qs.set('archived', String(params.archived))
+    if (params.favourited !== undefined) qs.set('favourited', String(params.favourited))
     const suffix = qs.toString() ? `?${qs.toString()}` : ''
     const data = await this.request<unknown>(`/bookmarks${suffix}`)
     return BookmarksPageSchema.parse(data)
+  }
+
+  /**
+   * One bookmark, always fresh. The detail pane reads through this rather
+   * than rendering the row object the list handed it: once the pane can
+   * edit a bookmark, a snapshot taken at selection time goes stale the
+   * first time anything is changed from anywhere else.
+   */
+  async getBookmark(id: string): Promise<Bookmark> {
+    const data = await this.request<unknown>(`/bookmarks/${id}`)
+    return BookmarkSchema.parse(data)
+  }
+
+  /** The lists a single bookmark belongs to — drives the detail pane's chips. */
+  async getBookmarkLists(bookmarkId: string): Promise<KKList[]> {
+    const data = await this.request<unknown>(`/bookmarks/${bookmarkId}/lists`)
+    return ListsResponseSchema.parse(data).lists
   }
 
   async searchBookmarks(params: { q: string; limit?: number; cursor?: string }): Promise<BookmarksPage> {
@@ -205,10 +272,50 @@ export class KarakeepApiClient {
   // DELETE /bookmarks/{id}/tags 200 -> { detached: string[] }, PATCH /tags
   // 200 -> { id, name } (note: no numBookmarks on the write response, which
   // is why TagSchema keeps that field optional), DELETE /tags 204.
+  //
+  // Re-probed 2026-08-20 for the bookmark-level writes, same method
+  // (throwaway bookmarks, deleted afterwards):
+  // - PATCH /bookmarks/{id} 200 -> the whole updated bookmark. Accepts any
+  //   subset of { archived, favourited, title, note, summary }; a follow-up
+  //   GET confirms each field actually persisted.
+  // - DELETE /bookmarks/{id} 204 (empty body); a follow-up GET 404s.
+  // - POST /assets (multipart, field `file`) 200 ->
+  //   { assetId, contentType, size, fileName }. The server sniffs the bytes
+  //   and reports its own contentType, ignoring the declared one, and 400s
+  //   ({"error":"Unsupported asset type"}) on anything that isn't an image
+  //   or a PDF.
+  // - POST /bookmarks with { type: 'asset', assetType, assetId, fileName }
+  //   201. `assetType` is a closed enum of 'image' | 'pdf' — anything else
+  //   400s with a ZodError listing those two.
+  // - GET /bookmarks/{id}/lists 200 -> { lists: [...] }, same list shape as
+  //   GET /lists.
+  // - GET /bookmarks?archived=&favourited= both filter server-side. Omitting
+  //   `archived` returns archived and unarchived rows mixed together.
 
   async createBookmark(data: CreateBookmarkInput): Promise<Bookmark> {
     const res = await this.request<unknown>('/bookmarks', { method: 'POST', body: data })
     return BookmarkSchema.parse(res)
+  }
+
+  async updateBookmark(id: string, data: UpdateBookmarkInput): Promise<Bookmark> {
+    const res = await this.request<unknown>(`/bookmarks/${id}`, { method: 'PATCH', body: data })
+    return BookmarkSchema.parse(res)
+  }
+
+  async deleteBookmark(id: string): Promise<void> {
+    await this.request<unknown>(`/bookmarks/${id}`, { method: 'DELETE' })
+  }
+
+  /**
+   * Uploads one file and returns the stored asset. Creating a bookmark from
+   * a file is two steps: upload here, then POST /bookmarks with
+   * { type: 'asset', assetId, assetType }. `assetKindFor` maps the server's
+   * sniffed contentType onto the assetType enum that step needs.
+   */
+  async uploadAsset(input: AssetUploadInput): Promise<UploadedAsset> {
+    const form = new FormData()
+    form.append('file', new Blob([input.data], { type: input.mimeType }), input.fileName)
+    return await this.requestMultipart<UploadedAsset>('/assets', form)
   }
 
   async createList(data: CreateListInput): Promise<KKList> {
