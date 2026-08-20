@@ -1,0 +1,30 @@
+appId: com.karakeep.desktop
+productName: Karakeep
+directories:
+  output: release
+  buildResources: build-resources
+files:
+  - out/**/*
+  - package.json
+  # Never ship dev credentials or verification artifacts.
+  - '!.env.local'
+  - '!tmp-screenshots/**'
+  - '!reference/**'
+  - '!scripts/**'
+  - '!src/**'
+  # The renderer is bundled into out/renderer, so its dependencies (react,
+  # tanstack, the whole @embedpdf tree and its pdfium wasm) are already in
+  # there — shipping node_modules as well doubled the asar to 190 MB for a
+  # second, unused copy. Only what the *main* bundle requires at runtime
+  # needs to survive; electron-vite externalizes those rather than inlining
+  # them, and today that list is exactly zod.
+  - '!node_modules/**'
+  - 'node_modules/zod/**'
+mac:
+  target:
+    - target: dir
+      arch: [arm64]
+  category: public.app-category.productivity
+  # Unsigned local build: no Developer ID account yet, so no signing or
+  # notarization. Gatekeeper will require right-click > Open on first launch.
+  identity: null

@@ -1,0 +1,1275 @@
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { EmbedPDF, useDocumentState, type PluginBatchRegistrations } from '@embedpdf/core/react'
+import { usePdfiumEngine } from '@embedpdf/engines/react'
+import { DocumentManagerPluginPackage } from '@embedpdf/plugin-document-manager/react'
+import {
+  GlobalPointerProvider,
+  InteractionManagerPluginPackage,
+  PagePointerProvider
+} from '@embedpdf/plugin-interaction-manager/react'
+import { RenderLayer, RenderPluginPackage } from '@embedpdf/plugin-render/react'
+import { Scroller, ScrollPluginPackage, useScroll, type PageLayout } from '@embedpdf/plugin-scroll/react'
+import {
+  SelectionLayer,
+  SelectionPluginPackage,
+  rectsWithinSlice,
+  useSelectionCapability,
+  type SelectionSelectionMenuProps
+} from '@embedpdf/plugin-selection/react'
+import { Viewport, ViewportPluginPackage } from '@embedpdf/plugin-viewport/react'
+import { ZoomMode, ZoomPluginPackage, useZoom } from '@embedpdf/plugin-zoom/react'
+import type { PdfDocumentObject, PdfEngine, PdfPageGeometry, Rect } from '@embedpdf/models'
+// The wasm ships inside the package; loading it from disk rather than the
+// default jsdelivr URL keeps the viewer working offline and keeps the app from
+// reaching a host the user never pointed it at.
+import pdfiumWasmUrl from '@embedpdf/pdfium/pdfium.wasm?url'
+
+import {
+  DEFAULT_HIGHLIGHT_COLOR,
+  HIGHLIGHT_COLORS as COLORS,
+  ICON_CHECK,
+  ICON_COPY,
+  ICON_NOTE,
+  ICON_TRASH,
+  hexForColor,
+  highlightPopoverStylesheet,
+  placePopover
+} from '../../../shared/highlightUi'
+import type { Highlight } from '../../../shared/types'
+import { useCreateHighlight, useDeleteHighlight, useUpdateHighlight } from '../lib/queries'
+import {
+  buildPageIndex,
+  resolveAnchor,
+  spansForRange,
+  textForSpans,
+  toGlobal,
+  type AnchorQuality,
+  type PageIndex,
+  type PageSpan
+} from '../lib/pdfAnchor'
+
+/**
+ * The Scroller sizes each page wrapper itself and passes only the layout, so
+ * the render scale has to come back out of it: laid-out width over the page's
+ * intrinsic width.
+ */
+function scaleFor(doc: PdfDocumentObject | null, layout: PageLayout): number {
+  const size = doc?.pages[layout.pageIndex]?.size
+  if (!size || !size.width) return 1
+  return layout.rotatedWidth / size.width
+}
+
+/**
+ * The popover stylesheet is shared with the Web pane, and goes into the
+ * renderer document once. It is plain CSS rather than Tailwind classes for a
+ * reason worth remembering: the two panes have to look identical and only one
+ * of them can use Tailwind at all — and a Tailwind opacity step outside the
+ * scale (`bg-neutral-900/97`) compiles to nothing at all, which is how this
+ * popover once ended up fully transparent.
+ */
+const POPOVER_STYLE_ID = 'kk-highlight-popover-styles'
+
+function useHighlightPopoverStyles(): void {
+  useEffect(() => {
+    if (document.getElementById(POPOVER_STYLE_ID)) return
+    const el = document.createElement('style')
+    el.id = POPOVER_STYLE_ID
+    el.textContent = highlightPopoverStylesheet()
+    document.head.appendChild(el)
+  }, [])
+}
+
+/** A highlight that has been located in this document. */
+interface PlacedHighlight {
+  highlight: Highlight
+  spans: PageSpan[]
+  quality: AnchorQuality
+}
+
+export interface PdfPaneProps {
+  assetId: string
+  fileName: string
+  bookmarkId: string
+  highlights: Highlight[]
+  /** Highlight to scroll to, set when one is clicked in the Preview tab. */
+  focusHighlightId?: string | null
+  onFocusHandled?: () => void
+  /** Reports which highlights could be located, for the Preview tab's list. */
+  onAnchorStatus?: (anchored: string[], missing: string[]) => void
+}
+
+export default function PdfPane(props: PdfPaneProps): React.JSX.Element {
+  const { assetId, fileName } = props
+  const [buffer, setBuffer] = useState<ArrayBuffer | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const { engine, isLoading: engineLoading, error: engineError } = usePdfiumEngine({
+    wasmUrl: pdfiumWasmUrl,
+    worker: true,
+    // Default is a CDN fetch per script; a bookmark manager has no business
+    // phoning a CDN to render a file the user already stored.
+    fontFallback: null
+  })
+
+  useEffect(() => {
+    let cancelled = false
+    setBuffer(null)
+    setLoadError(null)
+    window.kk.assets
+      .getBytes(assetId)
+      .then((bytes) => {
+        if (!cancelled) setBuffer(bytes)
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setLoadError(err.message || 'Could not download this PDF')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [assetId])
+
+  const plugins: PluginBatchRegistrations = useMemo(
+    () =>
+      buffer
+        ? ([
+            {
+              package: DocumentManagerPluginPackage,
+              config: {
+                initialDocuments: [{ buffer, name: fileName || 'document.pdf', documentId: assetId }]
+              }
+            },
+            { package: ViewportPluginPackage, config: { viewportGap: 16 } },
+            { package: ScrollPluginPackage, config: {} },
+            { package: RenderPluginPackage, config: {} },
+            { package: InteractionManagerPluginPackage, config: {} },
+            { package: SelectionPluginPackage, config: {} },
+            { package: ZoomPluginPackage, config: { defaultZoomLevel: ZoomMode.FitWidth } }
+          ] as PluginBatchRegistrations)
+        : [],
+    [buffer, assetId, fileName]
+  )
+
+  if (loadError || engineError) {
+    return <PdfMessage tone="error">{loadError || engineError?.message || 'PDF engine failed to start'}</PdfMessage>
+  }
+  if (!buffer || engineLoading || !engine) {
+    return <PdfMessage>Loading PDF…</PdfMessage>
+  }
+
+  return (
+    <div className="flex h-full flex-col bg-neutral-100 dark:bg-neutral-950">
+      <EmbedPDF engine={engine as PdfEngine} plugins={plugins}>
+        <PdfSurface {...props} engine={engine as PdfEngine} />
+      </EmbedPDF>
+    </div>
+  )
+}
+
+function PdfMessage({
+  children,
+  tone = 'muted'
+}: {
+  children: React.ReactNode
+  tone?: 'muted' | 'error'
+}): React.JSX.Element {
+  return (
+    <div
+      className={`flex h-full items-center justify-center p-6 text-center text-sm ${
+        tone === 'error' ? 'text-red-600 dark:text-red-400' : 'text-neutral-400'
+      }`}
+    >
+      {children}
+    </div>
+  )
+}
+
+/**
+ * Everything below here runs inside the EmbedPDF provider, so the plugin
+ * hooks are available.
+ */
+function PdfSurface({
+  assetId,
+  bookmarkId,
+  highlights,
+  focusHighlightId,
+  onFocusHandled,
+  onAnchorStatus,
+  engine
+}: PdfPaneProps & { engine: PdfEngine }): React.JSX.Element {
+  const documentId = assetId
+  useHighlightPopoverStyles()
+  const docState = useDocumentState(documentId)
+  const doc = docState?.document ?? null
+  const { provides: selection } = useSelectionCapability()
+  const { provides: scroll, state: scrollState } = useScroll(documentId)
+  // The scroll plugin only knows the page count once it has laid pages out;
+  // the document has known it since it opened.
+  const totalPages = doc?.pageCount ?? scrollState.totalPages
+  const { provides: zoom, state: zoomState } = useZoom(documentId)
+
+  const createHighlight = useCreateHighlight()
+  const updateHighlight = useUpdateHighlight()
+  const deleteHighlight = useDeleteHighlight()
+
+  const [index, setIndex] = useState<PageIndex | null>(null)
+  const [indexing, setIndexing] = useState<{ done: number; total: number } | null>(null)
+  const geometry = useRef<Map<number, PdfPageGeometry>>(new Map())
+  const pageTextCache = useRef<Map<number, string>>(new Map())
+  const [placed, setPlaced] = useState<PlacedHighlight[]>([])
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const lastCreatedId = useRef<string | null>(null)
+  const [flashId, setFlashId] = useState<string | null>(null)
+
+  // ── Text index ────────────────────────────────────────────────────────────
+  // One pass over the document's geometry, which gives both the glyph counts
+  // the offsets are built from and the rects the overlay draws.
+  useEffect(() => {
+    if (!doc) return
+    let cancelled = false
+    setIndex(null)
+    setIndexing({ done: 0, total: doc.pages.length })
+    geometry.current = new Map()
+    pageTextCache.current = new Map()
+
+    void buildPageIndex(engine, doc, (done, total) => {
+      if (!cancelled) setIndexing({ done, total })
+    })
+      .then(({ index: built, geometry: geo }) => {
+        if (cancelled) return
+        geometry.current = geo
+        setIndex(built)
+        setIndexing(null)
+      })
+      .catch(() => {
+        if (!cancelled) setIndexing(null)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [doc, engine])
+
+  const pageText = useCallback(
+    async (page: number): Promise<string> => {
+      const cached = pageTextCache.current.get(page)
+      if (cached !== undefined) return cached
+      if (!doc || !index) return ''
+      const count = index.pageCounts[page] ?? 0
+      const text = count === 0 ? '' : await textForSpans(engine, doc, [{ page, from: 0, to: count - 1 }])
+      pageTextCache.current.set(page, text)
+      return text
+    },
+    [doc, engine, index]
+  )
+
+  // ── Locate stored highlights ──────────────────────────────────────────────
+  useEffect(() => {
+    if (!doc || !index) return
+    let cancelled = false
+
+    void (async () => {
+      const results: PlacedHighlight[] = []
+      for (const highlight of highlights) {
+        const anchor = await resolveAnchor(engine, doc, index, pageText, highlight)
+        results.push({ highlight, spans: anchor.spans, quality: anchor.quality })
+      }
+      if (cancelled) return
+      setPlaced(results)
+      onAnchorStatus?.(
+        results.filter((r) => r.quality !== 'missing').map((r) => r.highlight.id),
+        results.filter((r) => r.quality === 'missing').map((r) => r.highlight.id)
+      )
+    })()
+
+    return () => {
+      cancelled = true
+    }
+    // `onAnchorStatus` is a render-stable callback from the parent; including
+    // it would re-run the whole resolve pass on every parent render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc, index, highlights, engine, pageText])
+
+  // ── Jump to a highlight picked in the Preview tab ──────────────────────────
+  useEffect(() => {
+    if (!focusHighlightId || !scroll) return
+    const target = placed.find((p) => p.highlight.id === focusHighlightId)
+    if (!target || target.spans.length === 0) {
+      onFocusHandled?.()
+      return
+    }
+    const span = target.spans[0]
+    const geo = geometry.current.get(span.page)
+    const rect = geo ? rectsWithinSlice(geo, span.from, span.to)[0] : undefined
+    scroll.scrollToPage({
+      pageNumber: span.page + 1,
+      pageCoordinates: rect ? { x: rect.origin.x, y: rect.origin.y } : undefined,
+      behavior: 'smooth',
+      alignY: 30
+    })
+    setActiveId(target.highlight.id)
+    setFlashId(target.highlight.id)
+    const timer = setTimeout(() => setFlashId(null), 1600)
+    onFocusHandled?.()
+    return () => clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusHighlightId, placed, scroll])
+
+  // ── Creating a highlight from the current selection ────────────────────────
+  const createFromSelection = useCallback(
+    async (color: string, withNote: boolean): Promise<string | null> => {
+      if (!selection || !index || !doc) return null
+      const scope = selection.forDocument(documentId)
+      const range = scope.getState().selection
+      if (!range) {
+        if (window.kk.dev.isSmoke) console.log('[smoke-pdf] createFromSelection: selection was already gone')
+        return null
+      }
+
+      const a = toGlobal(index, range.start.page, range.start.index)
+      const b = toGlobal(index, range.end.page, range.end.index)
+      const start = Math.min(a, b)
+      const end = Math.max(a, b) + 1
+
+      const text = (await textForSpans(engine, doc, spansForRange(index, start, end))).trim()
+      if (!text) return null
+
+      const created = await createHighlight.mutateAsync({
+        bookmarkId,
+        startOffset: start,
+        endOffset: end,
+        color,
+        text
+      })
+      scope.clear()
+      lastCreatedId.current = created.id
+      setActiveId(created.id)
+      if (withNote) setNoteDraftFor(created.id)
+      return created.id
+    },
+    [selection, index, doc, documentId, engine, bookmarkId, createHighlight]
+  )
+
+  const [noteDraftFor, setNoteDraftFor] = useState<string | null>(null)
+
+  // Dev smoke only: announce readiness, and on request drive the exact path a
+  // user drives — select text in the page, then create a highlight from it.
+  const smokeBound = useRef(false)
+  useEffect(() => {
+    if (!window.kk.dev.isSmoke || !index || !selection || !doc) return
+    window.kk.dev.notifyPdfReady()
+    // ipcRenderer.on has no removal here, so bind the handlers once.
+    if (smokeBound.current) return
+    smokeBound.current = true
+    window.kk.dev.onPdfHighlight(() => {
+      void (async () => {
+        try {
+        // Drive the *pointer* path, not `setSelection`: a programmatic
+        // selection skips the interaction manager entirely, which is how a
+        // completely dead text-selection path once passed this test.
+        const scope = selection.forDocument(documentId)
+        const geo = geometry.current.get(0)
+        const pageEl = document.querySelector('[data-pdf-page="0"]')
+        console.log(`[smoke-pdf] drag start: geo=${!!geo} pageEl=${!!pageEl}`)
+        // Synthetic PointerEvents can never trigger a native image drag, so
+        // this bug is invisible to the drag below. Assert the DOM condition
+        // that permits it instead.
+        const draggable = pageEl
+          ? Array.from(pageEl.querySelectorAll('img')).filter((img) => img.draggable)
+          : []
+        if (draggable.length > 0) {
+          console.error(`[smoke-pdf] ${draggable.length} draggable image(s) on the page — native drag will eat the gesture`)
+        } else {
+          console.log('[smoke-pdf] no natively draggable images on the page')
+        }
+        if (!geo || !pageEl) {
+          window.kk.dev.notifyPdfHighlighted('')
+          return
+        }
+        const box = pageEl.getBoundingClientRect()
+        const pageWidth = doc.pages[0]?.size.width || box.width
+        const pageScale = box.width / pageWidth
+        const upTo = Math.min(40, (index.pageCounts[0] ?? 1) - 1)
+        const rects = rectsWithinSlice(geo, 0, upTo)
+        const first = rects[0]
+        const last = rects[rects.length - 1]
+        if (!first || !last) {
+          window.kk.dev.notifyPdfHighlighted('')
+          return
+        }
+        // Real-input probe: press and move over the text and see whether the
+        // browser starts a native drag. This is the failure a user hits and
+        // the one the synthetic drag below cannot see.
+        let nativeDrag = false
+        const onDragStart = (): void => {
+          nativeDrag = true
+        }
+        pageEl.addEventListener('dragstart', onDragStart)
+        await window.kk.dev.realInputOnPdf({
+          x: box.left + (first.origin.x + 4) * pageScale,
+          y: box.top + (first.origin.y + first.size.height / 2) * pageScale
+        })
+        pageEl.removeEventListener('dragstart', onDragStart)
+        if (nativeDrag) {
+          console.error('[smoke-pdf] real input started a NATIVE DRAG — text selection is broken')
+          window.kk.dev.notifyPdfHighlighted('')
+          return
+        }
+        console.log('[smoke-pdf] real input did not start a native drag')
+        scope.clear()
+
+        const drag = {
+          x1: box.left + (first.origin.x + 1) * pageScale,
+          y1: box.top + (first.origin.y + first.size.height / 2) * pageScale,
+          x2: box.left + (last.origin.x + last.size.width - 1) * pageScale,
+          y2: box.top + (last.origin.y + last.size.height / 2) * pageScale
+        }
+
+        // Dispatch the drag as real DOM pointer events on the page element.
+        // Driving it from the main process instead (sendInputEvent, or the
+        // debugger's Input domain) looks more realistic but is useless here:
+        // Chromium coalesced twelve synthesized moves down to one, so the
+        // selection never got past the anchor glyph. These land one for one
+        // on the very listeners the interaction manager registers.
+        const dispatch = (type: string, x: number, y: number, buttons: number): void => {
+          pageEl.dispatchEvent(
+            new PointerEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              clientX: x,
+              clientY: y,
+              button: 0,
+              buttons,
+              pointerId: 1,
+              pointerType: 'mouse',
+              isPrimary: true
+            })
+          )
+        }
+        dispatch('pointerdown', drag.x1, drag.y1, 1)
+        const steps = 12
+        for (let i = 1; i <= steps; i++) {
+          dispatch(
+            'pointermove',
+            drag.x1 + ((drag.x2 - drag.x1) * i) / steps,
+            drag.y1 + ((drag.y2 - drag.y1) * i) / steps,
+            1
+          )
+          await new Promise((r) => setTimeout(r, 10))
+        }
+        dispatch('pointerup', drag.x2, drag.y2, 0)
+        await new Promise((r) => setTimeout(r, 200))
+        console.log(`[smoke-pdf] dispatched drag ${JSON.stringify(drag)}; selection=${!!scope.getState().selection}`)
+        if (!scope.getState().selection) {
+          console.error('[smoke-pdf] no selection after drag')
+          window.kk.dev.notifyPdfHighlighted('')
+          return
+        }
+
+        const picked = (await scope.getSelectedText().toPromise()).join('')
+        console.log(`[smoke-pdf] drag selected ${picked.length} chars: ${JSON.stringify(picked.slice(0, 80))}`)
+        if (picked.length <= 1) {
+          console.error('[smoke-pdf] drag did not extend the selection')
+          window.kk.dev.notifyPdfHighlighted('')
+          return
+        }
+        if (!scope.getState().selection) {
+          console.error('[smoke-pdf] pointer drag produced no selection')
+          window.kk.dev.notifyPdfHighlighted('')
+          return
+        }
+        // Click the toolbar the way a user does. Calling createFromSelection()
+        // directly here is what let a completely unclickable toolbar pass:
+        // the press has to travel through the same listeners the page binds.
+        const swatch = document.querySelector<HTMLElement>('[data-kk-swatch="yellow"]')
+        const noteButton = document.querySelector<HTMLElement>('[data-kk-note]')
+        if (!swatch || !noteButton) {
+          console.error('[smoke-pdf] selection toolbar did not appear after the drag')
+          window.kk.dev.notifyPdfHighlighted('')
+          return
+        }
+        lastCreatedId.current = null
+        // Click the swatch with real OS-level input at its own coordinates.
+        // Synthetic events are not good enough here: a press that a user makes
+        // reaches the page's native listeners exactly as the browser routes
+        // it, which is the whole question.
+        const swatchBox = swatch.getBoundingClientRect()
+        await window.kk.dev.realClickOnPdf({
+          x: swatchBox.left + swatchBox.width / 2,
+          y: swatchBox.top + swatchBox.height / 2
+        })
+        // The click has to survive: if the press cleared the selection, the
+        // toolbar unmounts and nothing is ever created.
+        for (let i = 0; i < 40 && !lastCreatedId.current; i++) {
+          await new Promise((r) => setTimeout(r, 100))
+        }
+        const id = lastCreatedId.current
+        if (!id) {
+          console.error(
+            '[smoke-pdf] toolbar click produced no highlight — the press was swallowed ' +
+              `(toolbar still mounted: ${document.contains(swatch)}, selection alive: ${!!scope.getState().selection})`
+          )
+          window.kk.dev.notifyPdfHighlighted('')
+          return
+        }
+        console.log('[smoke-pdf] toolbar click created a highlight')
+        await updateHighlight.mutateAsync({ id, input: { note: 'smoke note' }, bookmarkId })
+
+        // The popover has to be *painted* and reachable, not merely mounted.
+        // The version before this one compiled its background away entirely
+        // (a Tailwind opacity step outside the scale silently produces no
+        // rule at all) and stayed invisible while still hit-testing — a state
+        // no assertion about React output would have caught.
+        await new Promise((r) => setTimeout(r, 500))
+        const popEl = (): HTMLElement | null => document.querySelector<HTMLElement>('.kh-pop')
+        const pop = popEl()
+        if (!pop) {
+          console.error('[smoke-pdf] highlight popover did not open after creating a highlight')
+        } else {
+          // One highlight, one popover. Every mounted page used to render a
+          // copy of the active highlight's popover, and the pages that don't
+          // contain it have nothing to anchor against — so a second, unplaced
+          // copy sat in the corner of the window.
+          const all = document.querySelectorAll<HTMLElement>('.kh-pop')
+          if (all.length !== 1) {
+            console.error(`[smoke-pdf] ${all.length} popovers in the DOM — expected exactly one`)
+          } else {
+            console.log('[smoke-pdf] exactly one popover in the DOM')
+          }
+
+          const bg = getComputedStyle(pop).backgroundColor
+          const alpha = Number(/rgba?\([^)]*?,\s*([\d.]+)\s*\)/.exec(bg)?.[1] ?? '1')
+          if (alpha < 0.5) console.error(`[smoke-pdf] popover background is transparent: ${bg}`)
+          else console.log(`[smoke-pdf] popover background ${bg}`)
+
+          const r = pop.getBoundingClientRect()
+          const onScreen =
+            r.width > 4 &&
+            r.height > 4 &&
+            r.left >= 0 &&
+            r.top >= 0 &&
+            r.right <= window.innerWidth &&
+            r.bottom <= window.innerHeight
+          if (!onScreen) console.error(`[smoke-pdf] popover is not fully on screen: ${JSON.stringify(r)}`)
+          else console.log('[smoke-pdf] popover is fully on screen')
+
+          // A press anywhere else must dismiss it.
+          await window.kk.dev.realClickOnPdf({
+            x: Math.min(box.left + box.width * 0.5, window.innerWidth - 12),
+            y: Math.min(box.top + box.height * 0.92, window.innerHeight - 12)
+          })
+          await new Promise((r2) => setTimeout(r2, 350))
+          if (popEl()) console.error('[smoke-pdf] popover survived a press outside it')
+          else console.log('[smoke-pdf] popover dismissed on outside press')
+
+          // And pressing the highlight itself must bring it back.
+          const mark = document.querySelector<HTMLElement>(`[data-kk-mark="${id}"]`)
+          if (!mark) {
+            console.error('[smoke-pdf] no mark rendered for the new highlight')
+          } else {
+            const mr = mark.getBoundingClientRect()
+            await window.kk.dev.realClickOnPdf({ x: mr.left + mr.width / 2, y: mr.top + mr.height / 2 })
+            await new Promise((r2) => setTimeout(r2, 350))
+            if (popEl()) console.log('[smoke-pdf] press on the highlight reopened its popover')
+            else console.error('[smoke-pdf] press on the highlight did not reopen its popover')
+          }
+        }
+        window.kk.dev.notifyPdfHighlighted(id)
+        } catch (err) {
+          // Never leave the driver waiting on a promise that already failed.
+          console.error(`[smoke-pdf] drag step threw: ${err instanceof Error ? err.message : String(err)}`)
+          window.kk.dev.notifyPdfHighlighted('')
+        }
+      })()
+    })
+    window.kk.dev.onPdfCleanup((id: string) => {
+      void deleteHighlight.mutateAsync({ id, bookmarkId }).then(
+        () => window.kk.dev.notifyPdfCleaned(true),
+        () => window.kk.dev.notifyPdfCleaned(false)
+      )
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [index, selection, doc])
+
+  const renderPage = useCallback(
+    (layout: PageLayout) => (
+      <PdfPage
+        key={layout.pageIndex}
+        pageIndex={layout.pageIndex}
+        scale={scaleFor(doc, layout)}
+        documentId={documentId}
+        placed={placed}
+        geometry={geometry.current}
+        activeId={activeId}
+        flashId={flashId}
+        noteDraftFor={noteDraftFor}
+        onActivate={(id) => {
+          setActiveId(id)
+          setNoteDraftFor(null)
+        }}
+        onDismiss={() => {
+          setActiveId(null)
+          setNoteDraftFor(null)
+        }}
+        onEditNote={(id) => setNoteDraftFor(id)}
+        onSaveNote={async (id, note) => {
+          await updateHighlight.mutateAsync({ id, input: { note }, bookmarkId })
+          setNoteDraftFor(null)
+        }}
+        onRecolor={async (id, color) => {
+          await updateHighlight.mutateAsync({ id, input: { color }, bookmarkId })
+        }}
+        onDelete={async (id) => {
+          setActiveId(null)
+          setNoteDraftFor(null)
+          await deleteHighlight.mutateAsync({ id, bookmarkId })
+        }}
+        onCreate={createFromSelection}
+      />
+    ),
+    [
+      doc,
+      documentId,
+      placed,
+      activeId,
+      flashId,
+      noteDraftFor,
+      updateHighlight,
+      deleteHighlight,
+      bookmarkId,
+      createFromSelection
+    ]
+  )
+
+  const highlightCount = placed.filter((p) => p.quality !== 'missing').length
+
+  return (
+    <>
+      <div className="flex items-center gap-2 border-b border-neutral-200 bg-white px-3 py-1.5 text-xs dark:border-neutral-800 dark:bg-neutral-900">
+        <button
+          type="button"
+          onClick={() => scroll?.scrollToPreviousPage()}
+          className="rounded px-1.5 py-0.5 text-neutral-500 hover:bg-neutral-100 disabled:opacity-40 dark:hover:bg-neutral-800"
+          disabled={scrollState.currentPage <= 1}
+          aria-label="Previous page"
+        >
+          ↑
+        </button>
+        <span className="tabular-nums text-neutral-500">
+          {scrollState.currentPage} / {totalPages || '—'}
+        </span>
+        <button
+          type="button"
+          onClick={() => scroll?.scrollToNextPage()}
+          className="rounded px-1.5 py-0.5 text-neutral-500 hover:bg-neutral-100 disabled:opacity-40 dark:hover:bg-neutral-800"
+          disabled={totalPages > 0 && scrollState.currentPage >= totalPages}
+          aria-label="Next page"
+        >
+          ↓
+        </button>
+
+        <span className="mx-1 h-4 w-px bg-neutral-200 dark:bg-neutral-800" />
+
+        <button
+          type="button"
+          onClick={() => zoom?.zoomOut()}
+          className="rounded px-1.5 py-0.5 text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+          aria-label="Zoom out"
+        >
+          −
+        </button>
+        <span className="w-10 text-center tabular-nums text-neutral-500">
+          {Math.round((zoomState?.currentZoomLevel ?? 1) * 100)}%
+        </span>
+        <button
+          type="button"
+          onClick={() => zoom?.zoomIn()}
+          className="rounded px-1.5 py-0.5 text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+          aria-label="Zoom in"
+        >
+          +
+        </button>
+        <button
+          type="button"
+          onClick={() => zoom?.requestZoom(ZoomMode.FitWidth)}
+          className="rounded px-1.5 py-0.5 text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+        >
+          Fit
+        </button>
+
+        <div className="ml-auto text-neutral-400">
+          {indexing
+            ? `Indexing text ${indexing.done}/${indexing.total}`
+            : highlightCount > 0
+              ? `${highlightCount} highlight${highlightCount === 1 ? '' : 's'}`
+              : 'Select text to highlight'}
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1">
+        <Viewport
+          documentId={documentId}
+          className="h-full w-full overflow-auto bg-neutral-100 dark:bg-neutral-950"
+        >
+          {/* The interaction manager only sees pointer events that come
+              through its providers — without them the selection plugin never
+              gets a pointer-down and text cannot be selected at all. */}
+          <GlobalPointerProvider documentId={documentId}>
+            <Scroller documentId={documentId} renderPage={renderPage} />
+          </GlobalPointerProvider>
+        </Viewport>
+      </div>
+    </>
+  )
+}
+
+interface PdfPageProps {
+  pageIndex: number
+  scale: number
+  documentId: string
+  placed: PlacedHighlight[]
+  geometry: Map<number, PdfPageGeometry>
+  activeId: string | null
+  flashId: string | null
+  noteDraftFor: string | null
+  onActivate: (id: string) => void
+  onDismiss: () => void
+  onEditNote: (id: string) => void
+  onSaveNote: (id: string, note: string) => Promise<void>
+  onRecolor: (id: string, color: string) => Promise<void>
+  onDelete: (id: string) => Promise<void>
+  onCreate: (color: string, withNote: boolean) => Promise<string | null>
+}
+
+function PdfPage({
+  pageIndex,
+  scale,
+  documentId,
+  placed,
+  geometry,
+  activeId,
+  flashId,
+  noteDraftFor,
+  onActivate,
+  onDismiss,
+  onEditNote,
+  onSaveNote,
+  onRecolor,
+  onDelete,
+  onCreate
+}: PdfPageProps): React.JSX.Element {
+  const geo = geometry.get(pageIndex)
+
+  // Rects live in unscaled page coordinates; the overlay is laid over the
+  // rendered page, so everything is multiplied up by the current scale.
+  const marks = useMemo(() => {
+    if (!geo) return []
+    return placed.flatMap(({ highlight, spans }) =>
+      spans
+        .filter((s) => s.page === pageIndex)
+        .flatMap((s) =>
+          rectsWithinSlice(geo, s.from, s.to).map((rect) => ({ highlight, rect }))
+        )
+    )
+  }, [geo, placed, pageIndex])
+
+  // Only the page the highlight starts on draws its popover. `placed` is
+  // document-wide, so without this every mounted page rendered one — and the
+  // pages that don't contain the highlight have no anchor to place it
+  // against, leaving a second copy stranded in the corner of the window.
+  const active = placed.find(
+    (p) =>
+      p.highlight.id === activeId &&
+      p.spans.length > 0 &&
+      Math.min(...p.spans.map((s) => s.page)) === pageIndex
+  )
+
+  /**
+   * The popover anchors to the whole highlight, not to its first line: a
+   * three-line highlight anchored to line one puts the popover in the middle
+   * of its own text. Union of every rect this highlight has on this page,
+   * converted to viewport coordinates for `placePopover`.
+   */
+  const activeAnchor = useCallback((): DOMRect | null => {
+    if (!active) return null
+    const own = marks.filter((m) => m.highlight.id === active.highlight.id)
+    if (own.length === 0) return null
+    const pageEl = document.querySelector(`[data-pdf-page="${pageIndex}"]`)
+    if (!pageEl) return null
+    const box = pageEl.getBoundingClientRect()
+    const left = Math.min(...own.map((m) => m.rect.origin.x)) * scale
+    const top = Math.min(...own.map((m) => m.rect.origin.y)) * scale
+    const right = Math.max(...own.map((m) => m.rect.origin.x + m.rect.size.width)) * scale
+    const bottom = Math.max(...own.map((m) => m.rect.origin.y + m.rect.size.height)) * scale
+    return new DOMRect(box.left + left, box.top + top, right - left, bottom - top)
+  }, [active, marks, pageIndex, scale])
+
+  return (
+    <PagePointerProvider
+      documentId={documentId}
+      pageIndex={pageIndex}
+      // Explicit: the provider otherwise converts client coordinates to page
+      // coordinates with the *document* scale, which is not the scale the
+      // zoom plugin actually laid this page out at. A mismatch puts every
+      // point a few percent off — enough that hit-testing lands between
+      // glyphs and a drag stops extending the selection.
+      scale={scale}
+      data-pdf-page={pageIndex}
+      // A page renders as an <img>, and Chromium drags images natively: press
+      // and move and you get a drag-and-drop of the page picture instead of a
+      // text selection. Worse, the drag swallows the rest of the pointer
+      // stream, so the selection plugin never sees pointerup — it stays in
+      // "selecting" state, follows the cursor with no button held, and never
+      // finalises, which is why no highlight toolbar ever appeared. Cancel it
+      // here, at the container, so it stays cancelled for anything the page
+      // renders.
+      onDragStart={(e) => e.preventDefault()}
+      className="relative h-full w-full select-none"
+    >
+      <RenderLayer
+        documentId={documentId}
+        pageIndex={pageIndex}
+        draggable={false}
+        style={{ position: 'absolute' }}
+      />
+
+      {/* Stored highlights, under the text layer so selection still works. */}
+      <div className="pointer-events-none absolute inset-0">
+        {marks.map(({ highlight, rect }, i) => (
+          <div
+            key={`${highlight.id}-${i}`}
+            onClick={() => onActivate(highlight.id)}
+            title={highlight.note || undefined}
+            // Marks the popover's outside-press check looks for: pressing one
+            // highlight while another's popover is open should switch to it,
+            // not merely dismiss.
+            data-kk-mark={highlight.id}
+            className={`pointer-events-auto cursor-pointer transition-[opacity,box-shadow] ${
+              flashId === highlight.id ? 'animate-pulse' : ''
+            }`}
+            style={{
+              position: 'absolute',
+              left: rect.origin.x * scale,
+              top: rect.origin.y * scale,
+              width: rect.size.width * scale,
+              height: rect.size.height * scale,
+              backgroundColor: hexForColor(highlight.color),
+              opacity: activeId === highlight.id ? 0.55 : 0.32,
+              mixBlendMode: 'multiply',
+              borderBottom: highlight.note ? `2px solid ${hexForColor(highlight.color)}` : undefined
+            }}
+          />
+        ))}
+      </div>
+
+      <SelectionLayer
+        documentId={documentId}
+        pageIndex={pageIndex}
+        scale={scale}
+        selectionMenu={(menu: SelectionSelectionMenuProps) =>
+          menu.selected ? <SelectionMenu rect={menu.rect} pageIndex={pageIndex} onCreate={onCreate} /> : null
+        }
+      />
+
+      {active && (
+        <HighlightPopover
+          highlight={active.highlight}
+          anchor={activeAnchor}
+          editingNote={noteDraftFor === active.highlight.id}
+          onEditNote={() => onEditNote(active.highlight.id)}
+          onSaveNote={(note) => onSaveNote(active.highlight.id, note)}
+          onRecolor={(color) => onRecolor(active.highlight.id, color)}
+          onDelete={() => onDelete(active.highlight.id)}
+          onDismiss={onDismiss}
+        />
+      )}
+    </PagePointerProvider>
+  )
+}
+
+// ───────────────────────── floating UI ─────────────────────────
+
+/**
+ * A popover in viewport coordinates, portalled to the document.
+ *
+ * Rendering it in the page's own tree was the source of two bugs at once. It
+ * inherited the page's stacking and clipping, so a popover near the bottom of
+ * a page was cut off with nowhere to flip to; and it sat inside the
+ * interaction manager's providers, where the selection plugin's own
+ * pointer-down handler could clear the selection out from under a press meant
+ * for a button. Out here it is a sibling of the viewport: nothing clips it,
+ * and page handlers never see its events at all.
+ *
+ * Position is recomputed every render (the popover changes size when it swaps
+ * between reading a note and editing one) and on scroll and resize, since the
+ * anchor is a moving target inside a scrolling viewport.
+ */
+function FloatingPopover({
+  anchor,
+  className,
+  onDismiss,
+  children
+}: {
+  anchor: () => DOMRect | null
+  className?: string
+  onDismiss?: () => void
+  children: React.ReactNode
+}): React.JSX.Element {
+  const [host] = useState(() => document.createElement('div'))
+  const el = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    // pointer-events: none so the host never swallows clicks meant for the
+    // page; the popover itself opts back in (`.kh-pop`).
+    host.style.cssText = 'position: fixed; inset: 0; z-index: 2147483647; pointer-events: none;'
+    document.body.appendChild(host)
+    return () => host.remove()
+  }, [host])
+
+  useLayoutEffect(() => {
+    const place = (): void => {
+      if (!el.current) return
+      const rect = anchor()
+      // An unplaceable popover is hidden rather than left at the top-left
+      // corner, which is where a `fixed` element with no coordinates lands.
+      el.current.style.visibility = rect ? 'visible' : 'hidden'
+      if (rect) placePopover(el.current, rect)
+    }
+    place()
+
+    let frame = 0
+    const queue = (): void => {
+      if (frame) return
+      frame = requestAnimationFrame(() => {
+        frame = 0
+        place()
+      })
+    }
+    window.addEventListener('scroll', queue, true)
+    window.addEventListener('resize', queue)
+    return () => {
+      if (frame) cancelAnimationFrame(frame)
+      window.removeEventListener('scroll', queue, true)
+      window.removeEventListener('resize', queue)
+    }
+  })
+
+  useEffect(() => {
+    if (!onDismiss) return
+    const onDown = (e: PointerEvent): void => {
+      if (el.current && e.composedPath().includes(el.current)) return
+      // A press on another highlight opens that one instead; letting this
+      // dismissal run first would just make it a two-click affair.
+      if ((e.target as Element)?.closest?.('[data-kk-mark]')) return
+      onDismiss()
+    }
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onDismiss()
+    }
+    document.addEventListener('pointerdown', onDown, true)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onDown, true)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [onDismiss])
+
+  return createPortal(
+    <div
+      ref={el}
+      // The interaction manager's own opt-out. Redundant now that the popover
+      // lives outside its providers, and kept deliberately: it costs nothing
+      // and it is the documented way to say "this is not page surface".
+      data-no-interaction
+      className={className ? `kh-pop ${className}` : 'kh-pop'}
+      onPointerDown={(e) => {
+        // Don't let a press on the toolbar drop the selection it was opened
+        // for — except in the fields that own their own selection.
+        if (!(e.target as HTMLElement).closest('.kh-ta, .kh-note-view')) e.preventDefault()
+      }}
+    >
+      {children}
+    </div>,
+    host
+  )
+}
+
+function Icon({ path }: { path: string }): React.JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d={path} />
+    </svg>
+  )
+}
+
+function PopButton({
+  label,
+  icon,
+  onClick,
+  danger,
+  iconOnly,
+  primary,
+  disabled,
+  ...rest
+}: {
+  label: string
+  icon?: string
+  onClick: () => void
+  danger?: boolean
+  iconOnly?: boolean
+  primary?: boolean
+  disabled?: boolean
+} & React.HTMLAttributes<HTMLButtonElement>): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      data-danger={danger ? '1' : undefined}
+      className={`kh-btn${iconOnly ? ' kh-icon-only' : ''}${primary ? ' kh-primary' : ''}`}
+      title={iconOnly ? label : undefined}
+      aria-label={iconOnly ? label : undefined}
+      {...rest}
+    >
+      {icon && <Icon path={icon} />}
+      {!iconOnly && <span>{label}</span>}
+    </button>
+  )
+}
+
+/** The colour row, shared by the selection toolbar and the highlight editor. */
+function SwatchRow({
+  active,
+  disabled,
+  onPick
+}: {
+  active: string | null
+  disabled?: boolean
+  onPick: (color: string) => void
+}): React.JSX.Element {
+  return (
+    <div className="kh-row">
+      {COLORS.map((c) => (
+        <button
+          key={c.name}
+          type="button"
+          disabled={disabled}
+          onClick={() => onPick(c.name)}
+          data-kk-swatch={c.name}
+          data-active={active === c.name ? '1' : undefined}
+          title={c.name[0].toUpperCase() + c.name.slice(1)}
+          aria-label={c.name[0].toUpperCase() + c.name.slice(1)}
+          className="kh-swatch"
+          style={{ backgroundColor: c.hex }}
+        >
+          {active === c.name && (
+            <svg viewBox="0 0 24 24" fill="none" stroke="rgba(0,0,0,0.65)" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round">
+              <path d={ICON_CHECK} />
+            </svg>
+          )}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/** Colour swatches + "Note", shown against a live text selection. */
+function SelectionMenu({
+  rect,
+  pageIndex,
+  onCreate
+}: {
+  rect: Rect
+  pageIndex: number
+  onCreate: (color: string, withNote: boolean) => Promise<string | null>
+}): React.JSX.Element {
+  const [busy, setBusy] = useState(false)
+
+  // `rect` is page-relative and already scaled; the popover is placed in
+  // viewport coordinates, so it needs the page's own position added.
+  const anchor = useCallback((): DOMRect | null => {
+    const pageEl = document.querySelector(`[data-pdf-page="${pageIndex}"]`)
+    if (!pageEl) return null
+    const box = pageEl.getBoundingClientRect()
+    return new DOMRect(
+      box.left + rect.origin.x,
+      box.top + rect.origin.y,
+      rect.size.width,
+      rect.size.height
+    )
+  }, [rect, pageIndex])
+
+  const run = async (color: string, withNote: boolean): Promise<void> => {
+    setBusy(true)
+    try {
+      await onCreate(color, withNote)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <FloatingPopover anchor={anchor}>
+      <SwatchRow active={null} disabled={busy} onPick={(color) => void run(color, false)} />
+      <div className="kh-sep" />
+      <PopButton
+        label="Note"
+        icon={ICON_NOTE}
+        disabled={busy}
+        onClick={() => void run(DEFAULT_HIGHLIGHT_COLOR, true)}
+        data-kk-note=""
+      />
+    </FloatingPopover>
+  )
+}
+
+/**
+ * Editor for an existing highlight.
+ *
+ * Same three states as the Web pane, for the same reasons: a highlight with a
+ * note shows the note (reading one shouldn't cost a trip through an editor),
+ * one without shows the actions, and editing is one explicit click away.
+ */
+function HighlightPopover({
+  highlight,
+  anchor,
+  editingNote,
+  onEditNote,
+  onSaveNote,
+  onRecolor,
+  onDelete,
+  onDismiss
+}: {
+  highlight: Highlight
+  anchor: () => DOMRect | null
+  editingNote: boolean
+  onEditNote: () => void
+  onSaveNote: (note: string) => Promise<void>
+  onRecolor: (color: string) => Promise<void>
+  onDelete: () => Promise<void>
+  onDismiss: () => void
+}): React.JSX.Element {
+  const [draft, setDraft] = useState(highlight.note || '')
+  const [busy, setBusy] = useState(false)
+  const textarea = useRef<HTMLTextAreaElement>(null)
+  const accent = hexForColor(highlight.color)
+
+  useEffect(() => {
+    setDraft(highlight.note || '')
+  }, [highlight.id, highlight.note])
+
+  useEffect(() => {
+    if (!editingNote) return
+    // After layout, so the popover doesn't jump under the caret.
+    const frame = requestAnimationFrame(() => {
+      const ta = textarea.current
+      if (!ta) return
+      ta.focus()
+      ta.setSelectionRange(ta.value.length, ta.value.length)
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [editingNote])
+
+  const save = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      await onSaveNote(draft.trim())
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const copy = (): void => {
+    void navigator.clipboard?.writeText(highlight.text || '').catch(() => undefined)
+    onDismiss()
+  }
+
+  if (editingNote) {
+    return (
+      <FloatingPopover anchor={anchor} className="kh-note-mode" onDismiss={onDismiss}>
+        <div className="kh-quote" style={{ '--kh-accent': accent } as React.CSSProperties}>
+          {highlight.text}
+        </div>
+        <textarea
+          ref={textarea}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault()
+              void save()
+            }
+          }}
+          placeholder="Add a note…"
+          className="kh-ta"
+        />
+        <div className="kh-row">
+          <span className="kh-hint">⌘↩ to save</span>
+          <div className="kh-spacer" />
+          {/* Cancel returns to the reading view rather than dismissing: it
+              confirms what is stored, and it is where Save lands too. */}
+          <PopButton label="Cancel" onClick={onDismiss} />
+          <PopButton label="Save" primary disabled={busy} onClick={() => void save()} />
+        </div>
+      </FloatingPopover>
+    )
+  }
+
+  if (highlight.note) {
+    return (
+      <FloatingPopover anchor={anchor} className="kh-read-mode" onDismiss={onDismiss}>
+        <div
+          className="kh-note-view"
+          tabIndex={0}
+          style={{ '--kh-accent': accent } as React.CSSProperties}
+        >
+          {highlight.note}
+        </div>
+        <div className="kh-toolbar">
+          <SwatchRow
+            active={highlight.color ?? null}
+            disabled={busy}
+            onPick={(color) => void onRecolor(color)}
+          />
+          <div className="kh-spacer" />
+          <PopButton label="Edit" icon={ICON_NOTE} onClick={onEditNote} />
+          <PopButton label="Copy highlighted text" icon={ICON_COPY} iconOnly onClick={copy} />
+          <PopButton
+            label="Delete highlight"
+            icon={ICON_TRASH}
+            iconOnly
+            danger
+            disabled={busy}
+            onClick={() => void onDelete()}
+          />
+        </div>
+      </FloatingPopover>
+    )
+  }
+
+  return (
+    <FloatingPopover anchor={anchor} onDismiss={onDismiss}>
+      <SwatchRow
+        active={highlight.color ?? null}
+        disabled={busy}
+        onPick={(color) => void onRecolor(color)}
+      />
+      <div className="kh-sep" />
+      <PopButton label="Note" icon={ICON_NOTE} onClick={onEditNote} />
+      <PopButton label="Copy" icon={ICON_COPY} onClick={copy} />
+      <PopButton
+        label="Delete"
+        icon={ICON_TRASH}
+        danger
+        disabled={busy}
+        onClick={() => void onDelete()}
+      />
+    </FloatingPopover>
+  )
+}

@@ -1,0 +1,18 @@
+node_modules/
+dist/
+out/
+release/
+.env.local
+.vite/
+*.log
+tmp-screenshots/
+out/
+*.tsbuildinfo
+
+.DS_Store
+
+# Local agent operating rules — names real bookmarks in a personal library.
+BOUNDARIES.md
+
+# Verbatim third-party sources, kept locally for reading. Not ours to redistribute.
+reference/

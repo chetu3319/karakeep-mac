@@ -1,0 +1,51 @@
+{
+  "name": "karakeep-desktop",
+  "version": "0.1.0",
+  "description": "Karakeep desktop app for macOS",
+  "main": "./out/main/index.js",
+  "author": "Karakeep Desktop",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "smoke": "node scripts/smoke-screenshot.mjs",
+    "package": "electron-vite build && electron-builder --mac"
+  },
+  "dependencies": {
+    "@embedpdf/core": "^2.15.0",
+    "@embedpdf/engines": "^2.15.0",
+    "@embedpdf/models": "^2.15.0",
+    "@embedpdf/pdfium": "^2.15.0",
+    "@embedpdf/plugin-annotation": "^2.15.0",
+    "@embedpdf/plugin-document-manager": "^2.15.0",
+    "@embedpdf/plugin-interaction-manager": "^2.15.0",
+    "@embedpdf/plugin-render": "^2.15.0",
+    "@embedpdf/plugin-scroll": "^2.15.0",
+    "@embedpdf/plugin-selection": "^2.15.0",
+    "@embedpdf/plugin-viewport": "^2.15.0",
+    "@embedpdf/plugin-zoom": "^2.15.0",
+    "@tanstack/react-query": "^5.59.0",
+    "@tanstack/react-virtual": "^3.10.8",
+    "electron-updater": "^6.3.9",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.2",
+    "autoprefixer": "^10.4.20",
+    "electron": "^32.1.2",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.13",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.8"
+  }
+}
