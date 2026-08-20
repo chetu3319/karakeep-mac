@@ -18,8 +18,14 @@ export const IPC = {
   API_GET_ASSET: 'api:get-asset',
   API_GET_ASSET_BYTES: 'api:get-asset-bytes', // raw bytes (PDFs) — data URLs are wasteful at book size
 
+  API_GET_BOOKMARK: 'api:get-bookmark',
+  API_GET_BOOKMARK_LISTS: 'api:get-bookmark-lists',
+
   // Writes
   API_CREATE_BOOKMARK: 'api:create-bookmark',
+  API_UPDATE_BOOKMARK: 'api:update-bookmark',
+  API_DELETE_BOOKMARK: 'api:delete-bookmark',
+  API_UPLOAD_ASSET: 'api:upload-asset',
   API_CREATE_LIST: 'api:create-list',
   API_UPDATE_LIST: 'api:update-list',
   API_DELETE_LIST: 'api:delete-list',

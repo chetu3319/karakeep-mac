@@ -144,6 +144,59 @@ export const HighlightsResponseSchema = z.object({
 export type CreateBookmarkInput =
   | { type: 'link'; url: string; title?: string; note?: string; tags?: { tagName: string }[] }
   | { type: 'text'; text: string; title?: string; tags?: { tagName: string }[] }
+  // `assetType` is a closed enum server-side: a POST with anything other than
+  // 'image' or 'pdf' comes back 400 with a ZodError naming those two options.
+  // The asset itself must already be uploaded (see UploadedAsset).
+  | { type: 'asset'; assetType: AssetKind; assetId: string; fileName?: string; title?: string }
+
+export type AssetKind = 'image' | 'pdf'
+
+/**
+ * Fields PATCH /bookmarks/{id} accepts. Every one is optional — the server
+ * patches only what's sent and returns the whole updated bookmark.
+ */
+export interface UpdateBookmarkInput {
+  archived?: boolean
+  favourited?: boolean
+  title?: string | null
+  note?: string | null
+  summary?: string | null
+}
+
+/**
+ * Response of POST /api/v1/assets (multipart, field name `file`).
+ * Note `contentType` is what the *server* sniffed from the bytes, not what
+ * the client declared — uploading a PNG while claiming image/webp still
+ * comes back as image/png. Derive the bookmark's assetType from this field
+ * rather than from the local file's extension or MIME type.
+ */
+export interface UploadedAsset {
+  assetId: string
+  contentType: string
+  size: number
+  fileName?: string | null
+}
+
+/** A file handed to the uploader, already read into memory by the renderer. */
+export interface AssetUploadInput {
+  fileName: string
+  mimeType: string
+  data: ArrayBuffer
+}
+
+/**
+ * Maps an uploaded asset's content type onto the `assetType` enum that
+ * POST /bookmarks accepts. Returns null for anything Karakeep can store as
+ * an asset but can't hang a bookmark off — the caller should surface that
+ * as "this file type can't be bookmarked" rather than guessing a kind and
+ * eating a 400.
+ */
+export function assetKindFor(contentType: string): AssetKind | null {
+  const normalized = contentType.split(';')[0].trim().toLowerCase()
+  if (normalized === 'application/pdf') return 'pdf'
+  if (normalized.startsWith('image/')) return 'image'
+  return null
+}
 
 export interface CreateListInput {
   name: string
@@ -168,6 +221,17 @@ export interface CreateHighlightInput {
 
 export interface UpdateTagInput {
   name: string
+}
+
+/**
+ * Server-side filters on GET /bookmarks. Verified live: both are honoured,
+ * and omitting `archived` returns archived and unarchived bookmarks mixed
+ * together — which is why the "All bookmarks" view passes archived: false
+ * explicitly rather than relying on the default.
+ */
+export interface BookmarkListFilter {
+  archived?: boolean
+  favourited?: boolean
 }
 
 // ─────────────────────────── Local-only list order ───────────────────────────

@@ -13,18 +13,29 @@ import {
   useUpdateTag
 } from '../lib/queries'
 import type { KKList, KKTag } from '../../../shared/types'
+import type { Selection } from '../lib/selection'
 import { buildByParent, nestUnder, orderedChildren, reorderAsSibling, wouldCycle, moveToRoot } from '../lib/listTree'
 import ConfirmDialog from './ConfirmDialog'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu'
 import { BOOKMARK_DRAG_MIME, currentBookmarkDrag, type BookmarkDragPayload } from '../lib/dragTypes'
+import { errMessage } from '../lib/errors'
 
 const LIST_DRAG_MIME = 'application/x-karakeep-list'
 const DEFAULT_LIST_ICON = '📁'
 
 interface SidebarProps {
-  selected: { type: 'all' } | { type: 'list'; id: string } | { type: 'tag'; id: string }
-  onSelect: (sel: SidebarProps['selected']) => void
+  selected: Selection
+  onSelect: (sel: Selection) => void
 }
+
+// The three feed-backed views, in the order they appear above the list
+// tree. Favourites and Archive are ordinary GET /bookmarks queries with a
+// filter, not saved searches — see lib/selection.ts.
+const FEED_VIEWS: { type: 'all' | 'favourites' | 'archived'; icon: string; label: string }[] = [
+  { type: 'all', icon: '📚', label: 'All bookmarks' },
+  { type: 'favourites', icon: '⭐', label: 'Favourites' },
+  { type: 'archived', icon: '🗄', label: 'Archive' }
+]
 
 type DropMode = 'before' | 'after' | 'nest'
 type DropHint = { targetId: string; mode: DropMode; label: string } | null
@@ -287,16 +298,21 @@ export default function Sidebar({ selected, onSelect }: SidebarProps): React.JSX
         </div>
       )}
       <div className="px-2">
-        <button
-          onClick={() => onSelect({ type: 'all' })}
-          className={`flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm ${
-            selected.type === 'all'
-              ? 'bg-emerald-600/10 text-emerald-700 dark:text-emerald-400'
-              : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800/60'
-          }`}
-        >
-          📚 All bookmarks
-        </button>
+        {FEED_VIEWS.map((view) => (
+          <button
+            key={view.type}
+            onClick={() => onSelect({ type: view.type })}
+            data-testid={`sidebar-view-${view.type}`}
+            className={`flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm ${
+              selected.type === view.type
+                ? 'bg-emerald-600/10 text-emerald-700 dark:text-emerald-400'
+                : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800/60'
+            }`}
+          >
+            <span aria-hidden>{view.icon}</span>
+            {view.label}
+          </button>
+        ))}
       </div>
 
       <div className="mt-4 flex items-center justify-between px-3">
@@ -443,9 +459,6 @@ export default function Sidebar({ selected, onSelect }: SidebarProps): React.JSX
   )
 }
 
-function errMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}
 
 function descendantCount(byParent: Map<string, KKList[]>, id: string): number {
   return (byParent.get(id) || []).length

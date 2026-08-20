@@ -1,7 +1,12 @@
-import React, { useMemo, useState } from 'react'
+import React, { useMemo, useRef, useState } from 'react'
 import { useCreateBookmark, useAddBookmarkToList, useAttachTags, useLists } from '../lib/queries'
+import { useCreateFileBookmarks } from '../lib/fileBookmarks'
 import { buildByParent, orderedChildren } from '../lib/listTree'
 import type { KKList } from '../../../shared/types'
+
+// What the file picker offers. Karakeep stores images and PDFs as assets;
+// anything else is refused by POST /assets with "Unsupported asset type".
+const FILE_ACCEPT = 'application/pdf,image/*'
 
 /** Cheap URL sanity check — enough to catch "not a URL yet" without pretending to fully validate. */
 function isLikelyUrl(value: string): boolean {
@@ -26,15 +31,19 @@ function flattenForSelect(lists: KKList[]): { list: KKList; depth: number }[] {
   return out
 }
 
+type Mode = 'link' | 'text' | 'file'
+
 export default function AddBookmarkDialog({ onClose }: { onClose: () => void }): React.JSX.Element {
-  const [mode, setMode] = useState<'link' | 'text'>('link')
+  const [mode, setMode] = useState<Mode>('link')
   const [url, setUrl] = useState('')
   const [title, setTitle] = useState('')
   const [noteText, setNoteText] = useState('')
+  const [files, setFiles] = useState<File[]>([])
   const [targetListId, setTargetListId] = useState('')
   const [tagsText, setTagsText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const listsQuery = useLists()
   const listOptions = useMemo(() => flattenForSelect(listsQuery.data || []), [listsQuery.data])
@@ -42,10 +51,29 @@ export default function AddBookmarkDialog({ onClose }: { onClose: () => void }):
   const createBookmark = useCreateBookmark()
   const addBookmarkToList = useAddBookmarkToList()
   const attachTags = useAttachTags()
+  const createFileBookmarks = useCreateFileBookmarks()
 
   const urlValid = mode === 'link' ? isLikelyUrl(url.trim()) : true
   const textValid = mode === 'text' ? noteText.trim().length > 0 : true
-  const canSubmit = urlValid && textValid && !busy
+  const filesValid = mode === 'file' ? files.length > 0 : true
+  const canSubmit = urlValid && textValid && filesValid && !busy
+
+  async function submitFiles(tagNames: string[]): Promise<void> {
+    const result = await createFileBookmarks(files, { listId: targetListId || undefined })
+    if (tagNames.length > 0) {
+      for (const bookmark of result.created) {
+        await attachTags.mutateAsync({ bookmarkId: bookmark.id, tagNames })
+      }
+    }
+    if (result.failed.length > 0) {
+      // Stay open on a partial failure — closing would take the only
+      // report of what didn't make it with it.
+      setError(result.failed.map((f) => `${f.fileName}: ${f.message}`).join('\n'))
+      setFiles(result.created.length > 0 ? [] : files)
+      return
+    }
+    onClose()
+  }
 
   async function submit(e: React.FormEvent): Promise<void> {
     e.preventDefault()
@@ -57,6 +85,11 @@ export default function AddBookmarkDialog({ onClose }: { onClose: () => void }):
         .split(',')
         .map((t) => t.trim())
         .filter(Boolean)
+
+      if (mode === 'file') {
+        await submitFiles(tagNames)
+        return
+      }
 
       const bookmark = await createBookmark.mutateAsync(
         mode === 'link'
@@ -88,28 +121,21 @@ export default function AddBookmarkDialog({ onClose }: { onClose: () => void }):
         <h2 className="mb-4 text-lg font-semibold text-neutral-900 dark:text-neutral-100">Add bookmark</h2>
 
         <div className="mb-4 flex gap-1 rounded-lg bg-neutral-100 p-1 dark:bg-neutral-800">
-          <button
-            type="button"
-            onClick={() => setMode('link')}
-            className={`flex-1 rounded-md py-1.5 text-sm font-medium ${
-              mode === 'link'
-                ? 'bg-white text-neutral-900 shadow-sm dark:bg-neutral-700 dark:text-neutral-100'
-                : 'text-neutral-500 dark:text-neutral-400'
-            }`}
-          >
-            URL
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode('text')}
-            className={`flex-1 rounded-md py-1.5 text-sm font-medium ${
-              mode === 'text'
-                ? 'bg-white text-neutral-900 shadow-sm dark:bg-neutral-700 dark:text-neutral-100'
-                : 'text-neutral-500 dark:text-neutral-400'
-            }`}
-          >
-            Note
-          </button>
+          {(['link', 'text', 'file'] as Mode[]).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setMode(m)}
+              data-testid={`add-mode-${m}`}
+              className={`flex-1 rounded-md py-1.5 text-sm font-medium ${
+                mode === m
+                  ? 'bg-white text-neutral-900 shadow-sm dark:bg-neutral-700 dark:text-neutral-100'
+                  : 'text-neutral-500 dark:text-neutral-400'
+              }`}
+            >
+              {m === 'link' ? 'URL' : m === 'text' ? 'Note' : 'File'}
+            </button>
+          ))}
         </div>
 
         {mode === 'link' ? (
@@ -139,7 +165,7 @@ export default function AddBookmarkDialog({ onClose }: { onClose: () => void }):
               <span className="mt-1 block text-xs text-red-500">Enter a valid http(s) URL.</span>
             )}
           </label>
-        ) : (
+        ) : mode === 'text' ? (
           <label className="mb-3 block text-sm">
             <span className="mb-1 block text-neutral-600 dark:text-neutral-400">Note</span>
             <textarea
@@ -151,9 +177,46 @@ export default function AddBookmarkDialog({ onClose }: { onClose: () => void }):
               className="w-full rounded-lg border border-neutral-300 bg-transparent px-3 py-2 text-sm outline-none focus:border-emerald-500 dark:border-neutral-700"
             />
           </label>
+        ) : (
+          <div className="mb-3 text-sm">
+            <span className="mb-1 block text-neutral-600 dark:text-neutral-400">Files</span>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept={FILE_ACCEPT}
+              onChange={(e) => setFiles(Array.from(e.target.files || []))}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="w-full rounded-lg border border-dashed border-neutral-300 px-3 py-4 text-sm text-neutral-500 hover:border-emerald-500 hover:text-emerald-600 dark:border-neutral-700 dark:hover:border-emerald-500 dark:hover:text-emerald-400"
+            >
+              {files.length === 0
+                ? 'Choose PDFs or images…'
+                : `${files.length} file${files.length === 1 ? '' : 's'} selected — choose again to replace`}
+            </button>
+            {files.length > 0 && (
+              <ul className="mt-2 space-y-0.5">
+                {files.map((f) => (
+                  <li key={`${f.name}-${f.size}`} className="truncate text-xs text-neutral-500">
+                    {f.name} · {(f.size / 1024 / 1024).toFixed(1)} MB
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="mt-2 text-xs text-neutral-400">
+              You can also drop files straight onto the window.
+            </p>
+          </div>
         )}
 
-        <label className="mb-3 block text-sm">
+        {/* No title field in file mode: a title box can only name one
+            thing, and a multi-file import would silently apply it to all of
+            them. Each file's bookmark takes its own file name instead, and
+            the title is editable in the detail pane afterwards. */}
+        <label className={`mb-3 block text-sm ${mode === 'file' ? 'hidden' : ''}`}>
           <span className="mb-1 block text-neutral-600 dark:text-neutral-400">Title (optional)</span>
           <input
             value={title}
@@ -194,7 +257,7 @@ export default function AddBookmarkDialog({ onClose }: { onClose: () => void }):
           </span>
         </label>
 
-        {error && <p className="mb-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
+        {error && <p className="mb-3 whitespace-pre-wrap text-sm text-red-600 dark:text-red-400">{error}</p>}
 
         <div className="flex justify-end gap-2">
           <button
@@ -209,7 +272,7 @@ export default function AddBookmarkDialog({ onClose }: { onClose: () => void }):
             disabled={!canSubmit}
             className="rounded-lg bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
           >
-            {busy ? 'Saving…' : 'Save'}
+            {busy ? (mode === 'file' ? 'Uploading…' : 'Saving…') : 'Save'}
           </button>
         </div>
       </form>

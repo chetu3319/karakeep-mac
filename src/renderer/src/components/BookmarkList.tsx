@@ -1,18 +1,23 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   useBookmarksList,
   useBookmarksSearch,
+  useDeleteBookmark,
   useListBookmarks,
+  useRemoveBookmarkFromList,
   useTagBookmarks,
+  useUpdateBookmark,
   flattenBookmarks
 } from '../lib/queries'
 import type { Bookmark } from '../../../shared/types'
+import { filterForSelection, isFeedSelection, type Selection } from '../lib/selection'
 import { displayForBookmark } from '../lib/bookmarkDisplay'
 import BookmarkThumb from './BookmarkThumb'
+import ConfirmDialog from './ConfirmDialog'
+import ContextMenu, { type ContextMenuItem } from './ContextMenu'
 import { BOOKMARK_DRAG_MIME, currentBookmarkDrag, type BookmarkDragPayload } from '../lib/dragTypes'
-
-type Selection = { type: 'all' } | { type: 'list'; id: string } | { type: 'tag'; id: string }
+import { errMessage } from '../lib/errors'
 
 function useDebounced(value: string, ms: number): string {
   const [debounced, setDebounced] = useState(value)
@@ -23,14 +28,18 @@ function useDebounced(value: string, ms: number): string {
   return debounced
 }
 
+type MenuState = { x: number; y: number; bookmark: Bookmark } | null
+
 export default function BookmarkList({
   selection,
   selectedId,
-  onSelectBookmark
+  onSelectBookmark,
+  onBookmarkDeleted
 }: {
   selection: Selection
   selectedId: string | null
   onSelectBookmark: (b: Bookmark) => void
+  onBookmarkDeleted: (id: string) => void
 }): React.JSX.Element {
   const [query, setQuery] = useState('')
   const debouncedQuery = useDebounced(query, 350)
@@ -39,7 +48,8 @@ export default function BookmarkList({
   // Each of these hooks is always called (rules-of-hooks) but only the one
   // matching the current mode is "enabled" / actually fetches. Search takes
   // priority over the sidebar selection, matching most bookmark apps' UX.
-  const allQuery = useBookmarksList(!isSearching && selection.type === 'all')
+  const feedFilter = useMemo(() => filterForSelection(selection), [selection])
+  const feedQuery = useBookmarksList(!isSearching && isFeedSelection(selection), feedFilter)
   const searchQuery = useBookmarksSearch(debouncedQuery)
   const listQuery = useListBookmarks(
     selection.type === 'list' ? selection.id : '__none__',
@@ -56,9 +66,72 @@ export default function BookmarkList({
       ? listQuery
       : selection.type === 'tag'
         ? tagQuery
-        : allQuery
+        : feedQuery
 
   const bookmarks = useMemo(() => flattenBookmarks(active.data?.pages), [active.data])
+
+  const updateBookmark = useUpdateBookmark()
+  const deleteBookmark = useDeleteBookmark()
+  const removeFromList = useRemoveBookmarkFromList()
+
+  const [menu, setMenu] = useState<MenuState>(null)
+  const [pendingDelete, setPendingDelete] = useState<Bookmark | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+
+  const toggleFavourite = useCallback(
+    (b: Bookmark) => {
+      setActionError(null)
+      updateBookmark.mutate(
+        { id: b.id, input: { favourited: !b.favourited } },
+        { onError: (err) => setActionError(`Couldn't update the bookmark. ${errMessage(err)}`) }
+      )
+    },
+    [updateBookmark]
+  )
+
+  const toggleArchived = useCallback(
+    (b: Bookmark) => {
+      setActionError(null)
+      updateBookmark.mutate(
+        { id: b.id, input: { archived: !b.archived } },
+        { onError: (err) => setActionError(`Couldn't update the bookmark. ${errMessage(err)}`) }
+      )
+    },
+    [updateBookmark]
+  )
+
+  function confirmDelete(): void {
+    const target = pendingDelete
+    setPendingDelete(null)
+    if (!target) return
+    setActionError(null)
+    deleteBookmark.mutate(target.id, {
+      // Only clear the detail pane once the server has actually accepted the
+      // delete. Clearing it optimistically and then having the request fail
+      // would leave the user staring at an empty pane for a bookmark that is
+      // still very much there.
+      onSuccess: () => onBookmarkDeleted(target.id),
+      onError: (err) => setActionError(`Couldn't delete the bookmark. ${errMessage(err)}`)
+    })
+  }
+
+  function removeFromCurrentList(b: Bookmark): void {
+    if (selection.type !== 'list') return
+    setActionError(null)
+    removeFromList.mutate(
+      { listId: selection.id, bookmarkId: b.id },
+      { onError: (err) => setActionError(`Couldn't remove it from the list. ${errMessage(err)}`) }
+    )
+  }
+
+  const menuItems = (b: Bookmark): ContextMenuItem[] => [
+    { label: b.favourited ? 'Remove from favourites' : 'Add to favourites', onSelect: () => toggleFavourite(b) },
+    { label: b.archived ? 'Unarchive' : 'Archive', onSelect: () => toggleArchived(b) },
+    ...(selection.type === 'list'
+      ? [{ label: 'Remove from this list', onSelect: () => removeFromCurrentList(b) }]
+      : []),
+    { label: 'Delete…', danger: true, onSelect: () => setPendingDelete(b) }
+  ]
 
   useEffect(() => {
     if (window.kk.dev.isSmoke && selection.type === 'list' && !active.isLoading) {
@@ -104,6 +177,15 @@ export default function BookmarkList({
         />
       </div>
 
+      {actionError && (
+        <div className="flex items-start justify-between gap-2 border-b border-red-100 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400">
+          <span>{actionError}</span>
+          <button onClick={() => setActionError(null)} className="flex-shrink-0 font-medium hover:underline">
+            Dismiss
+          </button>
+        </div>
+      )}
+
       <div ref={parentRef} className="flex-1 overflow-y-auto" data-testid="bookmark-list">
         {active.isLoading && <div className="p-4 text-sm text-neutral-400">Loading…</div>}
         <div style={{ height: rowVirtualizer.getTotalSize(), position: 'relative' }}>
@@ -133,6 +215,27 @@ export default function BookmarkList({
                   currentBookmarkDrag.current = null
                 }}
                 onClick={() => onSelectBookmark(b)}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  // Select as well as open the menu: acting on a row while
+                  // the detail pane still shows a different bookmark is how
+                  // people delete the wrong thing.
+                  onSelectBookmark(b)
+                  setMenu({ x: e.clientX, y: e.clientY, bookmark: b })
+                }}
+                onKeyDown={(e) => {
+                  if (e.metaKey || e.ctrlKey || e.altKey) return
+                  if (e.key === 'f' || e.key === 'F') {
+                    e.preventDefault()
+                    toggleFavourite(b)
+                  } else if (e.key === 'e' || e.key === 'E') {
+                    e.preventDefault()
+                    toggleArchived(b)
+                  } else if (e.key === 'Backspace' || e.key === 'Delete') {
+                    e.preventDefault()
+                    setPendingDelete(b)
+                  }
+                }}
                 style={{
                   position: 'absolute',
                   top: 0,
@@ -149,8 +252,28 @@ export default function BookmarkList({
                   <BookmarkThumb bookmark={b} display={display} />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium text-neutral-900 dark:text-neutral-100">
-                    {display.title}
+                  <div className="flex items-baseline gap-1.5">
+                    {b.favourited && (
+                      <span
+                        className="flex-shrink-0 text-xs leading-none text-amber-500"
+                        title="Favourite"
+                        aria-label="Favourite"
+                      >
+                        ★
+                      </span>
+                    )}
+                    <span className="truncate text-sm font-medium text-neutral-900 dark:text-neutral-100">
+                      {display.title}
+                    </span>
+                    {/* Archived rows only reach a feed that isn't the
+                        Archive view via search or a list/tag query, where
+                        the badge is the only thing explaining why a
+                        supposedly filed-away bookmark is on screen. */}
+                    {b.archived && selection.type !== 'archived' && (
+                      <span className="flex-shrink-0 rounded bg-neutral-200 px-1 py-0.5 text-[10px] uppercase tracking-wide text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
+                        Archived
+                      </span>
+                    )}
                   </div>
                   <div className="truncate text-xs text-neutral-500">{display.subtitle}</div>
                   {b.tags && b.tags.length > 0 && (
@@ -171,10 +294,31 @@ export default function BookmarkList({
           })}
         </div>
         {!active.isLoading && bookmarks.length === 0 && (
-          <div className="p-4 text-sm text-neutral-400">No bookmarks found.</div>
+          <div className="p-4 text-sm text-neutral-400">{emptyMessage(selection, isSearching)}</div>
         )}
         {active.isFetchingNextPage && <div className="p-3 text-center text-xs text-neutral-400">Loading more…</div>}
       </div>
+
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu.bookmark)} onClose={() => setMenu(null)} />
+      )}
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title={`Delete "${displayForBookmark(pendingDelete).title}"?`}
+          description="This deletes the bookmark from Karakeep entirely, along with its tags, notes and highlights. It cannot be undone. To just get it out of the way, archive it instead."
+          onConfirm={confirmDelete}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
     </div>
   )
+}
+
+
+function emptyMessage(selection: Selection, isSearching: boolean): string {
+  if (isSearching) return 'No bookmarks found.'
+  if (selection.type === 'favourites') return 'No favourites yet. Star a bookmark to see it here.'
+  if (selection.type === 'archived') return 'Nothing archived.'
+  return 'No bookmarks found.'
 }

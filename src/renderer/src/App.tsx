@@ -5,10 +5,16 @@ import BookmarkList from './components/BookmarkList'
 import DetailPane from './components/DetailPane'
 import AddBookmarkDialog from './components/AddBookmarkDialog'
 import { useBookmarksList, useLists, flattenBookmarks } from './lib/queries'
+import { useCreateFileBookmarks } from './lib/fileBookmarks'
 import type { Bookmark, User } from '../../shared/types'
+import type { Selection } from './lib/selection'
+
+/** True when a drag is carrying actual files rather than one of our own custom payloads. */
+function isFileDrag(dt: DataTransfer | null): boolean {
+  return !!dt && Array.from(dt.types).includes('Files')
+}
 
 type AuthState = { status: 'loading' } | { status: 'onboarding' } | { status: 'ready'; user: User }
-type Selection = { type: 'all' } | { type: 'list'; id: string } | { type: 'tag'; id: string }
 
 // Sidebar/list collapse state is view-only chrome, not user data (unlike
 // e.g. listOrder, which lives in main/store.ts because it's real user
@@ -42,6 +48,52 @@ export default function App(): React.JSX.Element {
   const [selection, setSelection] = useState<Selection>({ type: 'all' })
   const [selectedBookmark, setSelectedBookmark] = useState<Bookmark | null>(null)
   const [addingBookmark, setAddingBookmark] = useState(false)
+
+  // ── Drop files onto the window to file them ──
+  const createFileBookmarks = useCreateFileBookmarks()
+  const [fileDragActive, setFileDragActive] = useState(false)
+  const [importStatus, setImportStatus] = useState<string | null>(null)
+  const [importError, setImportError] = useState<string | null>(null)
+  // dragenter/dragleave fire on every child element the pointer crosses, so
+  // a plain boolean flickers the overlay off the moment the cursor moves
+  // from one pane to the next. Counting enters against leaves is the
+  // standard fix.
+  const dragDepthRef = useRef(0)
+
+  const canDropFiles = auth.status === 'ready'
+
+  // Electron navigates the whole window to a dropped file unless the
+  // default is cancelled, which would replace the app with a PDF viewer and
+  // no way back. This catches drops that miss the handled region (the
+  // titlebar, say) — the root div's own handlers cover the rest.
+  useEffect(() => {
+    function swallow(e: DragEvent): void {
+      if (isFileDrag(e.dataTransfer)) e.preventDefault()
+    }
+    window.addEventListener('dragover', swallow)
+    window.addEventListener('drop', swallow)
+    return () => {
+      window.removeEventListener('dragover', swallow)
+      window.removeEventListener('drop', swallow)
+    }
+  }, [])
+
+  async function handleFileDrop(files: File[]): Promise<void> {
+    if (files.length === 0) return
+    setImportError(null)
+    setImportStatus(`Uploading ${files.length} file${files.length === 1 ? '' : 's'}…`)
+    // Dropping while a list is selected files the import into that list —
+    // the same thing dragging a bookmark onto a list already does.
+    const listId = selection.type === 'list' ? selection.id : undefined
+    const result = await createFileBookmarks(files, { listId })
+    setImportStatus(null)
+    if (result.failed.length > 0) {
+      setImportError(result.failed.map((f) => `${f.fileName}: ${f.message}`).join('\n'))
+    }
+    // Select the first import so it's immediately visible — a drop that
+    // changes nothing on screen reads as a drop that didn't work.
+    if (result.created.length > 0) setSelectedBookmark(result.created[0])
+  }
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readCollapsedFlag(LS_SIDEBAR_COLLAPSED))
   const [listCollapsed, setListCollapsed] = useState(() => readCollapsedFlag(LS_LIST_COLLAPSED))
@@ -126,7 +178,31 @@ export default function App(): React.JSX.Element {
   }, [])
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-white dark:bg-neutral-950">
+    <div
+      className="relative flex h-screen w-screen flex-col overflow-hidden bg-white dark:bg-neutral-950"
+      onDragEnter={(e) => {
+        if (!canDropFiles || !isFileDrag(e.dataTransfer)) return
+        dragDepthRef.current += 1
+        setFileDragActive(true)
+      }}
+      onDragOver={(e) => {
+        if (!canDropFiles || !isFileDrag(e.dataTransfer)) return
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'copy'
+      }}
+      onDragLeave={(e) => {
+        if (!canDropFiles || !isFileDrag(e.dataTransfer)) return
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+        if (dragDepthRef.current === 0) setFileDragActive(false)
+      }}
+      onDrop={(e) => {
+        if (!canDropFiles || !isFileDrag(e.dataTransfer)) return
+        e.preventDefault()
+        dragDepthRef.current = 0
+        setFileDragActive(false)
+        void handleFileDrop(Array.from(e.dataTransfer.files))
+      }}
+    >
       <Titlebar
         auth={auth}
         onSignOut={() => setAuth({ status: 'onboarding' })}
@@ -138,6 +214,37 @@ export default function App(): React.JSX.Element {
         onToggleFocusMode={toggleFocusMode}
       />
       {addingBookmark && <AddBookmarkDialog onClose={() => setAddingBookmark(false)} />}
+
+      {fileDragActive && (
+        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-emerald-600/10 backdrop-blur-[1px]">
+          <div className="rounded-2xl border-2 border-dashed border-emerald-500 bg-white/90 px-8 py-6 text-center shadow-lg dark:bg-neutral-900/90">
+            <div className="text-2xl">📥</div>
+            <div className="mt-1 text-sm font-medium text-emerald-700 dark:text-emerald-400">
+              Drop to add to Karakeep
+            </div>
+            <div className="mt-0.5 text-xs text-neutral-500">
+              {selection.type === 'list' ? 'Files land in the selected list' : 'PDFs and images'}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {(importStatus || importError) && (
+        <div
+          className={`flex items-start justify-between gap-2 border-b px-3 py-2 text-xs ${
+            importError
+              ? 'border-red-100 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400'
+              : 'border-emerald-100 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400'
+          }`}
+        >
+          <span className="whitespace-pre-wrap">{importError || importStatus}</span>
+          {importError && (
+            <button onClick={() => setImportError(null)} className="flex-shrink-0 font-medium hover:underline">
+              Dismiss
+            </button>
+          )}
+        </div>
+      )}
       <div className="min-h-0 flex-1">
         {auth.status === 'loading' && (
           <div className="flex h-full items-center justify-center text-sm text-neutral-400">Loading…</div>
@@ -158,6 +265,12 @@ export default function App(): React.JSX.Element {
             }}
             selectedBookmark={selectedBookmark}
             onSelectBookmark={setSelectedBookmark}
+            onBookmarkDeleted={(id) =>
+              // Only the pane showing the deleted bookmark clears; deleting
+              // some other row from its context menu must not blank out
+              // whatever the user was reading.
+              setSelectedBookmark((current) => (current && current.id === id ? null : current))
+            }
             sidebarCollapsed={sidebarCollapsed}
             listCollapsed={listCollapsed}
           />
@@ -259,6 +372,7 @@ function Library({
   onSelectionChange,
   selectedBookmark,
   onSelectBookmark,
+  onBookmarkDeleted,
   sidebarCollapsed,
   listCollapsed
 }: {
@@ -266,11 +380,15 @@ function Library({
   onSelectionChange: (s: Selection) => void
   selectedBookmark: Bookmark | null
   onSelectBookmark: (b: Bookmark) => void
+  onBookmarkDeleted: (id: string) => void
   sidebarCollapsed: boolean
   listCollapsed: boolean
 }): React.JSX.Element {
-  // Also used to drive the dev smoke script's auto bookmark selection.
-  const listQuery = useBookmarksList()
+  // Smoke-run scaffolding only: the real list lives in BookmarkList, which
+  // runs its own filtered query. Gating this on the smoke flag keeps normal
+  // launches from issuing a second, differently-filtered GET /bookmarks
+  // whose results nothing renders.
+  const listQuery = useBookmarksList(window.kk.dev.isSmoke)
   const bookmarks = flattenBookmarks(listQuery.data?.pages)
   const listsQuery = useLists()
   const lists = listsQuery.data || []
@@ -345,10 +463,11 @@ function Library({
             selection={selection}
             selectedId={selectedBookmark?.id ?? null}
             onSelectBookmark={onSelectBookmark}
+            onBookmarkDeleted={onBookmarkDeleted}
           />
         )}
       </div>
-      <DetailPane bookmark={selectedBookmark} />
+      <DetailPane bookmark={selectedBookmark} onDeleted={onBookmarkDeleted} />
     </div>
   )
 }
