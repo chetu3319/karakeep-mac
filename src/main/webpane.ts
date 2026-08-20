@@ -63,7 +63,12 @@ export class WebPaneManager {
     wc.on('did-start-loading', () => pushState())
     wc.on('did-stop-loading', () => pushState())
     wc.on('did-navigate', () => pushState())
-    wc.on('did-navigate-in-page', () => pushState())
+    wc.on('did-navigate-in-page', () => {
+      pushState()
+      // Same-document (SPA) navigation swaps the page's content without
+      // re-running the preload, so re-push what we owe this bookmark.
+      if (this.pendingHighlights.length) wc.send(WEBPANE_IPC.APPLY, this.pendingHighlights)
+    })
     wc.on('page-title-updated', () => pushState())
     wc.on('did-fail-load', (_e, errorCode, errorDescription, _validatedURL, isMainFrame) => {
       if (!isMainFrame) return
@@ -96,6 +101,14 @@ export class WebPaneManager {
       if (!fromThisView(e.sender.id)) return
       if (this.pendingHighlights.length) wc.send(WEBPANE_IPC.APPLY, this.pendingHighlights)
     })
+    ipcMain.on(WEBPANE_IPC.STATUS, (e, payload: { anchored: string[]; missing: string[] }) => {
+      if (!fromThisView(e.sender.id)) return
+      if (this.win.isDestroyed() || this.win.webContents.isDestroyed()) return
+      this.win.webContents.send(IPC.WEBPANE_HIGHLIGHT_STATUS_EVENT, {
+        bookmarkId: this.currentBookmarkId,
+        ...payload
+      })
+    })
 
     return view
   }
@@ -108,6 +121,35 @@ export class WebPaneManager {
     view.webContents.loadURL(url).catch((err) => {
       console.error('[webpane] loadURL failed', err instanceof Error ? err.message : err)
     })
+  }
+
+  /**
+   * Pushes the current highlight set into the live page without navigating.
+   * The renderer's highlight query resolves *after* the first navigate on a
+   * cold start, so without this the pane would be told to apply an empty
+   * list and never hear about the real one.
+   */
+  applyHighlights(highlights: unknown[]): void {
+    this.pendingHighlights = highlights
+    if (!this.view || this.view.webContents.isDestroyed()) return
+    this.view.webContents.send(WEBPANE_IPC.APPLY, highlights)
+  }
+
+  /**
+   * Tells the live page the server id for a highlight it created locally.
+   * Without this the page keeps its client-generated `kh-...` id, and the
+   * next full sync (which arrives from the server carrying the real id)
+   * would anchor the very same text a second time.
+   */
+  assignHighlightId(clientId: string, serverId: string): void {
+    if (!this.view || this.view.webContents.isDestroyed()) return
+    this.view.webContents.send(WEBPANE_IPC.ID_ASSIGNED, { clientId, serverId })
+  }
+
+  /** Scrolls one highlight into view in the live page and flashes it. */
+  focusHighlight(highlightId: string): void {
+    if (!this.view || this.view.webContents.isDestroyed()) return
+    this.view.webContents.send(WEBPANE_IPC.FOCUS, highlightId)
   }
 
   setBounds(bounds: WebPaneBounds): void {

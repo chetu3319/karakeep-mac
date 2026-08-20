@@ -98,6 +98,9 @@ function registerIpc(): void {
   ipcMain.handle(IPC.API_GET_HIGHLIGHTS, (_e, params: { cursor?: string; limit?: number }) =>
     requireClient().getHighlights(params)
   )
+  ipcMain.handle(IPC.API_GET_BOOKMARK_HIGHLIGHTS, (_e, bookmarkId: string) =>
+    requireClient().getBookmarkHighlights(bookmarkId)
+  )
   ipcMain.handle(IPC.API_GET_LIST_BOOKMARKS, (_e, args: { listId: string; limit?: number; cursor?: string }) =>
     requireClient().getListBookmarks(args.listId, { limit: args.limit, cursor: args.cursor })
   )
@@ -115,6 +118,12 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.WEBPANE_NAVIGATE, (_e, args: { url: string; bookmarkId: string; highlights: unknown[] }) => {
     requirePane().navigate(args.url, args.bookmarkId, args.highlights)
+  })
+  ipcMain.handle(IPC.WEBPANE_APPLY_HIGHLIGHTS, (_e, args: { highlights: unknown[] }) => {
+    webPane?.applyHighlights(args.highlights)
+  })
+  ipcMain.handle(IPC.WEBPANE_FOCUS_HIGHLIGHT, (_e, highlightId: string) => {
+    webPane?.focusHighlight(highlightId)
   })
   ipcMain.handle(IPC.WEBPANE_SET_BOUNDS, (_e, bounds: WebPaneBounds) => webPane?.setBounds(bounds))
   ipcMain.handle(IPC.WEBPANE_SHOW, () => webPane?.show())
@@ -178,6 +187,7 @@ async function onHighlightEvent(
       try {
         const created = await promise
         serverIdByKey.set(key, created.id)
+        webPane?.assignHighlightId(p.id, created.id)
       } finally {
         pendingCreations.delete(key)
       }

@@ -1,18 +1,25 @@
 /**
  * Preload script for the live "Web" pane WebContentsView.
  *
- * Adapted from reference/karakeep-extension-content.js (Karakeep browser
- * extension's highlight content script) and
- * reference/karakeep-extension-content-styles.js. The selection-to-highlight
- * capture, text-offset scheme, and fuzzy re-anchoring logic are reused
- * near-verbatim; only the transport (chrome.runtime messaging -> Electron
- * ipcRenderer) and bootstrapping differ.
+ * Two jobs:
+ *
+ * 1. **Anchoring** — take the highlights Karakeep stores for this bookmark
+ *    (plain text + a little surrounding context) and find them again in the
+ *    live DOM, which is never byte-identical to whatever the text was
+ *    captured from. See `locateText()` / `normalizeWithMap()`.
+ * 2. **UI** — a single popover, rendered inside a closed shadow root, that
+ *    handles both "I just selected some text" and "I clicked an existing
+ *    highlight". Colour, note, copy and delete all live there.
+ *
+ * Derived from reference/karakeep-extension-content.js (the Karakeep browser
+ * extension's highlight content script); the transport is Electron
+ * ipcRenderer rather than chrome.runtime, and the matching and UI layers
+ * have since been rewritten.
  */
 import { ipcRenderer } from 'electron'
 
 const HIGHLIGHT_CLASS = 'karakeep-hl'
-const TOOLBAR_ID = 'karakeep-toolbar'
-const NOTE_HOST_ID = 'karakeep-note-host'
+const OVERLAY_HOST_ID = 'karakeep-hl-overlay'
 const STYLE_ID = 'karakeep-hl-styles'
 
 interface StoredHighlight {
@@ -27,111 +34,213 @@ interface StoredHighlight {
   highlightId?: string
 }
 
+const COLORS: { name: string; hex: string }[] = [
+  { name: 'yellow', hex: '#f5c518' },
+  { name: 'green', hex: '#10b981' },
+  { name: 'blue', hex: '#3b82f6' },
+  { name: 'purple', hex: '#a855f7' },
+  { name: 'red', hex: '#ef4444' }
+]
+
+const DEFAULT_COLOR = 'yellow'
+
+/**
+ * Styles for the marks themselves. These are the only styles that go into
+ * the page's own document — everything else lives in a shadow root (see
+ * `ensureOverlay()`), so the page's cascade can't reach it.
+ */
 function getStylesheet(): string {
+  const colorRules = COLORS.map(
+    ({ name, hex }) => `
+    .${HIGHLIGHT_CLASS}[data-kh-color="${name}"] {
+      --kh-solid: ${hex};
+      background-color: color-mix(in srgb, ${hex} 32%, transparent) !important;
+      box-shadow: inset 0 -1.5px 0 color-mix(in srgb, ${hex} 65%, transparent);
+    }
+    .${HIGHLIGHT_CLASS}[data-kh-color="${name}"]:hover {
+      background-color: color-mix(in srgb, ${hex} 48%, transparent) !important;
+    }`
+  ).join('\n')
+
   return `
     .${HIGHLIGHT_CLASS} {
-      background: rgba(16,185,129,0.3) !important;
-      border-bottom: 2px solid rgba(16,185,129,0.6);
+      --kh-solid: ${COLORS[0].hex};
+      background-color: color-mix(in srgb, ${COLORS[0].hex} 32%, transparent) !important;
+      box-shadow: inset 0 -1.5px 0 color-mix(in srgb, ${COLORS[0].hex} 65%, transparent);
+      color: inherit !important;
+      border-radius: 2px;
       cursor: pointer;
-      transition: background 0.15s;
+      padding: 0;
+      transition: background-color 0.12s ease;
     }
-    .${HIGHLIGHT_CLASS}:hover { background: rgba(16,185,129,0.5) !important; }
-    .${HIGHLIGHT_CLASS}[data-kh-color="yellow"] { background: rgba(250,204,21,0.3) !important; border-bottom-color: rgba(250,204,21,0.6); }
-    .${HIGHLIGHT_CLASS}[data-kh-color="yellow"]:hover { background: rgba(250,204,21,0.5) !important; }
-    .${HIGHLIGHT_CLASS}[data-kh-color="red"] { background: rgba(239,68,68,0.25) !important; border-bottom-color: rgba(239,68,68,0.5); }
-    .${HIGHLIGHT_CLASS}[data-kh-color="red"]:hover { background: rgba(239,68,68,0.4) !important; }
-    .${HIGHLIGHT_CLASS}[data-kh-color="blue"] { background: rgba(59,130,246,0.25) !important; border-bottom-color: rgba(59,130,246,0.5); }
-    .${HIGHLIGHT_CLASS}[data-kh-color="blue"]:hover { background: rgba(59,130,246,0.4) !important; }
-    .${HIGHLIGHT_CLASS}[data-kh-color="purple"] { background: rgba(168,85,247,0.25) !important; border-bottom-color: rgba(168,85,247,0.5); }
-    .${HIGHLIGHT_CLASS}[data-kh-color="purple"]:hover { background: rgba(168,85,247,0.4) !important; }
-    .${HIGHLIGHT_CLASS}[data-kh-note="1"] {
-      cursor: help;
-    }
+    ${colorRules}
+    /* A note is shown as a small dot in the highlight's own colour rather
+       than an emoji — quieter, and it inherits the palette. */
     .${HIGHLIGHT_CLASS}[data-kh-note="1"]::after {
-      content: '\\1F4DD'; font-size: 10px; vertical-align: super; margin-left: 2px;
+      content: '';
+      display: inline-block;
+      width: 5px; height: 5px;
+      margin: 0 1px 0 3px;
+      vertical-align: super;
+      border-radius: 50%;
+      background: var(--kh-solid);
     }
-    #${TOOLBAR_ID} {
-      /* Visible immediately — do not gate the toolbar's visibility on a CSS
-         animation. A backgrounded/occluded WebContentsView can leave a
-         forwards-filled keyframe animation stuck at its 0% frame (opacity:
-         0) indefinitely, producing an invisible-but-interactive toolbar.
-         See the note dialog fix below for the empirical repro. */
-      position: absolute; z-index: 2147483647; display: flex; gap: 4px; padding: 6px 8px;
-      background: #1f2937; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.25);
-      font-family: system-ui, -apple-system, sans-serif; opacity: 1;
+    .${HIGHLIGHT_CLASS}[data-kh-active="1"] {
+      outline: 2px solid var(--kh-solid);
+      outline-offset: 1px;
     }
-    #${TOOLBAR_ID} button {
-      border: none; background: transparent; color: #e5e7eb; cursor: pointer; padding: 4px 8px;
-      border-radius: 4px; font-size: 13px; font-family: inherit; display: flex; align-items: center;
-      gap: 4px; white-space: nowrap; transition: background 0.1s;
+    @keyframes kh-flash {
+      0%, 100% { background-color: color-mix(in srgb, var(--kh-solid) 32%, transparent); }
+      35%      { background-color: color-mix(in srgb, var(--kh-solid) 75%, transparent); }
     }
-    #${TOOLBAR_ID} button:hover { background: rgba(255,255,255,0.15); }
-    #${TOOLBAR_ID} .kh-dot { width: 16px; height: 16px; border-radius: 50%; padding: 0; border: 2px solid transparent; flex-shrink: 0; }
-    #${TOOLBAR_ID} .kh-dot:hover { border-color: #fff; }
-    #${TOOLBAR_ID} .kh-sep { width: 1px; background: rgba(255,255,255,0.2); margin: 0 2px; }
+    .${HIGHLIGHT_CLASS}[data-kh-flash="1"] {
+      animation: kh-flash 0.55s ease-in-out 2;
+    }
   `
 }
 
 /**
- * Styles for the note overlay + dialog. Injected inside a *closed shadow
- * root*, not document.head, and the host element lives outside document.body
- * (see openNote()). Two independent problems this fixes, confirmed via a
- * standalone Electron repro against the live arxiv bookmark page:
+ * Styles for the popover. Injected inside a *closed shadow root* whose host
+ * hangs off document.documentElement (not document.body), for two reasons
+ * learned the hard way on real pages:
  *
- * 1. The dialog previously depended on a `forwards`-filled CSS keyframe
- *    animation (`kh-dialog-in`) to ever reach opacity: 1. When the
- *    WebContentsView's compositor doesn't pump a frame right after the
- *    dialog is inserted (observed: a WebContentsView added to a hidden/
- *    unfocused BrowserWindow never advances the animation at all), the
- *    dialog is permanently stuck at its 0% keyframe — opacity: 0, fully
- *    rendered, fully hit-testable. That exactly matches the reported
- *    symptom: overlay visibly darkens the page, dialog is present and
- *    blocking clicks, but nothing is visible or usable. Fix: the dialog is
- *    opacity: 1 by default; no animation gates its visibility.
- * 2. The dialog and overlay were appended to the live page's own
- *    document.body/document.head, sharing the page's global CSS cascade.
- *    A hostile or merely coincidental page rule (transform/filter on an
- *    ancestor, an ID collision, `mark { all: unset }`, a global
- *    `* { opacity: 0 }` transition-in framework, etc.) can break this in
- *    ways we can't audit for up front. A closed shadow root, hung off a
- *    host element appended to document.documentElement (not body — body is
- *    the ancestor most commonly given a transform by page frameworks),
- *    isolates our styles from the page's cascade in both directions.
+ * 1. Nothing about the popover's visibility may depend on a CSS animation.
+ *    A WebContentsView that isn't compositing (hidden window, occluded
+ *    view) can leave a `forwards`-filled keyframe stuck at its 0% frame
+ *    forever — producing an invisible but fully hit-testable overlay.
+ * 2. The page's own cascade must not be able to reach in. A stray
+ *    `transform`/`filter` on an ancestor, `overflow: hidden` on a wrapper,
+ *    an id collision, or a global `* { opacity: 0 }` transition framework
+ *    would otherwise clip or hide it. `body` is the element page frameworks
+ *    most often transform, hence hanging the host off `<html>`.
+ *
+ * Positioning is `fixed` in viewport coordinates and clamped by
+ * `placePopover()`, so a selection at any page edge still gets a fully
+ * visible popover.
  */
-function getDialogStylesheet(): string {
+function getOverlayStylesheet(): string {
   return `
     :host { all: initial; }
-    .kh-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.3); }
-    .kh-dialog {
-      position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
-      background: #fff; border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.3); padding: 0; border: none;
-      width: 400px; max-width: 90vw; font-family: system-ui, -apple-system, sans-serif;
-      /* Visible immediately — see the file-level comment above. */
+    .kh-pop {
+      position: fixed;
+      top: 0; left: 0;
+      pointer-events: auto;
+      box-sizing: border-box;
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      padding: 5px;
+      border-radius: 12px;
+      background: rgba(32,32,35,0.94);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.32), 0 0 0 0.5px rgba(255,255,255,0.14);
+      font: 13px/1.4 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+      color: #f2f2f7;
+      /* Visible immediately — never gate visibility on an animation. */
       opacity: 1;
+      max-width: calc(100vw - 20px);
     }
-    .kh-hdr { padding: 12px 16px; border-bottom: 1px solid #e5e7eb; font-weight: 600; font-size: 14px; color: #111827; display: flex; justify-content: space-between; align-items: center; }
-    .kh-body { padding: 12px 16px; }
-    .kh-quote { background: #f3f4f6; border-left: 3px solid #10b981; padding: 8px 12px; margin-bottom: 12px; border-radius: 0 6px 6px 0; font-size: 13px; color: #374151; max-height: 80px; overflow-y: auto; white-space: pre-wrap; }
-    .kh-ta { width: 100%; min-height: 80px; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; font-family: inherit; resize: vertical; outline: none; box-sizing: border-box; color: #111827; background: #fff; }
-    .kh-ta:focus { border-color: #10b981; box-shadow: 0 0 0 2px rgba(16,185,129,0.15); }
-    .kh-ftr { padding: 8px 16px 12px; display: flex; justify-content: flex-end; gap: 8px; }
-    .kh-ftr button { padding: 6px 14px; border-radius: 6px; font-size: 13px; cursor: pointer; font-family: inherit; border: none; }
-    .kh-cancel { background: #f3f4f6; color: #374151; }
-    .kh-cancel:hover { background: #e5e7eb; }
-    .kh-del { background: #f3f4f6; color: #ef4444; }
-    .kh-del:hover { background: #fef2f2; }
-    .kh-save-btn { background: #10b981; color: #fff; }
-    .kh-save-btn:hover { background: #059669; }
-    .kh-close { background: none; border: none; cursor: pointer; font-size: 18px; color: #9ca3af; padding: 0; line-height: 1; }
-    .kh-close:hover { color: #374151; }
-    @media (prefers-color-scheme: dark) {
-      .kh-dialog { background: #1f2937; }
-      .kh-hdr { color: #f9fafb; border-bottom-color: #374151; }
-      .kh-quote { background: #111827; color: #d1d5db; }
-      .kh-ta { background: #111827; border-color: #4b5563; color: #f9fafb; }
-      .kh-cancel { background: #374151; color: #d1d5db; }
-      .kh-cancel:hover { background: #4b5563; }
+    @supports (backdrop-filter: blur(1px)) {
+      .kh-pop { background: rgba(32,32,35,0.78); backdrop-filter: blur(24px) saturate(180%); }
     }
+    .kh-pop.kh-note-mode { flex-direction: column; align-items: stretch; gap: 8px; padding: 10px; width: 300px; }
+    .kh-pop.kh-read-mode { flex-direction: column; align-items: stretch; gap: 9px; padding: 10px; width: 320px; }
+
+    /* Reading a note is the common case, so it happens in place: the text
+       scrolls inside the popover rather than taking over the page with a
+       dialog. Capped height keeps the popover from swallowing the viewport
+       on a long note; overscroll-behavior keeps its scroll from chaining
+       into the page underneath. */
+    .kh-note-view {
+      max-height: 152px;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      font-size: 13px; line-height: 1.5;
+      white-space: pre-wrap; overflow-wrap: anywhere;
+      color: rgba(242,242,247,0.94);
+      border-left: 2px solid var(--kh-accent, ${COLORS[0].hex});
+      padding: 1px 2px 1px 9px;
+      user-select: text; cursor: text;
+    }
+    .kh-note-view:focus-visible { outline: 2px solid rgba(255,255,255,0.5); outline-offset: 3px; border-radius: 2px; }
+    .kh-note-view::-webkit-scrollbar { width: 9px; }
+    .kh-note-view::-webkit-scrollbar-track { background: transparent; }
+    .kh-note-view::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.24);
+      border-radius: 5px;
+      border: 2px solid transparent;
+      background-clip: padding-box;
+    }
+    .kh-note-view::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.38); background-clip: padding-box; }
+    .kh-toolbar { display: flex; align-items: center; gap: 2px; }
+    .kh-toolbar .kh-spacer { flex: 1 1 auto; }
+    .kh-btn.kh-icon-only { padding: 6px; }
+
+    .kh-swatch {
+      all: unset;
+      box-sizing: border-box;
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      flex: 0 0 auto;
+      box-shadow: inset 0 0 0 1px rgba(0,0,0,0.18);
+      transition: transform 0.1s ease;
+    }
+    .kh-swatch:hover { transform: scale(1.15); }
+    .kh-swatch:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+    .kh-swatch[data-active="1"] { box-shadow: inset 0 0 0 1px rgba(0,0,0,0.18), 0 0 0 2px rgba(255,255,255,0.9); }
+    .kh-swatch svg { width: 12px; height: 12px; display: block; }
+
+    .kh-sep { width: 1px; align-self: stretch; margin: 2px 4px; background: rgba(255,255,255,0.16); flex: 0 0 auto; }
+
+    .kh-btn {
+      all: unset;
+      box-sizing: border-box;
+      display: flex; align-items: center; gap: 5px;
+      padding: 5px 9px;
+      border-radius: 7px;
+      cursor: pointer;
+      white-space: nowrap;
+      color: #f2f2f7;
+      font: inherit;
+      flex: 0 0 auto;
+    }
+    .kh-btn:hover { background: rgba(255,255,255,0.14); }
+    .kh-btn:focus-visible { outline: 2px solid #fff; outline-offset: -2px; }
+    .kh-btn[data-danger="1"]:hover { background: rgba(239,68,68,0.9); }
+    .kh-btn svg { width: 14px; height: 14px; display: block; flex: 0 0 auto; }
+
+    .kh-quote {
+      font-size: 12px; line-height: 1.45; color: rgba(242,242,247,0.72);
+      max-height: 52px; overflow: hidden;
+      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+      border-left: 2px solid var(--kh-accent, ${COLORS[0].hex});
+      padding-left: 8px;
+    }
+    .kh-ta {
+      all: unset;
+      box-sizing: border-box;
+      display: block;
+      width: 100%;
+      min-height: 76px;
+      max-height: 40vh;
+      padding: 8px 9px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.08);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.14);
+      color: #f2f2f7;
+      font: inherit;
+      resize: vertical;
+      white-space: pre-wrap;
+      overflow-y: auto;
+    }
+    .kh-ta:focus { box-shadow: inset 0 0 0 1px rgba(255,255,255,0.4); }
+    .kh-ta::placeholder { color: rgba(242,242,247,0.4); }
+    .kh-row { display: flex; align-items: center; gap: 6px; }
+    .kh-row .kh-spacer { flex: 1 1 auto; }
+    .kh-hint { font-size: 11px; color: rgba(242,242,247,0.45); }
+    .kh-primary { background: #0a84ff; }
+    .kh-primary:hover { background: #339cff; }
   `
 }
 
@@ -141,28 +250,380 @@ function karakeepInit(): void {
   w.__karakeepHL = true
 
   let pageHighlights: StoredHighlight[] = []
+  let lastUsedColor = DEFAULT_COLOR
 
   function ensureStyles(): void {
     if (document.getElementById(STYLE_ID)) return
     const el = document.createElement('style')
     el.id = STYLE_ID
     el.textContent = getStylesheet()
-    document.head.appendChild(el)
+    ;(document.head || document.documentElement).appendChild(el)
   }
 
   function uid(): string {
     return 'kh-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8)
   }
 
-  function textNodesIn(range: Range): Node[] {
+  function sendHost(channel: string, payload: unknown): void {
+    ipcRenderer.send(channel, payload)
+  }
+
+  function marksFor(id: string): HTMLElement[] {
+    return Array.from(document.querySelectorAll<HTMLElement>(`.${HIGHLIGHT_CLASS}[data-kh-id="${id}"]`))
+  }
+
+  // ───────────────────────── text collection ─────────────────────────
+
+  // Text inside these never renders as prose, but it *does* sit in the DOM
+  // text stream. Including it both shifts offsets and lets a highlight
+  // "anchor" somewhere invisible, which reads to the user as a highlight
+  // that silently failed.
+  const SKIP_TAGS = new Set([
+    'SCRIPT',
+    'STYLE',
+    'NOSCRIPT',
+    'TEMPLATE',
+    'TEXTAREA',
+    'TITLE',
+    'HEAD',
+    'SELECT',
+    'OPTION',
+    'IFRAME',
+    'SVG'
+  ])
+
+  /**
+   * Whether an element's text is actually rendered to the reader.
+   *
+   * Pages routinely carry duplicate copies of the same text for responsive
+   * or print layouts (arxiv's `<span class="desktop-only">` is one), hidden
+   * with `display: none`. Anchoring into one of those produces a highlight
+   * that exists in the DOM, reports itself as anchored, and is completely
+   * invisible — which is indistinguishable, to the user, from matching
+   * having failed outright. `content-visibility: auto` is deliberately
+   * *not* treated as hidden: that content is real, just scrolled offscreen.
+   */
+  let visibilityCache = new WeakMap<Element, boolean>()
+
+  function isRendered(el: Element): boolean {
+    const cached = visibilityCache.get(el)
+    if (cached !== undefined) return cached
+    let visible: boolean
+    const check = (el as Element & { checkVisibility?: (o?: unknown) => boolean }).checkVisibility
+    if (typeof check === 'function') {
+      visible = check.call(el, {
+        visibilityProperty: true,
+        checkVisibilityCSS: true,
+        contentVisibilityAuto: false,
+        opacityProperty: false,
+        checkOpacity: false
+      })
+    } else {
+      visible = el.getClientRects().length > 0
+    }
+    if (!visible) {
+      // checkVisibility() also reports false for an element that simply has
+      // no box of its own — `display: contents` wrappers, which do render
+      // their text. Measuring the contents distinguishes those from a
+      // genuinely hidden subtree, which measures 0x0.
+      try {
+        const r = document.createRange()
+        r.selectNodeContents(el)
+        const rect = r.getBoundingClientRect()
+        visible = rect.width > 0 || rect.height > 0
+      } catch {
+        visible = false
+      }
+    }
+    visibilityCache.set(el, visible)
+    return visible
+  }
+
+  function collectTextNodes(): Text[] {
+    const root = document.body
+    if (!root) return []
+    const nodes: Text[] = []
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node: Node): number {
+        const parent = node.parentElement
+        if (!parent) return NodeFilter.FILTER_REJECT
+        if (SKIP_TAGS.has(parent.tagName.toUpperCase())) return NodeFilter.FILTER_REJECT
+        if (parent.closest(`#${OVERLAY_HOST_ID}`)) return NodeFilter.FILTER_REJECT
+        if (!node.textContent) return NodeFilter.FILTER_REJECT
+        if (!isRendered(parent)) return NodeFilter.FILTER_REJECT
+        return NodeFilter.FILTER_ACCEPT
+      }
+    })
+    let n: Node | null
+    while ((n = walker.nextNode())) nodes.push(n as Text)
+    return nodes
+  }
+
+  // ───────────────────────── normalisation ─────────────────────────
+
+  // Characters that routinely differ between the text Karakeep stored and
+  // the same text as the live page renders it: smart punctuation, the many
+  // Unicode spaces, and invisible formatting characters.
+  const FOLD: Record<string, string> = {
+    '‘': "'",
+    '’': "'",
+    '‚': "'",
+    '‛': "'",
+    '′': "'",
+    '“': '"',
+    '”': '"',
+    '„': '"',
+    '‟': '"',
+    '″': '"',
+    '–': '-',
+    '—': '-',
+    '―': '-',
+    '−': '-',
+    '…': '...'
+  }
+  const INVISIBLE = new Set([0x200b, 0x200c, 0x200d, 0x2060, 0xfeff, 0x00ad])
+
+  function isSpaceCode(code: number): boolean {
+    return (
+      code === 0x20 ||
+      code === 0x09 ||
+      code === 0x0a ||
+      code === 0x0d ||
+      code === 0x0c ||
+      code === 0x0b ||
+      code === 0x00a0 ||
+      code === 0x1680 ||
+      (code >= 0x2000 && code <= 0x200a) ||
+      code === 0x2028 ||
+      code === 0x2029 ||
+      code === 0x202f ||
+      code === 0x205f ||
+      code === 0x3000
+    )
+  }
+
+  interface Normalized {
+    /** Whitespace-collapsed, punctuation-folded text. */
+    norm: string
+    /** map[i] = index in the source string that norm[i] came from. */
+    map: number[]
+  }
+
+  /**
+   * Collapses whitespace runs to one space, folds smart punctuation, and
+   * drops zero-width characters — while keeping an index back to the source
+   * for every character kept, so a match found in `norm` can be turned back
+   * into a real DOM range. A plain string.replace() can't do that: it loses
+   * the correspondence the moment lengths change.
+   */
+  function normalizeWithMap(src: string): Normalized {
+    const out: string[] = []
+    const map: number[] = []
+    let prevSpace = false
+    for (let i = 0; i < src.length; i++) {
+      const code = src.charCodeAt(i)
+      if (INVISIBLE.has(code)) continue
+      if (isSpaceCode(code)) {
+        if (prevSpace || out.length === 0) continue
+        out.push(' ')
+        map.push(i)
+        prevSpace = true
+        continue
+      }
+      prevSpace = false
+      const folded = FOLD[src[i]]
+      if (folded) {
+        for (const ch of folded) {
+          out.push(ch)
+          map.push(i)
+        }
+      } else {
+        out.push(src[i])
+        map.push(i)
+      }
+    }
+    // Drop a trailing collapsed space so needles and haystack agree at the tail.
+    while (out.length && out[out.length - 1] === ' ') {
+      out.pop()
+      map.pop()
+    }
+    return { norm: out.join(''), map }
+  }
+
+  function normalizeNeedle(str: string): string {
+    return normalizeWithMap(str).norm
+  }
+
+  interface Occurrence {
+    start: number
+    end: number
+  }
+
+  function findAll(haystack: string, needle: string, limit = 64): Occurrence[] {
+    const out: Occurrence[] = []
+    if (!needle) return out
+    let from = 0
+    while (out.length < limit) {
+      const idx = haystack.indexOf(needle, from)
+      if (idx < 0) break
+      out.push({ start: idx, end: idx + needle.length })
+      from = idx + 1
+    }
+    return out
+  }
+
+  /** Length of the common run between two strings, compared from the ends. */
+  function commonTail(a: string, b: string): number {
+    let n = 0
+    while (n < a.length && n < b.length && a[a.length - 1 - n] === b[b.length - 1 - n]) n++
+    return n
+  }
+
+  function commonHead(a: string, b: string): number {
+    let n = 0
+    while (n < a.length && n < b.length && a[n] === b[n]) n++
+    return n
+  }
+
+  /**
+   * Finds `needle` in the live DOM and returns a Range over it.
+   *
+   * Strategy, in order — each step is a strictly looser match than the last,
+   * because a highlight that lands on approximately the right sentence is
+   * far better than one that silently doesn't render:
+   *   1. exact match on the normalised text
+   *   2. case-insensitive match
+   *   3. head-anchored match (the stored text's opening survives even when
+   *      the tail was edited, truncated, or re-flowed)
+   * Ambiguity between several matches is resolved with the stored
+   * prefix/suffix context.
+   */
+  function locateText(
+    needle: string,
+    prefix?: string,
+    suffix?: string,
+    expectedOffset?: number
+  ): Range | null {
+    if (!needle) return null
+    const nodes = collectTextNodes()
+    if (!nodes.length) return null
+
+    let full = ''
+    const nodeMap: { node: Text; start: number }[] = []
+    for (const tn of nodes) {
+      nodeMap.push({ node: tn, start: full.length })
+      full += tn.data
+    }
+
+    const { norm, map } = normalizeWithMap(full)
+    const normNeedle = normalizeNeedle(needle)
+    if (!normNeedle) return null
+
+    let occurrences = findAll(norm, normNeedle)
+
+    if (!occurrences.length) {
+      const lowerNorm = norm.toLowerCase()
+      occurrences = findAll(lowerNorm, normNeedle.toLowerCase())
+    }
+
+    if (!occurrences.length && normNeedle.length >= 24) {
+      // Head anchor: the opening of the stored text usually survives an edit
+      // that changed its tail. Cover only as far as the two actually agree —
+      // extending blindly to the stored length would smear the highlight
+      // across whatever happens to follow it on the page.
+      const headLen = Math.max(20, Math.floor(normNeedle.length * 0.6))
+      const lowerNorm = norm.toLowerCase()
+      const lowerNeedle = normNeedle.toLowerCase()
+      const heads = findAll(lowerNorm, lowerNeedle.slice(0, headLen), 16)
+      occurrences = heads.map((o) => ({
+        start: o.start,
+        end: o.start + commonHead(lowerNorm.slice(o.start, o.start + normNeedle.length), lowerNeedle)
+      }))
+    }
+
+    if (!occurrences.length) return null
+
+    let best = occurrences[0]
+    if (occurrences.length > 1) {
+      // Two independent tie-breakers, applied in that order:
+      //   1. the surrounding text we captured when the highlight was made
+      //   2. how far the candidate sits from the stored character offset
+      // Highlights that came from the server carry no prefix/suffix at all,
+      // so for a short, repeated string like "Abstract" the offset is the
+      // only thing distinguishing the right occurrence from the first one.
+      const normPrefix = prefix ? normalizeNeedle(prefix) : ''
+      const normSuffix = suffix ? normalizeNeedle(suffix) : ''
+      const useOffset = typeof expectedOffset === 'number' && expectedOffset > 0
+      let bestScore = -1
+      let bestDistance = Infinity
+      for (const occ of occurrences) {
+        let score = 0
+        if (normPrefix) {
+          score += commonTail(norm.slice(Math.max(0, occ.start - normPrefix.length), occ.start), normPrefix)
+        }
+        if (normSuffix) {
+          score += commonHead(norm.slice(occ.end, occ.end + normSuffix.length), normSuffix)
+        }
+        const distance = useOffset
+          ? Math.abs((map[occ.start] ?? occ.start) - (expectedOffset as number))
+          : 0
+        if (score > bestScore || (score === bestScore && distance < bestDistance)) {
+          bestScore = score
+          bestDistance = distance
+          best = occ
+        }
+      }
+    }
+    // Normalised indices -> source indices -> (node, offset) pairs.
+    if (best.start >= map.length) return null
+    const srcStart = map[best.start]
+    const srcEnd = best.end - 1 < map.length ? map[best.end - 1] + 1 : full.length
+
+    let startNode: Text | null = null
+    let startOffset = 0
+    let endNode: Text | null = null
+    let endOffset = 0
+    for (const entry of nodeMap) {
+      const nodeEnd = entry.start + entry.node.data.length
+      if (!startNode && nodeEnd > srcStart) {
+        startNode = entry.node
+        startOffset = Math.max(0, srcStart - entry.start)
+      }
+      if (nodeEnd >= srcEnd) {
+        endNode = entry.node
+        endOffset = Math.min(entry.node.data.length, srcEnd - entry.start)
+        break
+      }
+    }
+    if (!startNode || !endNode) return null
+
+    try {
+      const range = document.createRange()
+      range.setStart(startNode, Math.min(startOffset, startNode.data.length))
+      range.setEnd(endNode, Math.min(endOffset, endNode.data.length))
+      if (range.collapsed) return null
+      return range
+    } catch {
+      return null
+    }
+  }
+
+  // ───────────────────────── wrapping ─────────────────────────
+
+  function textNodesIn(range: Range): Text[] {
     const start = range.startContainer
-    const end = range.endContainer
-    if (start === end && start.nodeType === Node.TEXT_NODE) return [start]
-    const result: Node[] = []
-    const walker = document.createTreeWalker(range.commonAncestorContainer, NodeFilter.SHOW_TEXT)
+    if (start === range.endContainer && start.nodeType === Node.TEXT_NODE) return [start as Text]
+    const result: Text[] = []
+    const rootNode =
+      range.commonAncestorContainer.nodeType === Node.TEXT_NODE
+        ? range.commonAncestorContainer.parentNode || range.commonAncestorContainer
+        : range.commonAncestorContainer
+    const walker = document.createTreeWalker(rootNode, NodeFilter.SHOW_TEXT)
     let n: Node | null
     while ((n = walker.nextNode())) {
-      if (range.intersectsNode(n)) result.push(n)
+      const parent = (n as Text).parentElement
+      if (parent && SKIP_TAGS.has(parent.tagName.toUpperCase())) continue
+      if (range.intersectsNode(n)) result.push(n as Text)
     }
     return result
   }
@@ -171,10 +632,17 @@ function karakeepInit(): void {
     const nodes = textNodesIn(range)
     const marks: HTMLElement[] = []
     for (const node of nodes) {
+      // The DOM is being mutated as we go; a node that was split or
+      // detached by an earlier iteration is no longer wrappable.
+      if (!node.isConnected) continue
       const nr = document.createRange()
-      nr.selectNodeContents(node)
-      if (node === range.startContainer) nr.setStart(node, range.startOffset)
-      if (node === range.endContainer) nr.setEnd(node, range.endOffset)
+      try {
+        nr.selectNodeContents(node)
+        if (node === range.startContainer) nr.setStart(node, Math.min(range.startOffset, node.data.length))
+        if (node === range.endContainer) nr.setEnd(node, Math.min(range.endOffset, node.data.length))
+      } catch {
+        continue
+      }
       if (nr.collapsed || !nr.toString().trim()) continue
       try {
         const mark = document.createElement('mark')
@@ -184,24 +652,23 @@ function karakeepInit(): void {
         nr.surroundContents(mark)
         marks.push(mark)
       } catch {
-        // surroundContents can throw if the range partially selects a non-Text node
+        // surroundContents throws when the range partially selects a
+        // non-Text node; skipping that fragment still highlights the rest.
       }
     }
     return marks
   }
 
   function textOffsetOf(node: Node, nodeOffset: number): number {
-    const tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
     let total = 0
-    let n: Node | null
-    while ((n = tw.nextNode())) {
-      if (n === node) return total + nodeOffset
-      total += (n.textContent || '').length
+    for (const tn of collectTextNodes()) {
+      if (tn === node) return total + nodeOffset
+      total += tn.data.length
     }
     return -1
   }
 
-  const CONTEXT_LEN = 50
+  const CONTEXT_LEN = 60
 
   function extractContext(range: Range): { prefix: string; suffix: string } {
     let prefix = ''
@@ -222,24 +689,41 @@ function karakeepInit(): void {
     return { prefix, suffix }
   }
 
-  function sendHost(channel: string, payload: unknown): void {
-    ipcRenderer.send(channel, payload)
+  // ───────────────────────── mutations ─────────────────────────
+
+  function bindMark(mark: HTMLElement, hl: StoredHighlight): void {
+    mark.addEventListener('click', (e) => {
+      // A drag that ended on this mark is a new selection, not a click on
+      // the highlight — leave the selection popover alone.
+      if (currentSelectionRange()) return
+      e.preventDefault()
+      e.stopPropagation()
+      openHighlightPopover(hl)
+    })
   }
 
-  function createHighlight(sel: Selection, color: string, withNote: boolean): void {
-    if (!sel || sel.isCollapsed) return
-    const text = sel.toString().trim()
-    if (!text) return
+  function applyNoteAffordance(id: string, note: string | undefined): void {
+    for (const el of marksFor(id)) {
+      if (note) {
+        el.dataset.khNote = '1'
+        el.title = note
+      } else {
+        delete el.dataset.khNote
+        el.removeAttribute('title')
+      }
+    }
+  }
 
-    const range = sel.getRangeAt(0)
+  function createHighlight(range: Range, color: string, withNote: boolean): StoredHighlight | null {
+    const text = range.toString().trim()
+    if (!text) return null
+
     const id = uid()
     const context = extractContext(range)
     const startOffset = textOffsetOf(range.startContainer, range.startOffset)
     const endOffset = textOffsetOf(range.endContainer, range.endOffset)
     const marks = wrapRange(range, id, color)
-    if (!marks.length) return
-
-    sel.removeAllRanges()
+    if (!marks.length) return null
 
     const hl: StoredHighlight = {
       id,
@@ -252,375 +736,687 @@ function karakeepInit(): void {
       endOffset
     }
     pageHighlights.push(hl)
-
-    marks.forEach((m) => m.addEventListener('click', () => openNote(hl)))
+    lastUsedColor = color
+    marks.forEach((m) => bindMark(m, hl))
 
     sendHost('kk:highlight-created', hl)
+    reportStatus()
 
-    if (withNote) openNote(hl)
+    if (withNote) openHighlightPopover(hl, { note: true })
+    return hl
+  }
+
+  function setHighlightColor(hl: StoredHighlight, color: string): void {
+    if (hl.color === color) return
+    hl.color = color
+    lastUsedColor = color
+    for (const el of marksFor(hl.id)) el.dataset.khColor = color
+    sendHost('kk:highlight-updated', hl)
+  }
+
+  function setHighlightNote(hl: StoredHighlight, note: string): void {
+    hl.note = note
+    applyNoteAffordance(hl.id, note || undefined)
+    sendHost('kk:highlight-updated', hl)
   }
 
   function destroyHighlight(id: string): void {
-    document.querySelectorAll(`[data-kh-id="${id}"]`).forEach((m) => {
+    for (const m of marksFor(id)) {
       const p = m.parentNode
-      if (!p) return
+      if (!p) continue
       while (m.firstChild) p.insertBefore(m.firstChild, m)
       p.removeChild(m)
       p.normalize()
-    })
+    }
     pageHighlights = pageHighlights.filter((h) => h.id !== id)
     sendHost('kk:highlight-removed', { id })
+    reportStatus()
   }
 
-  function showToolbar(sel: Selection): void {
-    hideToolbar()
-    const rect = sel.getRangeAt(0).getBoundingClientRect()
-    const bar = document.createElement('div')
-    bar.id = TOOLBAR_ID
+  // ───────────────────────── popover ─────────────────────────
 
-    function addBtn(label: string, fn: () => void): void {
+  interface Overlay {
+    host: HTMLElement
+    root: ShadowRoot
+  }
+
+  let overlay: Overlay | null = null
+
+  function ensureOverlay(): Overlay {
+    if (overlay && overlay.host.isConnected) return overlay
+    const host = document.createElement('div')
+    host.id = OVERLAY_HOST_ID
+    // pointer-events: none so the host never swallows clicks meant for the
+    // page; the popover itself opts back in.
+    host.style.cssText =
+      'all: initial; position: fixed; inset: 0; z-index: 2147483647; pointer-events: none;'
+    document.documentElement.appendChild(host)
+    const root = host.attachShadow({ mode: 'closed' })
+    const style = document.createElement('style')
+    style.textContent = getOverlayStylesheet()
+    root.appendChild(style)
+    overlay = { host, root }
+    return overlay
+  }
+
+  type PopoverKind = 'selection' | 'highlight'
+
+  interface OpenPopover {
+    kind: PopoverKind
+    el: HTMLElement
+    anchor: () => DOMRect | null
+    highlightId?: string
+  }
+
+  let popover: OpenPopover | null = null
+
+  function closePopover(): void {
+    if (!popover) return
+    if (popover.highlightId) {
+      for (const el of marksFor(popover.highlightId)) delete el.dataset.khActive
+    }
+    popover.el.remove()
+    popover = null
+  }
+
+  /**
+   * Places the popover in viewport coordinates: above the anchor by
+   * default, flipped below when there isn't room, and always clamped
+   * horizontally so a selection at the left or right edge of the page still
+   * gets a fully visible popover.
+   */
+  function placePopover(el: HTMLElement, rect: DOMRect): void {
+    const margin = 10
+    const gap = 8
+    const vw = document.documentElement.clientWidth || window.innerWidth
+    const vh = document.documentElement.clientHeight || window.innerHeight
+    const { width, height } = el.getBoundingClientRect()
+
+    let top = rect.top - height - gap
+    if (top < margin) top = rect.bottom + gap
+    if (top + height > vh - margin) top = Math.max(margin, vh - margin - height)
+
+    let left = rect.left + rect.width / 2 - width / 2
+    left = Math.max(margin, Math.min(left, vw - width - margin))
+
+    el.style.left = `${Math.round(left)}px`
+    el.style.top = `${Math.round(top)}px`
+  }
+
+  function reposition(): void {
+    if (!popover) return
+    const rect = popover.anchor()
+    if (!rect || (rect.width === 0 && rect.height === 0)) {
+      closePopover()
+      return
+    }
+    placePopover(popover.el, rect)
+  }
+
+  function icon(path: string): SVGSVGElement {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    svg.setAttribute('viewBox', '0 0 24 24')
+    svg.setAttribute('fill', 'none')
+    svg.setAttribute('stroke', 'currentColor')
+    svg.setAttribute('stroke-width', '1.8')
+    svg.setAttribute('stroke-linecap', 'round')
+    svg.setAttribute('stroke-linejoin', 'round')
+    const p = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    p.setAttribute('d', path)
+    svg.appendChild(p)
+    return svg
+  }
+
+  const ICON_NOTE = 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'
+  const ICON_COPY = 'M9 9h10v10H9zM5 15H4V4h11v1'
+  const ICON_TRASH = 'M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14'
+
+  function makeButton(
+    label: string,
+    iconPath: string,
+    onClick: () => void,
+    danger = false,
+    iconOnly = false
+  ): HTMLElement {
+    const b = document.createElement('button')
+    b.className = iconOnly ? 'kh-btn kh-icon-only' : 'kh-btn'
+    if (danger) b.dataset.danger = '1'
+    if (iconPath) b.appendChild(icon(iconPath))
+    if (iconOnly) {
+      b.title = label
+      b.setAttribute('aria-label', label)
+    } else {
+      const span = document.createElement('span')
+      span.textContent = label
+      b.appendChild(span)
+    }
+    b.addEventListener('click', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      onClick()
+    })
+    return b
+  }
+
+  function makeSwatchRow(active: string | null, onPick: (color: string) => void): HTMLElement {
+    const frag = document.createElement('div')
+    frag.className = 'kh-row'
+    for (const { name, hex } of COLORS) {
       const b = document.createElement('button')
-      b.textContent = label
-      b.addEventListener('mousedown', (e) => {
+      b.className = 'kh-swatch'
+      b.style.backgroundColor = hex
+      b.title = name[0].toUpperCase() + name.slice(1)
+      b.setAttribute('aria-label', b.title)
+      if (active === name) {
+        b.dataset.active = '1'
+        const check = icon('M5 13l4 4L19 7')
+        check.setAttribute('stroke', 'rgba(0,0,0,0.65)')
+        check.setAttribute('stroke-width', '3')
+        b.appendChild(check)
+      }
+      b.addEventListener('click', (e) => {
         e.preventDefault()
         e.stopPropagation()
+        onPick(name)
       })
-      b.addEventListener('click', (e) => {
-        e.stopPropagation()
-        fn()
-        hideToolbar()
-      })
-      bar.appendChild(b)
+      frag.appendChild(b)
+    }
+    return frag
+  }
+
+  function newPopoverEl(): HTMLElement {
+    const el = document.createElement('div')
+    el.className = 'kh-pop'
+    // Keep the page selection alive when the popover is clicked, and keep
+    // the page's own mousedown handlers out of it.
+    el.addEventListener('mousedown', (e) => {
+      // The textarea and the note reader own their own selection; everywhere
+      // else the default is suppressed so clicking the popover doesn't drop
+      // the page selection it was opened for.
+      if ((e.target as HTMLElement).closest('.kh-ta, .kh-note-view')) return
+      e.preventDefault()
+      e.stopPropagation()
+    })
+    el.addEventListener('click', (e) => e.stopPropagation())
+    return el
+  }
+
+  function mountPopover(kind: PopoverKind, el: HTMLElement, anchor: () => DOMRect | null, highlightId?: string): void {
+    closePopover()
+    const { root } = ensureOverlay()
+    root.appendChild(el)
+    popover = { kind, el, anchor, highlightId }
+    if (highlightId) {
+      for (const m of marksFor(highlightId)) m.dataset.khActive = '1'
+    }
+    const rect = anchor()
+    if (rect) placePopover(el, rect)
+  }
+
+  /** Popover for a fresh text selection: pick a colour, or add a note. */
+  function openSelectionPopover(range: Range): void {
+    const el = newPopoverEl()
+    const anchor = (): DOMRect | null => {
+      try {
+        const r = range.getBoundingClientRect()
+        return r.width || r.height ? r : null
+      } catch {
+        return null
+      }
     }
 
-    addBtn('✨ Highlight', () => createHighlight(sel, 'green', false))
-    addBtn('📝 Note', () => createHighlight(sel, 'green', true))
+    el.appendChild(
+      makeSwatchRow(null, (color) => {
+        const clone = range.cloneRange()
+        closePopover()
+        window.getSelection()?.removeAllRanges()
+        createHighlight(clone, color, false)
+      })
+    )
 
     const sep = document.createElement('div')
     sep.className = 'kh-sep'
-    bar.appendChild(sep)
+    el.appendChild(sep)
 
-    const palette: [string, string][] = [
-      ['green', '#10b981'],
-      ['yellow', '#facc15'],
-      ['red', '#ef4444'],
-      ['blue', '#3b82f6'],
-      ['purple', '#a855f7']
-    ]
-    palette.forEach(([name, hex]) => {
-      const dot = document.createElement('button')
-      dot.className = 'kh-dot'
-      dot.style.backgroundColor = hex
-      dot.title = name
-      dot.addEventListener('mousedown', (e) => {
-        e.preventDefault()
-        e.stopPropagation()
+    el.appendChild(
+      makeButton('Note', ICON_NOTE, () => {
+        const clone = range.cloneRange()
+        closePopover()
+        window.getSelection()?.removeAllRanges()
+        createHighlight(clone, lastUsedColor, true)
       })
-      dot.addEventListener('click', (e) => {
-        e.stopPropagation()
-        createHighlight(sel, name, false)
-        hideToolbar()
+    )
+
+    mountPopover('selection', el, anchor)
+  }
+
+  /** Popover for an existing highlight: recolour, note, copy, delete. */
+  function openHighlightPopover(hl: StoredHighlight, opts: { note?: boolean } = {}): void {
+    const el = newPopoverEl()
+    const anchor = (): DOMRect | null => {
+      const marks = marksFor(hl.id)
+      if (!marks.length) return null
+      const first = marks[0].getBoundingClientRect()
+      const last = marks[marks.length - 1].getBoundingClientRect()
+      return new DOMRect(
+        Math.min(first.left, last.left),
+        Math.min(first.top, last.top),
+        Math.max(first.right, last.right) - Math.min(first.left, last.left),
+        Math.max(first.bottom, last.bottom) - Math.min(first.top, last.top)
+      )
+    }
+
+    function accent(): string {
+      return COLORS.find((c) => c.name === hl.color)?.hex || COLORS[0].hex
+    }
+
+    function copyButton(iconOnly: boolean): HTMLElement {
+      // Icon-only buttons carry the long form as a tooltip; the labelled
+      // bar has room for the icon to do the explaining.
+      return makeButton(
+        iconOnly ? 'Copy highlighted text' : 'Copy',
+        ICON_COPY,
+        () => {
+          void navigator.clipboard?.writeText(hl.text).catch(() => undefined)
+          closePopover()
+        },
+        false,
+        iconOnly
+      )
+    }
+
+    function deleteButton(iconOnly: boolean): HTMLElement {
+      return makeButton(
+        iconOnly ? 'Delete highlight' : 'Delete',
+        ICON_TRASH,
+        () => {
+          const id = hl.id
+          closePopover()
+          destroyHighlight(id)
+        },
+        true,
+        iconOnly
+      )
+    }
+
+    function swatches(): HTMLElement {
+      return makeSwatchRow(hl.color, (color) => {
+        setHighlightColor(hl, color)
+        renderActions()
       })
-      bar.appendChild(dot)
-    })
+    }
 
-    bar.style.top = rect.top + window.scrollY - 44 + 'px'
-    bar.style.left = rect.left + window.scrollX + rect.width / 2 + 'px'
-    bar.style.transform = 'translateX(-50%)'
-    document.body.appendChild(bar)
-  }
+    /**
+     * The default view for a highlight. When it carries a note, the note is
+     * shown right here in a scrollable block — reading one shouldn't cost a
+     * trip through an editor. Editing stays one explicit click away.
+     */
+    function renderActions(): void {
+      el.textContent = ''
 
-  function hideToolbar(): void {
-    document.getElementById(TOOLBAR_ID)?.remove()
-  }
+      if (hl.note) {
+        el.className = 'kh-pop kh-read-mode'
 
-  let noteHost: HTMLElement | null = null
+        const note = document.createElement('div')
+        note.className = 'kh-note-view'
+        note.style.setProperty('--kh-accent', accent())
+        note.textContent = hl.note
+        // Focusable so the note scrolls with the keyboard, not just the wheel.
+        note.tabIndex = 0
+        el.appendChild(note)
 
-  /** Sets the note dataset/tooltip on every mark for a given highlight id
-   * so the note is genuinely visible on the live page — a hover tooltip
-   * with the actual text, not just the pencil-emoji marker — without
-   * requiring the (previously broken) dialog to work at all. */
-  function applyNoteAffordance(id: string, note: string | undefined): void {
-    document.querySelectorAll(`[data-kh-id="${id}"]`).forEach((m) => {
-      const el = m as HTMLElement
-      el.dataset.khNote = note ? '1' : ''
-      if (note) el.title = note
-      else el.removeAttribute('title')
-    })
-  }
+        const toolbar = document.createElement('div')
+        toolbar.className = 'kh-toolbar'
+        toolbar.appendChild(swatches())
+        const spacer = document.createElement('div')
+        spacer.className = 'kh-spacer'
+        toolbar.appendChild(spacer)
+        toolbar.appendChild(makeButton('Edit', ICON_NOTE, renderNote))
+        toolbar.appendChild(copyButton(true))
+        toolbar.appendChild(deleteButton(true))
+        el.appendChild(toolbar)
+      } else {
+        el.className = 'kh-pop'
+        el.appendChild(swatches())
 
-  function openNote(hl: StoredHighlight): void {
-    closeNote()
+        const sep = document.createElement('div')
+        sep.className = 'kh-sep'
+        el.appendChild(sep)
 
-    // Host lives outside document.body (on <html> itself) with a closed
-    // shadow root, so the page's own stylesheets can't reach in and the
-    // page's own script can't reach the dialog's DOM. See the file-level
-    // comment on getDialogStylesheet() for why.
-    const host = document.createElement('div')
-    host.id = NOTE_HOST_ID
-    host.style.cssText = 'all: initial; position: fixed; inset: 0; z-index: 2147483647;'
-    document.documentElement.appendChild(host)
-    noteHost = host
-    const root = host.attachShadow({ mode: 'closed' })
-
-    const styleEl = document.createElement('style')
-    styleEl.textContent = getDialogStylesheet()
-    root.appendChild(styleEl)
-
-    const ov = document.createElement('div')
-    ov.className = 'kh-overlay'
-    ov.addEventListener('click', closeNote)
-    root.appendChild(ov)
-
-    const dlg = document.createElement('div')
-    dlg.className = 'kh-dialog'
-
-    const hdr = document.createElement('div')
-    hdr.className = 'kh-hdr'
-    const hdrTitle = document.createElement('span')
-    hdrTitle.textContent = hl.note ? 'Edit Note' : 'Add Note'
-    const closeBtn = document.createElement('button')
-    closeBtn.className = 'kh-close'
-    closeBtn.innerHTML = '&times;'
-    closeBtn.addEventListener('click', closeNote)
-    hdr.appendChild(hdrTitle)
-    hdr.appendChild(closeBtn)
-    dlg.appendChild(hdr)
-
-    const body = document.createElement('div')
-    body.className = 'kh-body'
-
-    const quote = document.createElement('div')
-    quote.className = 'kh-quote'
-    quote.textContent = hl.text
-    body.appendChild(quote)
-
-    const ta = document.createElement('textarea')
-    ta.className = 'kh-ta'
-    ta.placeholder = 'Add your note here…'
-    ta.value = hl.note || ''
-    body.appendChild(ta)
-    dlg.appendChild(body)
-
-    const ftr = document.createElement('div')
-    ftr.className = 'kh-ftr'
-
-    const delBtn = document.createElement('button')
-    delBtn.className = 'kh-del'
-    delBtn.textContent = 'Delete'
-    delBtn.addEventListener('click', () => {
-      destroyHighlight(hl.id)
-      closeNote()
-    })
-    ftr.appendChild(delBtn)
-
-    const spacer = document.createElement('div')
-    spacer.style.flex = '1'
-    ftr.appendChild(spacer)
-
-    const cancelBtn = document.createElement('button')
-    cancelBtn.className = 'kh-cancel'
-    cancelBtn.textContent = 'Cancel'
-    cancelBtn.addEventListener('click', closeNote)
-    ftr.appendChild(cancelBtn)
-
-    const saveBtn = document.createElement('button')
-    saveBtn.className = 'kh-save-btn'
-    saveBtn.textContent = 'Save Note'
-    saveBtn.addEventListener('click', () => {
-      hl.note = ta.value.trim()
-      applyNoteAffordance(hl.id, hl.note)
-      sendHost('kk:highlight-updated', hl)
-      closeNote()
-    })
-    ftr.appendChild(saveBtn)
-    dlg.appendChild(ftr)
-
-    root.appendChild(dlg)
-    ta.focus()
-
-    ta.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault()
-        saveBtn.click()
+        el.appendChild(makeButton('Note', ICON_NOTE, renderNote))
+        el.appendChild(copyButton(false))
+        el.appendChild(deleteButton(false))
       }
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        closeNote()
+      reposition()
+    }
+
+    function renderNote(): void {
+      el.className = 'kh-pop kh-note-mode'
+      el.textContent = ''
+
+      const quote = document.createElement('div')
+      quote.className = 'kh-quote'
+      quote.style.setProperty('--kh-accent', accent())
+      quote.textContent = hl.text
+      el.appendChild(quote)
+
+      const ta = document.createElement('textarea')
+      ta.className = 'kh-ta'
+      ta.placeholder = 'Add a note…'
+      ta.value = hl.note || ''
+      el.appendChild(ta)
+
+      const row = document.createElement('div')
+      row.className = 'kh-row'
+      const hint = document.createElement('span')
+      hint.className = 'kh-hint'
+      hint.textContent = '⌘↩ to save'
+      row.appendChild(hint)
+      const spacer = document.createElement('div')
+      spacer.className = 'kh-spacer'
+      row.appendChild(spacer)
+
+      const save = (): void => {
+        setHighlightNote(hl, ta.value.trim())
+        // Back to the reading view rather than dismissing outright: it
+        // confirms what was saved, and matches where Cancel lands.
+        renderActions()
       }
-    })
-  }
+      row.appendChild(makeButton('Cancel', '', () => renderActions()))
+      const saveBtn = makeButton('Save', '', save)
+      saveBtn.classList.add('kh-primary')
+      row.appendChild(saveBtn)
+      el.appendChild(row)
 
-  function closeNote(): void {
-    noteHost?.remove()
-    noteHost = null
-  }
-
-  function normalizeForMatch(str: string): string {
-    return str
-      .replace(/[‘’‚‛]/g, "'")
-      .replace(/[“”„‟]/g, '"')
-      .replace(/[–—−]/g, '-')
-      .replace(/[ \t\n\r\f\v]/g, ' ')
-  }
-
-  function escapeRegExp(s: string): string {
-    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  }
-
-  function buildFuzzyPattern(needle: string): RegExp | null {
-    const parts = needle.split(/\s+/).filter(Boolean).map(escapeRegExp)
-    if (!parts.length) return null
-    try {
-      return new RegExp(parts.join('\\s+'), 'g')
-    } catch {
-      return null
-    }
-  }
-
-  function findOccurrences(full: string, needle: string): { start: number; end: number }[] {
-    const occurrences: { start: number; end: number }[] = []
-    let searchFrom = 0
-    while (true) {
-      const idx = full.indexOf(needle, searchFrom)
-      if (idx < 0) break
-      occurrences.push({ start: idx, end: idx + needle.length })
-      searchFrom = idx + 1
-    }
-    if (occurrences.length) return occurrences
-
-    const pattern = buildFuzzyPattern(needle)
-    if (!pattern) return occurrences
-    let m: RegExpExecArray | null
-    while ((m = pattern.exec(full))) {
-      occurrences.push({ start: m.index, end: m.index + m[0].length })
-      if (m[0].length === 0) pattern.lastIndex++
-    }
-    return occurrences
-  }
-
-  function locateText(needle: string, prefix?: string, suffix?: string): Range | null {
-    if (!needle) return null
-    const tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
-    const nodes: Node[] = []
-    let n: Node | null
-    while ((n = tw.nextNode())) nodes.push(n)
-
-    let full = ''
-    const map: { node: Node; start: number; end: number }[] = []
-    nodes.forEach((tn) => {
-      const s = full.length
-      full += tn.textContent || ''
-      map.push({ node: tn, start: s, end: full.length })
-    })
-
-    const normFull = normalizeForMatch(full)
-    const normNeedle = normalizeForMatch(needle)
-    const occurrences = findOccurrences(normFull, normNeedle)
-    if (occurrences.length === 0) {
-      console.warn('[karakeep] could not locate highlight text on live DOM', needle.slice(0, 40))
-      return null
-    }
-
-    let best = occurrences[0]
-    if (occurrences.length > 1 && (prefix || suffix)) {
-      let bestScore = -1
-      for (const occ of occurrences) {
-        let score = 0
-        if (prefix) {
-          const actualPrefix = full.slice(Math.max(0, occ.start - prefix.length), occ.start)
-          const pLen = Math.min(actualPrefix.length, prefix.length)
-          for (let pi = 0; pi < pLen; pi++) {
-            if (actualPrefix[actualPrefix.length - 1 - pi] === prefix[prefix.length - 1 - pi]) score++
-            else break
-          }
+      ta.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault()
+          save()
+        } else if (e.key === 'Escape') {
+          e.preventDefault()
+          e.stopPropagation()
+          closePopover()
         }
-        if (suffix) {
-          const actualSuffix = full.slice(occ.end, occ.end + suffix.length)
-          const sLen = Math.min(actualSuffix.length, suffix.length)
-          for (let si = 0; si < sLen; si++) {
-            if (actualSuffix[si] === suffix[si]) score++
-            else break
-          }
-        }
-        if (score > bestScore) {
-          bestScore = score
-          best = occ
-        }
-      }
+      })
+
+      reposition()
+      // Placed after layout so the popover doesn't jump under the caret.
+      requestAnimationFrame(() => {
+        ta.focus()
+        ta.setSelectionRange(ta.value.length, ta.value.length)
+      })
     }
 
-    let sNode: Node | null = null
-    let sOff = 0
-    let eNode: Node | null = null
-    let eOff = 0
-    for (const entry of map) {
-      if (!sNode && entry.end > best.start) {
-        sNode = entry.node
-        sOff = best.start - entry.start
-      }
-      if (entry.end >= best.end) {
-        eNode = entry.node
-        eOff = best.end - entry.start
-        break
-      }
+    mountPopover('highlight', el, anchor, hl.id)
+    if (opts.note) renderNote()
+    else renderActions()
+  }
+
+  // ───────────────────────── anchoring / retries ─────────────────────────
+
+  let unresolved: StoredHighlight[] = []
+  let anchorObserver: MutationObserver | null = null
+  let retryHandle: ReturnType<typeof setTimeout> | null = null
+  let observerDebounce: ReturnType<typeof setTimeout> | null = null
+  let watchDeadline = 0
+
+  function reportStatus(): void {
+    sendHost('kk:highlight-status', {
+      anchored: pageHighlights.map((h) => h.id),
+      missing: unresolved.map((h) => h.id)
+    })
+  }
+
+  function stopWatching(): void {
+    anchorObserver?.disconnect()
+    anchorObserver = null
+    if (retryHandle) clearTimeout(retryHandle)
+    retryHandle = null
+    if (observerDebounce) clearTimeout(observerDebounce)
+    observerDebounce = null
+  }
+
+  /**
+   * Client-rendered pages (and lazily-hydrated ones) often don't have the
+   * highlighted text in the DOM at dom-ready at all — the single-shot apply
+   * this used to do is a large share of "my highlights don't show up". Keep
+   * retrying as the DOM changes, then give up rather than watching forever.
+   */
+  function startWatching(): void {
+    if (!unresolved.length) {
+      stopWatching()
+      return
     }
-    if (!sNode || !eNode) return null
-    const r = document.createRange()
-    r.setStart(sNode, sOff)
-    r.setEnd(eNode, eOff)
-    return r
+    if (!watchDeadline) watchDeadline = Date.now() + 30000
+
+    if (!anchorObserver && document.body) {
+      anchorObserver = new MutationObserver(() => {
+        if (observerDebounce) clearTimeout(observerDebounce)
+        observerDebounce = setTimeout(() => resolvePending(), 300)
+      })
+      anchorObserver.observe(document.body, { childList: true, subtree: true, characterData: true })
+    }
+    if (!retryHandle) {
+      retryHandle = setTimeout(() => {
+        retryHandle = null
+        resolvePending()
+      }, 1200)
+    }
+  }
+
+  function resolvePending(): void {
+    if (!unresolved.length || Date.now() > watchDeadline) {
+      if (unresolved.length) {
+        console.warn('[karakeep] gave up anchoring', unresolved.length, 'highlight(s) on this page')
+      }
+      stopWatching()
+      return
+    }
+    applyStored(unresolved)
   }
 
   function applyStored(list: StoredHighlight[]): void {
-    if (!list || !list.length) return
-    list.forEach((h) => {
-      if (pageHighlights.some((e) => e.id === h.id)) return
-      const found = locateText(h.text, h.prefix, h.suffix)
-      if (!found) return
-      const marks = wrapRange(found, h.id, h.color || 'green')
-      if (!marks.length) return
-      marks.forEach((m) => {
-        m.addEventListener('click', () => openNote(h))
-      })
+    if (!list || !list.length || !document.body) return
+    // Visibility changes as a page hydrates, so the cache only holds for
+    // the duration of one pass.
+    visibilityCache = new WeakMap<Element, boolean>()
+    // Our own wrapping mutates the DOM; don't let that feed back into the
+    // observer that triggered us.
+    anchorObserver?.disconnect()
+
+    const stillMissing: StoredHighlight[] = []
+    let anchoredAny = false
+
+    for (const h of list) {
+      if (!h || !h.text) continue
+      if (marksFor(h.id).length) continue
+      const found = locateText(h.text, h.prefix, h.suffix, h.startOffset)
+      if (!found) {
+        stillMissing.push(h)
+        continue
+      }
+      const marks = wrapRange(found, h.id, h.color || DEFAULT_COLOR)
+      if (!marks.length) {
+        stillMissing.push(h)
+        continue
+      }
+      const existing = pageHighlights.find((e) => e.id === h.id)
+      const record = existing || h
+      if (!existing) pageHighlights.push(record)
+      marks.forEach((m) => bindMark(m, record))
       applyNoteAffordance(h.id, h.note || undefined)
-      pageHighlights.push(h)
-    })
+      anchoredAny = true
+    }
+
+    unresolved = stillMissing
+    if (anchorObserver && document.body) {
+      anchorObserver.observe(document.body, { childList: true, subtree: true, characterData: true })
+    }
+    if (unresolved.length) startWatching()
+    else stopWatching()
+    if (anchoredAny || list.length) reportStatus()
   }
 
-  let timer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * Reconciles the full server-side list for this bookmark against what is
+   * currently on the page: anchors anything new, and drops marks for
+   * highlights that no longer exist (deleted from the desktop UI).
+   */
+  function syncHighlights(list: StoredHighlight[]): void {
+    const incoming = Array.isArray(list) ? list : []
+    const incomingIds = new Set(incoming.map((h) => h.id))
 
-  document.addEventListener('mouseup', () => {
-    if (timer) clearTimeout(timer)
-    timer = setTimeout(() => {
-      const s = window.getSelection()
-      if (s && !s.isCollapsed && s.toString().trim()) {
-        let anchor: Node | null = s.anchorNode
-        if (anchor && anchor.nodeType !== Node.ELEMENT_NODE) anchor = anchor.parentElement
-        // The note dialog now lives in a closed shadow root outside
-        // document.body, so a selection made inside it can't be reached via
-        // a light-DOM closest() lookup in the first place — only the
-        // toolbar (still light-DOM) needs guarding here.
-        if (anchor && (anchor as Element).closest?.(`#${TOOLBAR_ID}`)) return
-        showToolbar(s)
-      } else {
-        hideToolbar()
+    // An empty list is ambiguous — it's what a failed or still-loading
+    // highlights query looks like as well as a genuinely empty bookmark —
+    // so it never reaps. Deletions made in this page remove their own marks
+    // synchronously, so nothing depends on reaping to stay in step.
+    for (const existing of incoming.length ? [...pageHighlights] : []) {
+      // Session-created highlights aren't in the server list under their
+      // client id yet — never reap those.
+      if (existing.id.startsWith('kh-')) continue
+      if (incomingIds.has(existing.id)) continue
+      for (const m of marksFor(existing.id)) {
+        const p = m.parentNode
+        if (!p) continue
+        while (m.firstChild) p.insertBefore(m.firstChild, m)
+        p.removeChild(m)
+        p.normalize()
       }
-    }, 200)
+      pageHighlights = pageHighlights.filter((h) => h.id !== existing.id)
+    }
+
+    // Pick up colour/note edits made outside the live page.
+    for (const h of incoming) {
+      const existing = pageHighlights.find((e) => e.id === h.id)
+      if (!existing) continue
+      if (h.color && h.color !== existing.color) {
+        existing.color = h.color
+        for (const m of marksFor(h.id)) m.dataset.khColor = h.color
+      }
+      if ((h.note || '') !== (existing.note || '')) {
+        existing.note = h.note || ''
+        applyNoteAffordance(h.id, existing.note || undefined)
+      }
+    }
+
+    watchDeadline = Date.now() + 30000
+    applyStored(incoming)
+  }
+
+  /**
+   * Re-keys a highlight created in this page from its client-generated id to
+   * the id the server assigned, so the next full sync recognises it as
+   * already anchored instead of highlighting the same text twice.
+   */
+  function adoptServerId(clientId: string, serverId: string): void {
+    if (!clientId || !serverId || clientId === serverId) return
+    const hl = pageHighlights.find((h) => h.id === clientId)
+    if (!hl) return
+    for (const m of marksFor(clientId)) m.dataset.khId = serverId
+    hl.id = serverId
+    if (popover?.highlightId === clientId) popover.highlightId = serverId
+    reportStatus()
+  }
+
+  function focusHighlight(id: string): void {
+    const marks = marksFor(id)
+    if (!marks.length) return
+    marks[0].scrollIntoView({ block: 'center', behavior: 'smooth' })
+    for (const m of marks) {
+      m.dataset.khFlash = '1'
+      setTimeout(() => delete m.dataset.khFlash, 1300)
+    }
+  }
+
+  // ───────────────────────── events ─────────────────────────
+
+  let selectionTimer: ReturnType<typeof setTimeout> | null = null
+
+  function currentSelectionRange(): Range | null {
+    const sel = window.getSelection()
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null
+    if (!sel.toString().trim()) return null
+    const range = sel.getRangeAt(0)
+    let anchor: Node | null = sel.anchorNode
+    if (anchor && anchor.nodeType !== Node.ELEMENT_NODE) anchor = anchor.parentElement
+    // Selections inside our own popover (shadow DOM) never reach here as
+    // light-DOM nodes, but an editable field on the page shouldn't get a
+    // highlight popover either.
+    if (anchor && (anchor as Element).closest?.('input, textarea, [contenteditable="true"]')) return null
+    return range
+  }
+
+  function onSelectionSettled(): void {
+    const range = currentSelectionRange()
+    if (range) {
+      openSelectionPopover(range)
+    } else if (popover?.kind === 'selection') {
+      closePopover()
+    }
+  }
+
+  function scheduleSelectionCheck(): void {
+    if (selectionTimer) clearTimeout(selectionTimer)
+    selectionTimer = setTimeout(onSelectionSettled, 150)
+  }
+
+  document.addEventListener('mouseup', (e) => {
+    // A plain click on an existing highlight opens that highlight's popover
+    // instead — don't let the (collapsed) selection check race it. A drag
+    // that merely *ends* on a highlight is still a selection, and must
+    // still offer to highlight it.
+    const onMark = (e.target as Element)?.closest?.(`.${HIGHLIGHT_CLASS}`)
+    if (onMark && !currentSelectionRange()) {
+      if (selectionTimer) clearTimeout(selectionTimer)
+      return
+    }
+    scheduleSelectionCheck()
   })
 
-  document.addEventListener('mousedown', (e) => {
-    const tb = document.getElementById(TOOLBAR_ID)
-    if (tb && !tb.contains(e.target as Node)) hideToolbar()
+  document.addEventListener('keyup', (e) => {
+    const selectAll = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a'
+    if (e.shiftKey || e.key.startsWith('Arrow') || selectAll) scheduleSelectionCheck()
   })
+
+  document.addEventListener(
+    'mousedown',
+    (e) => {
+      if (!popover) return
+      const path = e.composedPath?.() || []
+      if (overlay && path.includes(overlay.host)) return
+      if ((e.target as Element)?.closest?.(`.${HIGHLIGHT_CLASS}`)) return
+      closePopover()
+    },
+    true
+  )
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && popover) closePopover()
+  })
+
+  let repositionFrame = 0
+  function queueReposition(): void {
+    if (!popover || repositionFrame) return
+    repositionFrame = requestAnimationFrame(() => {
+      repositionFrame = 0
+      reposition()
+    })
+  }
+  window.addEventListener('scroll', queueReposition, true)
+  window.addEventListener('resize', queueReposition)
 
   ipcRenderer.on('kk:apply', (_e, highlights: StoredHighlight[]) => {
-    applyStored(highlights)
+    ensureStyles()
+    syncHighlights(highlights)
+  })
+  ipcRenderer.on('kk:focus', (_e, id: string) => focusHighlight(id))
+  ipcRenderer.on('kk:id-assigned', (_e, p: { clientId: string; serverId: string }) => {
+    adoptServerId(p.clientId, p.serverId)
   })
 
   document.addEventListener('DOMContentLoaded', () => ensureStyles())
   ensureStyles()
-  ipcRenderer.send('kk:ready')
+  sendHost('kk:ready', null)
 }
 
 karakeepInit()

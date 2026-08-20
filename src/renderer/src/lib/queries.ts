@@ -67,11 +67,18 @@ export function useAllHighlights(): UseQueryResult<{ highlights: Highlight[]; ne
   })
 }
 
+/**
+ * Highlights for one bookmark, fetched per bookmark rather than filtered out
+ * of the global feed — the feed is paginated, so filtering it drops every
+ * highlight past the first page for anyone with a decent-sized library.
+ */
 export function useHighlightsForBookmark(bookmarkId: string | undefined): Highlight[] {
-  const { data } = useAllHighlights()
-  const all = data?.highlights || []
-  if (!bookmarkId) return []
-  return all.filter((h) => h.bookmarkId === bookmarkId)
+  const { data } = useQuery({
+    queryKey: ['highlights', 'bookmark', bookmarkId],
+    queryFn: () => window.kk.highlights.forBookmark(bookmarkId as string),
+    enabled: !!bookmarkId
+  })
+  return data || []
 }
 
 export function flattenBookmarks(pages: BookmarksPage[] | undefined): Bookmark[] {

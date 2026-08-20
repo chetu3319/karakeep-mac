@@ -5,12 +5,17 @@ export default function WebPane({
   active,
   url,
   bookmarkId,
-  highlights
+  highlights,
+  focusHighlightId,
+  onFocusHandled
 }: {
   active: boolean
   url: string
   bookmarkId: string
   highlights: Highlight[]
+  /** Highlight to scroll to once the page is loaded (set by the Preview list). */
+  focusHighlightId?: string | null
+  onFocusHandled?: () => void
 }): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const [state, setState] = useState<WebPaneState>({
@@ -30,6 +35,33 @@ export default function WebPane({
     // every highlights array identity change (see effect below for that).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, url, bookmarkId])
+
+  // Re-push highlights whenever the set changes, *without* re-navigating.
+  // The highlights query usually resolves after the first navigate, so the
+  // navigate above often carries an empty list; a page that never hears the
+  // real list renders none of its highlights. Keyed on a content signature
+  // so a mere array-identity change doesn't cause needless IPC.
+  const signature = highlights
+    .map((h) => `${h.id}:${h.color ?? ''}:${h.note ?? ''}`)
+    .sort()
+    .join('|')
+  useEffect(() => {
+    if (!active) return
+    void window.kk.webpane.applyHighlights(highlights)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, bookmarkId, signature])
+
+  // Scroll to a highlight the user clicked in the Preview list, once the
+  // page has actually finished loading (marks don't exist before that).
+  useEffect(() => {
+    if (!active || !focusHighlightId || state.isLoading) return
+    const t = setTimeout(() => {
+      void window.kk.webpane.focusHighlight(focusHighlightId)
+      onFocusHandled?.()
+    }, 400)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, focusHighlightId, state.isLoading])
 
   // Show/hide the native view as the tab becomes active/inactive.
   useEffect(() => {

@@ -150,6 +150,17 @@ export class KarakeepApiClient {
     return HighlightsResponseSchema.parse(data)
   }
 
+  /**
+   * Highlights for one bookmark. Preferred over filtering the paginated
+   * global /highlights feed client-side: that feed is capped per page, so a
+   * library with more highlights than the page size silently loses the ones
+   * that fall past the cap.
+   */
+  async getBookmarkHighlights(bookmarkId: string): Promise<Highlight[]> {
+    const data = await this.request<unknown>(`/bookmarks/${bookmarkId}/highlights`)
+    return HighlightsResponseSchema.parse(data).highlights
+  }
+
   async createHighlight(data: {
     bookmarkId: string
     startOffset: number

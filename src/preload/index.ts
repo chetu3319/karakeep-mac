@@ -39,7 +39,9 @@ const api = {
   },
   highlights: {
     get: (params: { cursor?: string; limit?: number }): Promise<{ highlights: Highlight[]; nextCursor?: string | null }> =>
-      ipcRenderer.invoke(IPC.API_GET_HIGHLIGHTS, params)
+      ipcRenderer.invoke(IPC.API_GET_HIGHLIGHTS, params),
+    forBookmark: (bookmarkId: string): Promise<Highlight[]> =>
+      ipcRenderer.invoke(IPC.API_GET_BOOKMARK_HIGHLIGHTS, bookmarkId)
   },
   assets: {
     get: (assetId: string): Promise<string> => ipcRenderer.invoke(IPC.API_GET_ASSET, assetId)
@@ -52,6 +54,10 @@ const api = {
   webpane: {
     navigate: (url: string, bookmarkId: string, highlights: Highlight[]): Promise<void> =>
       ipcRenderer.invoke(IPC.WEBPANE_NAVIGATE, { url, bookmarkId, highlights }),
+    applyHighlights: (highlights: Highlight[]): Promise<void> =>
+      ipcRenderer.invoke(IPC.WEBPANE_APPLY_HIGHLIGHTS, { highlights }),
+    focusHighlight: (highlightId: string): Promise<void> =>
+      ipcRenderer.invoke(IPC.WEBPANE_FOCUS_HIGHLIGHT, highlightId),
     setBounds: (bounds: WebPaneBounds): Promise<void> => ipcRenderer.invoke(IPC.WEBPANE_SET_BOUNDS, bounds),
     show: (): Promise<void> => ipcRenderer.invoke(IPC.WEBPANE_SHOW),
     hide: (): Promise<void> => ipcRenderer.invoke(IPC.WEBPANE_HIDE),
@@ -70,6 +76,16 @@ const api = {
       const listener = (_e: unknown, payload: { bookmarkId: string }): void => cb(payload)
       ipcRenderer.on(IPC.WEBPANE_HIGHLIGHTS_CHANGED_EVENT, listener)
       return () => ipcRenderer.removeListener(IPC.WEBPANE_HIGHLIGHTS_CHANGED_EVENT, listener)
+    },
+    onHighlightStatus: (
+      cb: (payload: { bookmarkId: string | null; anchored: string[]; missing: string[] }) => void
+    ): (() => void) => {
+      const listener = (
+        _e: unknown,
+        payload: { bookmarkId: string | null; anchored: string[]; missing: string[] }
+      ): void => cb(payload)
+      ipcRenderer.on(IPC.WEBPANE_HIGHLIGHT_STATUS_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.WEBPANE_HIGHLIGHT_STATUS_EVENT, listener)
     }
   },
   dev: {

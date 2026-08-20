@@ -10,6 +10,11 @@ export default function DetailPane({ bookmark }: { bookmark: Bookmark | null }):
   const [tab, setTab] = useState<'preview' | 'web'>('preview')
   const highlights = useHighlightsForBookmark(bookmark?.id)
   const queryClient = useQueryClient()
+  // Which highlights the live page could actually anchor. `null` means the
+  // page hasn't reported yet, which is different from "none matched" — we
+  // only show the "not on page" hint once we've actually heard back.
+  const [anchored, setAnchored] = useState<Set<string> | null>(null)
+  const [focusHighlightId, setFocusHighlightId] = useState<string | null>(null)
 
   // The Web pane's preload posts highlight create/update/delete events to
   // main, which syncs them to the server and then pushes this event back.
@@ -19,13 +24,22 @@ export default function DetailPane({ bookmark }: { bookmark: Bookmark | null }):
   useEffect(() => {
     return window.kk.webpane.onHighlightsChanged(({ bookmarkId }) => {
       if (bookmark && bookmarkId === bookmark.id) {
-        void queryClient.invalidateQueries({ queryKey: ['highlights', 'all'] })
+        void queryClient.invalidateQueries({ queryKey: ['highlights', 'bookmark', bookmark.id] })
       }
     })
   }, [bookmark, queryClient])
 
   useEffect(() => {
+    return window.kk.webpane.onHighlightStatus((payload) => {
+      if (!bookmark || payload.bookmarkId !== bookmark.id) return
+      setAnchored(new Set(payload.anchored))
+    })
+  }, [bookmark])
+
+  useEffect(() => {
     setTab('preview')
+    setAnchored(null)
+    setFocusHighlightId(null)
   }, [bookmark?.id])
 
   useEffect(() => {
@@ -149,20 +163,48 @@ export default function DetailPane({ bookmark }: { bookmark: Bookmark | null }):
             )}
             {highlights.length > 0 && (
               <div>
-                <div className="mb-2 text-xs font-semibold uppercase text-neutral-400">
-                  Highlights ({highlights.length})
+                <div className="mb-2 flex items-baseline gap-1.5 text-xs font-semibold uppercase tracking-wide text-neutral-400">
+                  <span>Highlights</span>
+                  <span className="font-normal tabular-nums text-neutral-500">{highlights.length}</span>
                 </div>
-                <ul className="space-y-2">
-                  {highlights.map((h) => (
-                    <li
-                      key={h.id}
-                      className="rounded-md border-l-4 bg-neutral-50 p-2 text-sm dark:bg-neutral-900"
-                      style={{ borderColor: colorFor(h.color) }}
-                    >
-                      {h.text}
-                      {h.note && <div className="mt-1 text-xs text-neutral-500">{h.note}</div>}
-                    </li>
-                  ))}
+                <ul className="space-y-1.5">
+                  {highlights.map((h) => {
+                    const missing = anchored !== null && !anchored.has(h.id)
+                    return (
+                      <li key={h.id}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFocusHighlightId(h.id)
+                            setTab('web')
+                          }}
+                          title="Show on the live page"
+                          className="group flex w-full gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-neutral-100 dark:hover:bg-neutral-800/70"
+                        >
+                          <span
+                            aria-hidden
+                            className="mt-0.5 w-1 shrink-0 self-stretch rounded-full"
+                            style={{ backgroundColor: colorFor(h.color) }}
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block text-sm leading-snug text-neutral-700 dark:text-neutral-200">
+                              {h.text}
+                            </span>
+                            {h.note && (
+                              <span className="mt-1 block text-xs leading-snug text-neutral-500 dark:text-neutral-400">
+                                {h.note}
+                              </span>
+                            )}
+                            {missing && (
+                              <span className="mt-1 block text-[11px] text-neutral-400">
+                                Not found on the current page
+                              </span>
+                            )}
+                          </span>
+                        </button>
+                      </li>
+                    )
+                  })}
                 </ul>
               </div>
             )}
@@ -171,7 +213,14 @@ export default function DetailPane({ bookmark }: { bookmark: Bookmark | null }):
 
         <div className={tab === 'web' ? 'h-full' : 'hidden'}>
           {url ? (
-            <WebPane active={tab === 'web'} url={url} bookmarkId={bookmark.id} highlights={highlights} />
+            <WebPane
+              active={tab === 'web'}
+              url={url}
+              bookmarkId={bookmark.id}
+              highlights={highlights}
+              focusHighlightId={focusHighlightId}
+              onFocusHandled={() => setFocusHighlightId(null)}
+            />
           ) : (
             <div className="p-5 text-sm text-neutral-400">
               {display.kind === 'asset'
@@ -187,10 +236,11 @@ export default function DetailPane({ bookmark }: { bookmark: Bookmark | null }):
   )
 }
 
+// Keep in step with COLORS in src/preload/webpane.ts.
 function colorFor(color?: string | null): string {
   switch (color) {
-    case 'yellow':
-      return '#facc15'
+    case 'green':
+      return '#10b981'
     case 'red':
       return '#ef4444'
     case 'blue':
@@ -198,6 +248,6 @@ function colorFor(color?: string | null): string {
     case 'purple':
       return '#a855f7'
     default:
-      return '#10b981'
+      return '#f5c518'
   }
 }

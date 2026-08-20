@@ -12,6 +12,7 @@ export const IPC = {
   API_GET_LISTS: 'api:get-lists',
   API_GET_TAGS: 'api:get-tags',
   API_GET_HIGHLIGHTS: 'api:get-highlights',
+  API_GET_BOOKMARK_HIGHLIGHTS: 'api:get-bookmark-highlights',
   API_GET_LIST_BOOKMARKS: 'api:get-list-bookmarks',
   API_GET_TAG_BOOKMARKS: 'api:get-tag-bookmarks',
   API_GET_ASSET: 'api:get-asset',
@@ -33,8 +34,11 @@ export const IPC = {
   WEBPANE_STOP: 'webpane:stop',
   WEBPANE_OPEN_EXTERNAL: 'webpane:open-external',
   WEBPANE_IS_ATTACHED: 'webpane:is-attached', // dev/smoke diagnostic — confirms actual detach, not just visual hide
+  WEBPANE_APPLY_HIGHLIGHTS: 'webpane:apply-highlights', // re-push highlights without re-navigating
+  WEBPANE_FOCUS_HIGHLIGHT: 'webpane:focus-highlight', // scroll a highlight into view in the live page
   WEBPANE_STATE_EVENT: 'webpane:state', // main -> renderer push
-  WEBPANE_HIGHLIGHTS_CHANGED_EVENT: 'webpane:highlights-changed' // main -> renderer push
+  WEBPANE_HIGHLIGHTS_CHANGED_EVENT: 'webpane:highlights-changed', // main -> renderer push
+  WEBPANE_HIGHLIGHT_STATUS_EVENT: 'webpane:highlight-status' // main -> renderer push: which highlights anchored
 } as const
 
 export const WEBPANE_IPC = {
@@ -42,5 +46,8 @@ export const WEBPANE_IPC = {
   APPLY: 'kk:apply', // main -> webpane: apply stored highlights
   HIGHLIGHT_CREATED: 'kk:highlight-created', // webpane -> main
   HIGHLIGHT_UPDATED: 'kk:highlight-updated', // webpane -> main
-  HIGHLIGHT_REMOVED: 'kk:highlight-removed' // webpane -> main
+  HIGHLIGHT_REMOVED: 'kk:highlight-removed', // webpane -> main
+  FOCUS: 'kk:focus', // main -> webpane: scroll+flash one highlight
+  ID_ASSIGNED: 'kk:id-assigned', // main -> webpane: client id -> server id
+  STATUS: 'kk:highlight-status' // webpane -> main: anchored / missing ids
 } as const
