@@ -1,0 +1,130 @@
+name: Release
+
+# Builds the macOS app on a real macOS runner and publishes it as a GitHub
+# Release. This has to run on macOS: electron-builder skips code signing
+# entirely on other platforms ("supported only on macOS"), and a bundle with
+# no valid signature is rejected by Apple Silicon at load time.
+#
+# Trigger by pushing a version tag:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Or run it manually from the Actions tab (workflow_dispatch) to produce a
+# build artifact without cutting a release.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write # required to create the release and upload assets
+
+jobs:
+  release:
+    # macos-14 is Apple Silicon, matching the arm64 target in
+    # electron-builder.yml. Pinned rather than macos-latest so the runner
+    # architecture cannot drift away from the target under us.
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Guard against a tag that disagrees with package.json, which would
+      # publish a release whose asset reports a different version internally.
+      - name: Check tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          PKG=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "$PKG" ]; then
+            echo "Tag v$TAG does not match package.json version $PKG" >&2
+            exit 1
+          fi
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Package
+        run: npx electron-builder --mac
+
+      # electron-builder names the output directory after the target arch
+      # (release/mac-arm64, but release/mac when arm64 is the host default), so
+      # locate the bundle rather than hardcoding either spelling.
+      - name: Locate app bundle
+        run: |
+          APP=$(find release -maxdepth 2 -name 'Karakeep.app' -type d | head -1)
+          if [ -z "$APP" ]; then
+            echo "No Karakeep.app found under release/" >&2
+            find release -maxdepth 2 >&2
+            exit 1
+          fi
+          echo "APP_PATH=$APP" >> "$GITHUB_ENV"
+
+      # electron-builder.yml sets `identity: null` (no Developer ID account),
+      # so it does not sign at all. On Apple Silicon every loaded Mach-O needs
+      # a valid signature, so apply an ad-hoc one explicitly. This is enough to
+      # let the app launch; it is NOT notarization, so Gatekeeper still warns
+      # on first open and users must right-click > Open.
+      - name: Ad-hoc sign
+        run: codesign --force --deep --sign - "$APP_PATH"
+
+      - name: Verify signature
+        run: |
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          # Gatekeeper assessment is expected to fail for a build Apple has not
+          # notarized; report it for visibility without failing the job.
+          spctl --assess --type execute --verbose "$APP_PATH" || true
+
+      # `ditto` rather than `zip`: it preserves the symlinks and signature
+      # metadata inside the .app. A plain `zip` corrupts the bundle's code
+      # signature and the extracted app will not launch.
+      - name: Archive app
+        run: |
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}"
+          ditto -c -k --keepParent "$APP_PATH" "release/Karakeep-$VERSION-mac-arm64.zip"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Karakeep-mac-arm64
+          path: release/*.zip
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            release/*.zip \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file - <<'NOTES'
+          Unsigned macOS build (Apple Silicon, arm64).
+
+          This build is ad-hoc signed but not notarized, so macOS Gatekeeper
+          will block it on first launch. To open it:
+
+          1. Unzip and move `Karakeep.app` to `/Applications`.
+          2. Right-click the app and choose **Open**, then confirm.
+
+          If macOS still refuses, clear the quarantine attribute:
+
+          ```
+          xattr -cr /Applications/Karakeep.app
+          ```
+
+          Requires a running Karakeep server; the app asks for the server URL
+          and an API key on first launch.
+          NOTES
