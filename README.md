@@ -12,6 +12,9 @@ every highlight synced back to Karakeep.
 ## What it does
 
 - **Library** — lists (as a tree), tags, search, and the bookmark detail view.
+- **Reader** — the Preview tab renders Karakeep's cached reader view of a link
+  with your highlights placed in it, so a saved page can be read without the
+  site it came from being up, or reachable, at all.
 - **Web pane** — opens the bookmark's live page in an embedded view, finds your
   existing highlights in the real DOM, and lets you create, recolour, annotate
   and delete them inline.
@@ -57,12 +60,26 @@ app headlessly and screenshots it).
 ## Stack
 
 Electron 32 · electron-vite · React 18 · TypeScript (strict) · Tailwind ·
-TanStack Query · zod · EmbedPDF/PDFium.
+TanStack Query · zod · DOMPurify · EmbedPDF/PDFium.
 
 ## Notes and limitations
 
 - **macOS only.** Nothing here is deliberately platform-specific beyond the
   Keychain integration and the packaging target, but nothing else is tested.
+- **The cached article is somebody else's HTML.** It is sanitised on the way
+  in (DOMPurify: no scripts, frames, embeds, forms, or inline styles) and then
+  rendered in a frame that cannot execute anything —
+  `sandbox="allow-same-origin"` with no `allow-scripts`, which still lets the
+  app reach into the frame's DOM to place highlights. Both layers are
+  deliberate; see the comments in `src/renderer/src/lib/readerContent.ts`.
+  Text and layout come from the cached copy, but any images in it are still
+  fetched from wherever the article points them (with `no-referrer`), so a
+  reader view is only as offline as the article is image-free.
+- **Reader highlights are matched by quote, not by offset.** A highlight made
+  in the Web pane or the browser extension carries offsets into the live
+  page's text, which is not the reader view's text. The stored quote is what
+  gets searched for; the offsets only break ties between repeated matches. See
+  `src/shared/textAnchor.ts`, which the live pane uses for the same reason.
 - **PDF highlight offsets are local to this app.** Karakeep stores a highlight
   as two character offsets into the document text. A PDF has no canonical text
   string, so this app defines one (PDFium's extraction, pages end to end) — and

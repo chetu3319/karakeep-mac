@@ -5,11 +5,13 @@ import type { Bookmark, UpdateBookmarkInput } from '../../../shared/types'
 import { useBookmark, useDeleteBookmark, useHighlightsForBookmark, useUpdateBookmark } from '../lib/queries'
 import { displayForBookmark } from '../lib/bookmarkDisplay'
 import { errMessage } from '../lib/errors'
+import { readerStateFor } from '../lib/readerContent'
 import AssetImage from './AssetImage'
 import ConfirmDialog from './ConfirmDialog'
 import EditableField from './EditableField'
 import ListMembership from './ListMembership'
 import PdfPane from './PdfPane'
+import ReaderPane from './ReaderPane'
 import TagEditor from './TagEditor'
 import WebPane from './WebPane'
 
@@ -61,6 +63,12 @@ export default function DetailPane({
   // only show the "not on page" hint once we've actually heard back.
   const [anchored, setAnchored] = useState<Set<string> | null>(null)
   const [focusHighlightId, setFocusHighlightId] = useState<string | null>(null)
+  // The reader keeps its own anchor list. It is answering a different
+  // question from the Web and PDF panes — "is this quote in the saved copy",
+  // not "is it on the page as it stands today" — and the two disagree often
+  // enough that sharing one set would make the hint below lie.
+  const [readerAnchored, setReaderAnchored] = useState<string[] | null>(null)
+  const [readerFocusId, setReaderFocusId] = useState<string | null>(null)
 
   // A PDF bookmark stores the file under `content.assetId`; older bookmarks
   // only carry it in the assets array, so fall back to that.
@@ -69,6 +77,19 @@ export default function DetailPane({
     return bookmark.content.assetId || bookmark.assets.find((a) => a.assetType === 'bookmarkAsset')?.id || null
   }, [bookmark])
   const pdfFileName = bookmark?.content?.fileName || 'document.pdf'
+
+  // Whether this bookmark has a cached reader view to show, and if not, why
+  // not — a link that is still being crawled gets a different answer from
+  // one whose reader pass came back with nothing.
+  const readerState = useMemo(() => (bookmark ? readerStateFor(bookmark) : null), [bookmark])
+
+  const handleReaderFocusHandled = useCallback(() => setReaderFocusId(null), [])
+
+  const handleReaderAnchorStatus = useCallback((ids: string[]) => {
+    setReaderAnchored((prev) =>
+      prev && prev.length === ids.length && prev.every((id, i) => id === ids[i]) ? prev : ids
+    )
+  }, [])
 
   // The PDF pane reports which highlights it could place, the same way the
   // Web pane's preload does — one list, whichever pane is showing.
@@ -102,6 +123,8 @@ export default function DetailPane({
     setTab(pdfAssetId ? 'pdf' : 'preview')
     setAnchored(null)
     setFocusHighlightId(null)
+    setReaderAnchored(null)
+    setReaderFocusId(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookmark?.id])
 
@@ -304,16 +327,34 @@ export default function DetailPane({
                 </div>
                 <ul className="space-y-1.5">
                   {highlights.map((h) => {
-                    const missing = anchored !== null && !anchored.has(h.id)
+                    // The saved copy is right here on the same tab, so when
+                    // it holds the quote there is no reason to send the user
+                    // off to the live page to see it.
+                    const inReader = readerAnchored?.includes(h.id) ?? false
+                    // The hint means "there's nowhere to take you", so the
+                    // reader having the quote settles it even when the live
+                    // page has since dropped it.
+                    const missing = !inReader && anchored !== null && !anchored.has(h.id)
                     return (
                       <li key={h.id}>
                         <button
                           type="button"
+                          data-testid="highlight-row"
                           onClick={() => {
+                            if (inReader) {
+                              setReaderFocusId(h.id)
+                              return
+                            }
                             setFocusHighlightId(h.id)
                             setTab(pdfAssetId ? 'pdf' : 'web')
                           }}
-                          title={pdfAssetId ? 'Show in the PDF' : 'Show on the live page'}
+                          title={
+                            inReader
+                              ? 'Show in the saved copy'
+                              : pdfAssetId
+                                ? 'Show in the PDF'
+                                : 'Show on the live page'
+                          }
                           className="group flex w-full gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-neutral-100 dark:hover:bg-neutral-800/70"
                         >
                           <span
@@ -341,6 +382,60 @@ export default function DetailPane({
                     )
                   })}
                 </ul>
+              </div>
+            )}
+
+            {/* The reader view — the whole point of this tab, and the only
+                way to read a link bookmark without the origin server. It
+                sits under the metadata rather than above it because it is
+                the long thing on the page: everything above is a screen at
+                most, and the article runs for as many as it needs. */}
+            {readerState && !(readerState.kind === 'unavailable' && readerState.reason === 'not-a-link') && (
+              <div className="mt-6 border-t border-neutral-200 pt-4 dark:border-neutral-800">
+                <div className="mb-3 flex items-baseline justify-between gap-2">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-neutral-400">
+                    Saved copy
+                  </span>
+                  {content?.crawledAt && (
+                    <span className="text-[11px] tabular-nums text-neutral-400">
+                      cached {new Date(content.crawledAt).toLocaleDateString()}
+                    </span>
+                  )}
+                </div>
+                {readerState.kind === 'ready' && (
+                  <ReaderPane
+                    assetId={readerState.assetId}
+                    baseUrl={url}
+                    highlights={highlights}
+                    focusHighlightId={readerFocusId}
+                    onFocusHandled={handleReaderFocusHandled}
+                    onAnchorStatus={handleReaderAnchorStatus}
+                  />
+                )}
+                {readerState.kind === 'pending' && (
+                  <p className="text-sm text-neutral-500 dark:text-neutral-400">
+                    Karakeep is still crawling this page. The saved copy will appear here once its
+                    reader view is ready.
+                  </p>
+                )}
+                {readerState.kind === 'unavailable' && (
+                  <p className="text-sm text-neutral-500 dark:text-neutral-400">
+                    There is no saved copy of this page — the reader view either failed or was
+                    never crawled.{' '}
+                    {url && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setTab('web')}
+                          className="font-medium text-emerald-700 hover:underline dark:text-emerald-400"
+                        >
+                          Open the Web tab
+                        </button>{' '}
+                        to load it live.
+                      </>
+                    )}
+                  </p>
+                )}
               </div>
             )}
           </div>

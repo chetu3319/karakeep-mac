@@ -135,8 +135,13 @@ export function useHighlightsForBookmark(bookmarkId: string | undefined): Highli
     queryFn: () => window.kk.highlights.forBookmark(bookmarkId as string),
     enabled: !!bookmarkId
   })
-  return data || []
+  // One shared empty array rather than a fresh `[]`: the panes take this
+  // straight into effect dependency lists, and a new identity on every
+  // render before the fetch lands would re-run them forever.
+  return data || NO_HIGHLIGHTS
 }
+
+const NO_HIGHLIGHTS: Highlight[] = []
 
 export function flattenBookmarks(pages: BookmarksPage[] | undefined): Bookmark[] {
   if (!pages) return []
