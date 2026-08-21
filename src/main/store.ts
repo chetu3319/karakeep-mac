@@ -17,6 +17,15 @@ interface OnDiskConfig {
   // client-only concept — Karakeep's /lists response has no order/rank
   // field, so this never round-trips to the server. See shared/types.ts.
   listOrder?: ListOrder
+  windowState?: WindowState
+}
+
+export interface WindowState {
+  width: number
+  height: number
+  x?: number
+  y?: number
+  maximized?: boolean
 }
 
 export interface ResolvedConfig {
@@ -78,6 +87,15 @@ export function setConfig(input: {
   const disk = readDisk()
   disk.baseUrl = input.baseUrl
   disk.customHeaders = input.customHeaders || {}
+  // An empty key means "leave the stored one alone". The renderer can
+  // never read the stored key back (it lives encrypted, and is resolved
+  // only in main), so the Settings dialog has nothing to prefill its
+  // field with — without this, saving a changed *server URL* would
+  // silently overwrite a perfectly good API key with the empty string.
+  if (!input.apiKey) {
+    writeDisk(disk)
+    return
+  }
   if (safeStorage.isEncryptionAvailable()) {
     disk.encryptedApiKey = safeStorage.encryptString(input.apiKey).toString('base64')
   } else {
@@ -87,8 +105,29 @@ export function setConfig(input: {
   writeDisk(disk)
 }
 
+/**
+ * Sign out: forget the credentials, keep everything that isn't one.
+ *
+ * This used to be `writeDisk({})`, which also took `listOrder` and
+ * `windowState` with it. `listOrder` is the hand-arranged sidebar tree —
+ * it is real, unrecoverable user work that Karakeep's API does not store
+ * (there is no order field on /lists), and it was being destroyed by a
+ * single unconfirmed click on a button in the window chrome. Signing out
+ * is about credentials; it has no business touching the furniture.
+ */
 export function clearConfig(): void {
-  writeDisk({})
+  const disk = readDisk()
+  writeDisk({ listOrder: disk.listOrder, windowState: disk.windowState })
+}
+
+export function getWindowState(): WindowState | null {
+  return readDisk().windowState ?? null
+}
+
+export function setWindowState(state: WindowState): void {
+  const disk = readDisk()
+  disk.windowState = state
+  writeDisk(disk)
 }
 
 export function getListOrder(): ListOrder {

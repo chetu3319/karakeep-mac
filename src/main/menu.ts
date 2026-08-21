@@ -21,6 +21,12 @@ export function buildAppMenu(getTargetWindow: () => BrowserWindow | null): Menu 
             submenu: [
               { role: 'about' as const },
               { type: 'separator' as const },
+              {
+                label: 'Settings…',
+                accelerator: 'Cmd+,',
+                click: (): void => sendToRenderer(IPC.MENU_OPEN_SETTINGS_EVENT)
+              },
+              { type: 'separator' as const },
               { role: 'services' as const },
               { type: 'separator' as const },
               { role: 'hide' as const },
@@ -34,7 +40,15 @@ export function buildAppMenu(getTargetWindow: () => BrowserWindow | null): Menu 
       : []),
     {
       label: 'File',
-      submenu: [isMac ? { role: 'close' as const } : { role: 'quit' as const }]
+      submenu: [
+        {
+          label: 'New Bookmark…',
+          accelerator: 'CmdOrCtrl+N',
+          click: (): void => sendToRenderer(IPC.MENU_NEW_BOOKMARK_EVENT)
+        },
+        { type: 'separator' as const },
+        isMac ? { role: 'close' as const } : { role: 'quit' as const }
+      ]
     },
     {
       label: 'Edit',
@@ -45,7 +59,16 @@ export function buildAppMenu(getTargetWindow: () => BrowserWindow | null): Menu 
         { role: 'cut' as const },
         { role: 'copy' as const },
         { role: 'paste' as const },
-        { role: 'selectAll' as const }
+        { role: 'selectAll' as const },
+        { type: 'separator' as const },
+        {
+          // The bookmark list's search box. ⌘F is where every user's hand
+          // already goes; before this the box could only be reached with
+          // the mouse.
+          label: 'Find in Library',
+          accelerator: 'CmdOrCtrl+F',
+          click: (): void => sendToRenderer(IPC.MENU_FOCUS_SEARCH_EVENT)
+        }
       ]
     },
     {

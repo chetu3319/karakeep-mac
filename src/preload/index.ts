@@ -105,6 +105,21 @@ const api = {
       const listener = (): void => cb()
       ipcRenderer.on(IPC.MENU_TOGGLE_FOCUS_MODE_EVENT, listener)
       return () => ipcRenderer.removeListener(IPC.MENU_TOGGLE_FOCUS_MODE_EVENT, listener)
+    },
+    onNewBookmark: (cb: () => void): (() => void) => {
+      const listener = (): void => cb()
+      ipcRenderer.on(IPC.MENU_NEW_BOOKMARK_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.MENU_NEW_BOOKMARK_EVENT, listener)
+    },
+    onFocusSearch: (cb: () => void): (() => void) => {
+      const listener = (): void => cb()
+      ipcRenderer.on(IPC.MENU_FOCUS_SEARCH_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.MENU_FOCUS_SEARCH_EVENT, listener)
+    },
+    onOpenSettings: (cb: () => void): (() => void) => {
+      const listener = (): void => cb()
+      ipcRenderer.on(IPC.MENU_OPEN_SETTINGS_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.MENU_OPEN_SETTINGS_EVENT, listener)
     }
   },
   webpane: {
