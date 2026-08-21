@@ -41,18 +41,44 @@ KARAKEEP_API_KEY=...
 
 That file is gitignored and read only in development.
 
+## Installing a release
+
+Download the `.dmg` from [Releases](../../releases), open it, and drag Karakeep
+to Applications.
+
+The build is **not notarized**, so the first launch needs one extra step:
+**right-click the app → Open**, then confirm. Double-clicking it the normal way
+shows "Karakeep can't be opened because Apple cannot check it for malicious
+software" with no Open button; the right-click route is what gets the option.
+You only have to do this once.
+
+If you'd rather clear the quarantine flag directly:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Karakeep.app
+```
+
+Releases are **Apple Silicon only**. Intel Macs are not built for.
+
 ## Building
 
 ```bash
 npm run package
 ```
 
-Produces `release/mac-arm64/Karakeep.app`. Builds are **unsigned** — macOS will
-quarantine the app on first open (right-click → Open, or clear the quarantine
-attribute yourself).
+Produces `release/Karakeep-<version>-arm64.dmg`, a matching `.zip`, and the
+unpacked `release/mac-arm64/Karakeep.app`.
 
-Other scripts: `npm run typecheck`, `npm run build`, `npm run smoke` (drives the
-app headlessly and screenshots it).
+The app is signed **ad-hoc** by `scripts/afterPack.cjs` rather than left
+unsigned. That is not cosmetic: an unsigned bundle keeps Electron's own linker
+signature over contents we have replaced, and macOS then refuses to launch it
+at all with "Karakeep is damaged and can't be opened" — which, unlike the
+unidentified-developer prompt above, has no way past it. Ad-hoc signing makes
+the signature describe the bundle we actually shipped. Proper Developer ID
+signing and notarization would need a paid Apple Developer account.
+
+Other scripts: `npm run typecheck`, `npm run build`, `npm run icon` (regenerates
+the app icon), `npm run smoke` (drives the app headlessly and screenshots it).
 
 ## Stack
 
