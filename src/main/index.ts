@@ -317,6 +317,7 @@ async function runSmokeMode(win: BrowserWindow, pane: WebPaneManager): Promise<v
   // "ready" events before we get around to awaiting them below, and a
   // late `ipcMain.once` would miss an event that already fired.
   const detailReady = new Promise<void>((resolve) => ipcMain.once('dev:smoke-detail-ready', () => resolve()))
+  const readerReady = new Promise<void>((resolve) => ipcMain.once('dev:smoke-reader-ready', () => resolve()))
   const webReady = new Promise<void>((resolve) => ipcMain.once('dev:smoke-web-ready', () => resolve()))
   const listReady = new Promise<void>((resolve) => ipcMain.once('dev:smoke-list-ready', () => resolve()))
 
@@ -324,7 +325,7 @@ async function runSmokeMode(win: BrowserWindow, pane: WebPaneManager): Promise<v
   const safety = setTimeout(() => {
     console.log('[smoke] timeout reached, quitting')
     app.quit()
-  }, 25000)
+  }, 45000)
 
   // Step 1: library view, nothing selected yet.
   await new Promise((r) => setTimeout(r, 1500))
@@ -335,6 +336,47 @@ async function runSmokeMode(win: BrowserWindow, pane: WebPaneManager): Promise<v
   // Step 2: a bookmark is selected, Preview tab showing.
   await detailReady
   await shot('02-detail.png')
+
+  // Step 2b: the cached reader view, once it has rendered and placed its
+  // highlights. A link bookmark with no reader asset never fires this, so
+  // don't let it hold up the rest of the run.
+  const readerArrived = await Promise.race([
+    readerReady.then(() => true),
+    new Promise<boolean>((r) => setTimeout(() => r(false), 12000))
+  ])
+  console.log('[smoke] reader ready:', readerArrived)
+  // Scroll the article into view before capturing: the reader sits below the
+  // bookmark's metadata, so a screenshot of the top of the tab proves
+  // nothing about it. The same round-trip reports what the frame actually
+  // holds — text length and placed highlight marks — which is the part a
+  // screenshot can't be trusted for either.
+  try {
+    const reader = await win.webContents.executeJavaScript(`(() => {
+      const frame = document.querySelector('[data-testid="reader-frame"]')
+      if (!frame) return { frame: false }
+      const doc = frame.contentDocument
+      // Click the first highlight in the list above, which is how a reader
+      // highlight is meant to be reached: the pane scrolls the saved copy to
+      // it rather than sending the user to the live page.
+      const row = document.querySelector('[data-testid="highlight-row"]')
+      if (row) row.click()
+      else frame.scrollIntoView({ block: 'start' })
+      return {
+        frame: true,
+        frameHeight: Math.round(frame.getBoundingClientRect().height),
+        textLength: doc && doc.body ? doc.body.textContent.length : 0,
+        marks: doc ? doc.querySelectorAll('.kk-reader-hl').length : 0,
+        scripts: doc ? doc.querySelectorAll('script').length : -1,
+        clickedHighlight: !!row
+      }
+    })()`)
+    console.log('[smoke] reader:', JSON.stringify(reader))
+  } catch (err) {
+    console.error('[smoke] reader probe failed', err instanceof Error ? err.message : err)
+  }
+  // The scroll is smooth; give it time to land before capturing.
+  await new Promise((r) => setTimeout(r, 900))
+  await shot('02b-reader.png')
 
   // Step 3: explicitly flip to the Web tab now (not on a renderer-owned
   // timer) so this screenshot always lands after the tab has switched.

@@ -173,6 +173,10 @@ const api = {
     realClickOnPdf: (at: { x: number; y: number }): Promise<void> =>
       ipcRenderer.invoke('dev:smoke-pdf-real-click', at),
     notifyDetailReady: (): void => ipcRenderer.send('dev:smoke-detail-ready'),
+    // Fires once the cached reader view has rendered and its highlights have
+    // been placed — the detail pane is "ready" well before that, and a
+    // screenshot taken in between shows a placeholder.
+    notifyReaderReady: (): void => ipcRenderer.send('dev:smoke-reader-ready'),
     notifyWebReady: (): void => ipcRenderer.send('dev:smoke-web-ready'),
     notifyListReady: (): void => ipcRenderer.send('dev:smoke-list-ready'),
     // Diagnostic-only: confirms the WebContentsView was actually removed
