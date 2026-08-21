@@ -26,9 +26,26 @@ mac:
   # build instead of silently shipping Electron's default icon.
   icon: build-resources/icon.icns
   target:
-    - target: dir
+    - target: dmg
+      arch: [arm64]
+    - target: zip
       arch: [arm64]
   category: public.app-category.productivity
-  # Unsigned local build: no Developer ID account yet, so no signing or
-  # notarization. Gatekeeper will require right-click > Open on first launch.
+  # No Developer ID account, and the only certificates on this machine are
+  # "Apple Development" ones — those are for running on registered devices
+  # and would produce a build that launches nowhere else. So electron-
+  # builder does not sign, and scripts/afterPack.cjs re-signs ad-hoc
+  # instead. See that file: skipping signing altogether ships a bundle
+  # macOS calls "damaged" and refuses to open at all.
   identity: null
+  # Hardened runtime is for notarized builds and needs entitlements to let
+  # V8 JIT; switching it on under an ad-hoc signature crashes the app on
+  # launch instead of protecting anything.
+  hardenedRuntime: false
+  # Skips a Gatekeeper assessment that is guaranteed to fail for an
+  # un-notarized build and would abort the packaging step.
+  gatekeeperAssess: false
+afterPack: scripts/afterPack.cjs
+artifactName: ${productName}-${version}-${arch}.${ext}
+dmg:
+  title: ${productName} ${version}
