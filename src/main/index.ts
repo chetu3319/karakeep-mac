@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, screen, shell, Menu } from 'electron'
 import { join } from 'node:path'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { KarakeepApiClient } from './api'
 import * as store from './store'
 import { loadDotEnvLocal } from './env'
@@ -22,6 +22,24 @@ import type {
 
 const isDev = !app.isPackaged
 const projectRoot = join(__dirname, '../..')
+
+/**
+ * In a packaged build the icon comes from the app bundle, but `npm run
+ * dev` runs inside the stock Electron binary and inherits its default
+ * icon — so the Dock shows a generic Electron logo the whole time anyone
+ * is working on the app. Point it at the same artwork the build ships.
+ */
+function setDevDockIcon(): void {
+  if (!isDev || process.platform !== 'darwin' || !app.dock) return
+  const icon = join(projectRoot, 'build-resources', 'icon.png')
+  if (!existsSync(icon)) return
+  try {
+    app.dock.setIcon(icon)
+  } catch {
+    // Cosmetic only — a dev run without its Dock icon is not worth
+    // failing startup over.
+  }
+}
 
 let apiClient: KarakeepApiClient | null = null
 let mainWindow: BrowserWindow | null = null
@@ -639,6 +657,8 @@ app.whenReady().then(() => {
     KARAKEEP_API_KEY: env['KARAKEEP_API_KEY'] || process.env['KARAKEEP_API_KEY']
   })
   apiClient = makeClientFromStore()
+
+  setDevDockIcon()
 
   Menu.setApplicationMenu(
     buildAppMenu(() => BrowserWindow.getFocusedWindow() || mainWindow)

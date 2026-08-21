@@ -21,6 +21,11 @@ files:
   - '!node_modules/**'
   - 'node_modules/zod/**'
 mac:
+  # Built by scripts/make-icon.mjs from the Karakeep mark — see that file
+  # for why the web logo can't be used as-is. electron-builder would find
+  # this by convention inside buildResources; naming it means a rename
+  # fails the build instead of silently shipping Electron's default icon.
+  icon: build-resources/icon.icns
   target:
     - target: dir
       arch: [arm64]
