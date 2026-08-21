@@ -1,13 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { hexForColor as colorFor } from '../../../shared/highlightUi'
-import type { Bookmark, UpdateBookmarkInput } from '../../../shared/types'
+import type { Bookmark, Highlight, UpdateBookmarkInput } from '../../../shared/types'
 import { useBookmark, useDeleteBookmark, useHighlightsForBookmark, useUpdateBookmark } from '../lib/queries'
 import { displayForBookmark } from '../lib/bookmarkDisplay'
+import { usePref } from '../lib/prefs'
 import { errMessage } from '../lib/errors'
 import AssetImage from './AssetImage'
 import ConfirmDialog from './ConfirmDialog'
 import EditableField from './EditableField'
+import Icon from './Icon'
 import ListMembership from './ListMembership'
 import PdfPane from './PdfPane'
 import TagEditor from './TagEditor'
@@ -17,10 +19,19 @@ type Tab = 'preview' | 'pdf' | 'web'
 
 export default function DetailPane({
   bookmark: selected,
-  onDeleted
+  onDeleted,
+  focusHighlightId: externalFocusHighlightId,
+  onFocusHighlightHandled,
+  listCollapsed,
+  onExpandList
 }: {
   bookmark: Bookmark | null
   onDeleted: (id: string) => void
+  /** Set when a highlight was opened from the sidebar's Highlights view. */
+  focusHighlightId?: string | null
+  onFocusHighlightHandled?: () => void
+  listCollapsed: boolean
+  onExpandList: () => void
 }): React.JSX.Element {
   const [tab, setTab] = useState<Tab>('preview')
   // The row object the list handed us is a snapshot from whenever that feed
@@ -36,6 +47,12 @@ export default function DetailPane({
   const deleteBookmark = useDeleteBookmark()
   const [pendingDelete, setPendingDelete] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  // Highlights used to live only inside the Preview tab's scroll body, so
+  // switching to the Web or PDF pane — the only place a highlight can
+  // actually be *looked at* — took the list you were navigating from off
+  // screen. As a rail it stays put across tabs. Persisted, because whether
+  // you work with highlights open is a habit, not a per-bookmark decision.
+  const [railOpen, setRailOpen] = usePref('highlightRailOpen', false)
 
   function patch(input: UpdateBookmarkInput): void {
     if (!bookmark) return
@@ -79,12 +96,13 @@ export default function DetailPane({
   // The Web pane's preload posts highlight create/update/delete events to
   // main, which syncs them to the server and then pushes this event back.
   // Without this, a note edited or deleted in the live pane would keep
-  // showing its old text in the Preview tab's highlight list until the
-  // bookmark was reselected or the app reloaded.
+  // showing its old text in the highlight rail until the bookmark was
+  // reselected or the app reloaded.
   useEffect(() => {
     return window.kk.webpane.onHighlightsChanged(({ bookmarkId }) => {
       if (bookmark && bookmarkId === bookmark.id) {
         void queryClient.invalidateQueries({ queryKey: ['highlights', 'bookmark', bookmark.id] })
+        void queryClient.invalidateQueries({ queryKey: ['highlights', 'all'] })
       }
     })
   }, [bookmark, queryClient])
@@ -104,6 +122,21 @@ export default function DetailPane({
     setFocusHighlightId(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookmark?.id])
+
+  /**
+   * A highlight opened from the sidebar's Highlights view arrives as a
+   * prop at the same moment the bookmark changes. The effect above resets
+   * the pane for the new bookmark and would clear it again, so this runs
+   * after it (effect order within a component is top-to-bottom) and jumps
+   * straight to the pane that can show it.
+   */
+  useEffect(() => {
+    if (!externalFocusHighlightId || !bookmark) return
+    setFocusHighlightId(externalFocusHighlightId)
+    setTab(pdfAssetId ? 'pdf' : 'web')
+    setRailOpen(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [externalFocusHighlightId, bookmark?.id, pdfAssetId])
 
   useEffect(() => {
     if (bookmark && window.kk.dev.isSmoke) {
@@ -125,10 +158,36 @@ export default function DetailPane({
     return undefined
   }, [tab])
 
+  function openHighlight(h: Highlight): void {
+    setFocusHighlightId(h.id)
+    setTab(pdfAssetId ? 'pdf' : 'web')
+  }
+
+  function clearFocus(): void {
+    setFocusHighlightId(null)
+    onFocusHighlightHandled?.()
+  }
+
   if (!bookmark) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-neutral-400">
-        Select a bookmark
+      <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center">
+        <Icon name="library" size={32} className="text-neutral-300 dark:text-neutral-700" />
+        <div>
+          <p className="text-sm font-medium text-neutral-600 dark:text-neutral-400">Nothing selected</p>
+          <p className="mt-1 text-xs text-neutral-400">
+            {listCollapsed
+              ? 'The bookmark list is hidden.'
+              : 'Pick a bookmark on the left, or use ↑ and ↓ to move through the list.'}
+          </p>
+        </div>
+        {listCollapsed && (
+          <button
+            onClick={onExpandList}
+            className="rounded-lg border border-neutral-300 px-3 py-1.5 text-xs font-medium text-neutral-600 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
+          >
+            Show bookmark list
+          </button>
+        )}
       </div>
     )
   }
@@ -157,43 +216,62 @@ export default function DetailPane({
           </button>
         ))}
 
-        <div className="ml-auto flex items-center gap-1 pb-1.5">
+        <div className="ml-auto flex items-center gap-0.5 pb-1.5">
+          {highlights.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setRailOpen(!railOpen)}
+              aria-pressed={railOpen}
+              title={railOpen ? 'Hide highlights' : 'Show highlights'}
+              className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs ${
+                railOpen
+                  ? 'bg-neutral-200/70 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200'
+                  : 'text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800'
+              }`}
+            >
+              <Icon name="highlight" size={14} />
+              <span className="tabular-nums">{highlights.length}</span>
+            </button>
+          )}
           <button
             type="button"
             data-testid="detail-favourite"
             onClick={() => patch({ favourited: !bookmark.favourited })}
             aria-pressed={!!bookmark.favourited}
-            title={bookmark.favourited ? 'Remove from favourites' : 'Add to favourites'}
-            className={`rounded px-1.5 py-1 text-sm ${
+            aria-label={bookmark.favourited ? 'Remove from favourites' : 'Add to favourites'}
+            title={bookmark.favourited ? 'Remove from favourites (F)' : 'Add to favourites (F)'}
+            className={`grid h-7 w-7 place-items-center rounded-md ${
               bookmark.favourited
                 ? 'text-amber-500 hover:bg-amber-500/10'
                 : 'text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800'
             }`}
           >
-            {bookmark.favourited ? '★' : '☆'}
+            <Icon name={bookmark.favourited ? 'star-filled' : 'star'} />
           </button>
           <button
             type="button"
             data-testid="detail-archive"
             onClick={() => patch({ archived: !bookmark.archived })}
             aria-pressed={!!bookmark.archived}
-            title={bookmark.archived ? 'Unarchive' : 'Archive'}
-            className={`rounded px-1.5 py-1 text-sm ${
+            aria-label={bookmark.archived ? 'Unarchive' : 'Archive'}
+            title={bookmark.archived ? 'Unarchive (E)' : 'Archive (E)'}
+            className={`grid h-7 w-7 place-items-center rounded-md ${
               bookmark.archived
                 ? 'bg-neutral-200/70 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200'
                 : 'text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800'
             }`}
           >
-            🗄
+            <Icon name="archive" />
           </button>
           <button
             type="button"
             data-testid="detail-delete"
             onClick={() => setPendingDelete(true)}
+            aria-label="Delete bookmark"
             title="Delete bookmark"
-            className="rounded px-1.5 py-1 text-sm text-neutral-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+            className="grid h-7 w-7 place-items-center rounded-md text-neutral-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-400"
           >
-            🗑
+            <Icon name="trash" />
           </button>
         </div>
       </div>
@@ -207,179 +285,162 @@ export default function DetailPane({
         </div>
       )}
 
-      <div className="min-h-0 flex-1">
-        <div className={tab === 'preview' ? 'h-full overflow-y-auto' : 'hidden'}>
-          <div className="p-5">
-            {content?.imageAssetId && (
-              <AssetImage
-                assetId={content.imageAssetId}
-                className="mb-4 max-h-64 w-full rounded-lg object-cover"
+      <div className="flex min-h-0 flex-1">
+        <div className="relative min-w-0 flex-1">
+          <div className={tab === 'preview' ? 'h-full overflow-y-auto' : 'hidden'}>
+            <div className="p-5">
+              {content?.imageAssetId && (
+                <AssetImage
+                  assetId={content.imageAssetId}
+                  className="mb-4 max-h-64 w-full rounded-lg object-cover"
+                />
+              )}
+              {bookmark.archived && (
+                <div className="mb-2 inline-block rounded bg-neutral-200 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400">
+                  Archived
+                </div>
+              )}
+              {/* Editing writes bookmark.title; clearing it sends null, which
+                  puts the crawled page title back in charge (see
+                  lib/bookmarkDisplay.ts) rather than leaving a blank heading. */}
+              <EditableField
+                label="title"
+                value={title}
+                placeholder="Untitled"
+                onCommit={(next) => patch({ title: next.trim() || null })}
+                displayClassName="mb-1 text-lg font-semibold leading-snug"
+                inputClassName="mb-1 text-lg font-semibold leading-snug"
               />
-            )}
-            {bookmark.archived && (
-              <div className="mb-2 inline-block rounded bg-neutral-200 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400">
-                Archived
-              </div>
-            )}
-            {/* Editing writes bookmark.title; clearing it sends null, which
-                puts the crawled page title back in charge (see
-                lib/bookmarkDisplay.ts) rather than leaving a blank heading. */}
-            <EditableField
-              label="title"
-              value={title}
-              placeholder="Untitled"
-              onCommit={(next) => patch({ title: next.trim() || null })}
-              displayClassName="mb-1 text-lg font-semibold leading-snug"
-              inputClassName="mb-1 text-lg font-semibold leading-snug"
-            />
-            {url && (
-              <a
-                href="#"
-                onClick={(e) => {
-                  e.preventDefault()
-                  window.kk.webpane.openExternal(url)
-                }}
-                className="mb-3 block truncate text-xs text-emerald-600 hover:underline dark:text-emerald-400"
-              >
-                {url}
-              </a>
-            )}
-            <TagEditor bookmark={bookmark} />
-            <ListMembership bookmarkId={bookmark.id} />
-            {content?.description && (
-              <p className="mb-4 text-sm text-neutral-600 dark:text-neutral-300">{content.description}</p>
-            )}
-            {display.kind === 'text' && content?.text && (
-              <blockquote className="mb-4 rounded-lg border-l-4 border-neutral-300 bg-neutral-50 p-3 text-sm text-neutral-700 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-300">
-                {content.text}
-              </blockquote>
-            )}
-            {display.kind === 'asset' && (
-              <div className="mb-4 flex items-center gap-3 rounded-lg border border-neutral-200 bg-neutral-50 p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900">
-                <span className="text-2xl">{content?.assetType === 'pdf' ? '📄' : '📎'}</span>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate font-medium text-neutral-800 dark:text-neutral-200">
-                    {display.subtitle || 'Attached file'}
+              {url && (
+                <a
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault()
+                    window.kk.webpane.openExternal(url)
+                  }}
+                  title={url}
+                  className="mb-3 flex items-center gap-1 truncate text-xs text-emerald-600 hover:underline dark:text-emerald-400"
+                >
+                  <span className="truncate">{url}</span>
+                  <Icon name="external" size={11} />
+                </a>
+              )}
+              <TagEditor bookmark={bookmark} />
+              <ListMembership bookmarkId={bookmark.id} />
+              {content?.description && (
+                <p className="mb-4 text-sm text-neutral-600 dark:text-neutral-300">{content.description}</p>
+              )}
+              {display.kind === 'text' && content?.text && (
+                <blockquote className="mb-4 rounded-lg border-l-4 border-neutral-300 bg-neutral-50 p-3 text-sm text-neutral-700 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-300">
+                  {content.text}
+                </blockquote>
+              )}
+              {display.kind === 'asset' && (
+                <div className="mb-4 flex items-center gap-3 rounded-lg border border-neutral-200 bg-neutral-50 p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900">
+                  <span className="text-2xl">{content?.assetType === 'pdf' ? '📄' : '📎'}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-medium text-neutral-800 dark:text-neutral-200">
+                      {display.subtitle || 'Attached file'}
+                    </div>
+                    {content?.size && (
+                      <div className="text-xs text-neutral-500">{(content.size / 1024 / 1024).toFixed(1)} MB</div>
+                    )}
                   </div>
-                  {content?.size && (
-                    <div className="text-xs text-neutral-500">{(content.size / 1024 / 1024).toFixed(1)} MB</div>
-                  )}
                 </div>
-              </div>
-            )}
-            {/* Note comes before Summary now that both are editable: the
-                note is the user's own writing and the summary is generated,
-                so the thing they'd want to reach for sits higher. Both are
-                rendered unconditionally — an empty note that can't be seen
-                is an empty note that can't be written. */}
-            <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
-              <div className="mb-1 text-xs font-semibold uppercase text-amber-500">Note</div>
-              <EditableField
-                label="note"
-                multiline
-                value={bookmark.note || ''}
-                placeholder="Add a note…"
-                onCommit={(next) => patch({ note: next.trim() || null })}
-                displayClassName="whitespace-pre-wrap"
-                inputClassName="text-sm"
-              />
-            </div>
-            <div className="mb-4 rounded-lg bg-neutral-50 p-3 text-sm text-neutral-700 dark:bg-neutral-900 dark:text-neutral-300">
-              <div className="mb-1 text-xs font-semibold uppercase text-neutral-400">Summary</div>
-              <EditableField
-                label="summary"
-                multiline
-                value={bookmark.summary || ''}
-                placeholder="No summary yet — click to write one."
-                onCommit={(next) => patch({ summary: next.trim() || null })}
-                displayClassName="whitespace-pre-wrap"
-                inputClassName="text-sm"
-              />
-            </div>
-            {highlights.length > 0 && (
-              <div>
-                <div className="mb-2 flex items-baseline gap-1.5 text-xs font-semibold uppercase tracking-wide text-neutral-400">
-                  <span>Highlights</span>
-                  <span className="font-normal tabular-nums text-neutral-500">{highlights.length}</span>
+              )}
+              {/* Note comes before Summary now that both are editable: the
+                  note is the user's own writing and the summary is generated,
+                  so the thing they'd want to reach for sits higher. Both are
+                  rendered unconditionally — an empty note that can't be seen
+                  is an empty note that can't be written. The amber card is
+                  reserved for a note that actually says something; an empty
+                  one is quiet, so a blank field isn't the loudest thing on
+                  the page. */}
+              <div
+                className={`mb-4 rounded-lg border p-3 text-sm ${
+                  bookmark.note
+                    ? 'border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200'
+                    : 'border-neutral-200 bg-transparent text-neutral-700 dark:border-neutral-800 dark:text-neutral-300'
+                }`}
+              >
+                <div
+                  className={`mb-1 text-xs font-semibold uppercase ${
+                    bookmark.note ? 'text-amber-600 dark:text-amber-500' : 'text-neutral-400'
+                  }`}
+                >
+                  Note
                 </div>
-                <ul className="space-y-1.5">
-                  {highlights.map((h) => {
-                    const missing = anchored !== null && !anchored.has(h.id)
-                    return (
-                      <li key={h.id}>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setFocusHighlightId(h.id)
-                            setTab(pdfAssetId ? 'pdf' : 'web')
-                          }}
-                          title={pdfAssetId ? 'Show in the PDF' : 'Show on the live page'}
-                          className="group flex w-full gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-neutral-100 dark:hover:bg-neutral-800/70"
-                        >
-                          <span
-                            aria-hidden
-                            className="mt-0.5 w-1 shrink-0 self-stretch rounded-full"
-                            style={{ backgroundColor: colorFor(h.color) }}
-                          />
-                          <span className="min-w-0 flex-1">
-                            <span className="block text-sm leading-snug text-neutral-700 dark:text-neutral-200">
-                              {h.text}
-                            </span>
-                            {h.note && (
-                              <span className="mt-1 block text-xs leading-snug text-neutral-500 dark:text-neutral-400">
-                                {h.note}
-                              </span>
-                            )}
-                            {missing && (
-                              <span className="mt-1 block text-[11px] text-neutral-400">
-                                {pdfAssetId ? 'Not found in this PDF' : 'Not found on the current page'}
-                              </span>
-                            )}
-                          </span>
-                        </button>
-                      </li>
-                    )
-                  })}
-                </ul>
+                <EditableField
+                  label="note"
+                  multiline
+                  value={bookmark.note || ''}
+                  placeholder="Add a note…"
+                  onCommit={(next) => patch({ note: next.trim() || null })}
+                  displayClassName="whitespace-pre-wrap"
+                  inputClassName="text-sm"
+                />
               </div>
-            )}
+              <div className="mb-4 rounded-lg bg-neutral-50 p-3 text-sm text-neutral-700 dark:bg-neutral-900 dark:text-neutral-300">
+                <div className="mb-1 text-xs font-semibold uppercase text-neutral-400">Summary</div>
+                <EditableField
+                  label="summary"
+                  multiline
+                  value={bookmark.summary || ''}
+                  placeholder="No summary yet — click to write one."
+                  onCommit={(next) => patch({ summary: next.trim() || null })}
+                  displayClassName="whitespace-pre-wrap"
+                  inputClassName="text-sm"
+                />
+              </div>
+            </div>
           </div>
-        </div>
 
-        {pdfAssetId && (
-          <div className={tab === 'pdf' ? 'h-full' : 'hidden'}>
-            <PdfPane
-              assetId={pdfAssetId}
-              fileName={pdfFileName}
-              bookmarkId={bookmark.id}
-              highlights={highlights}
-              focusHighlightId={tab === 'pdf' ? focusHighlightId : null}
-              onFocusHandled={() => setFocusHighlightId(null)}
-              onAnchorStatus={handleAnchorStatus}
-            />
-          </div>
-        )}
-
-        <div className={tab === 'web' ? 'h-full' : 'hidden'}>
-          {url ? (
-            <WebPane
-              active={tab === 'web'}
-              url={url}
-              bookmarkId={bookmark.id}
-              highlights={highlights}
-              focusHighlightId={focusHighlightId}
-              onFocusHandled={() => setFocusHighlightId(null)}
-            />
-          ) : (
-            <div className="p-5 text-sm text-neutral-400">
-              {display.kind === 'asset'
-                ? 'This bookmark is a stored file with no source URL to load live.'
-                : display.kind === 'text'
-                  ? 'This note has no source URL to load live.'
-                  : 'This bookmark has no URL to load.'}
+          {pdfAssetId && (
+            <div className={tab === 'pdf' ? 'h-full' : 'hidden'}>
+              <PdfPane
+                assetId={pdfAssetId}
+                fileName={pdfFileName}
+                bookmarkId={bookmark.id}
+                highlights={highlights}
+                focusHighlightId={tab === 'pdf' ? focusHighlightId : null}
+                onFocusHandled={clearFocus}
+                onAnchorStatus={handleAnchorStatus}
+              />
             </div>
           )}
+
+          <div className={tab === 'web' ? 'h-full' : 'hidden'}>
+            {url ? (
+              <WebPane
+                active={tab === 'web'}
+                url={url}
+                bookmarkId={bookmark.id}
+                highlights={highlights}
+                focusHighlightId={focusHighlightId}
+                onFocusHandled={clearFocus}
+              />
+            ) : (
+              <div className="p-5 text-sm text-neutral-400">
+                {display.kind === 'asset'
+                  ? 'This bookmark is a stored file with no source URL to load live.'
+                  : display.kind === 'text'
+                    ? 'This note has no source URL to load live.'
+                    : 'This bookmark has no URL to load.'}
+              </div>
+            )}
+          </div>
         </div>
+
+        {railOpen && highlights.length > 0 && (
+          <HighlightRail
+            highlights={highlights}
+            anchored={anchored}
+            activeId={focusHighlightId}
+            inPdf={!!pdfAssetId}
+            onOpen={openHighlight}
+            onClose={() => setRailOpen(false)}
+          />
+        )}
       </div>
 
       {pendingDelete && (
@@ -394,5 +455,86 @@ export default function DetailPane({
   )
 }
 
-
-// Keep in step with COLORS in src/preload/webpane.ts.
+/**
+ * This bookmark's highlights, alongside whichever pane is showing.
+ *
+ * It sits *beside* the content rather than inside the Preview scroll body
+ * so that clicking a highlight — which switches to the PDF or Web pane and
+ * scrolls it into view — doesn't take the list itself off screen. The Web
+ * pane's native WebContentsView tracks its container's rect through a
+ * ResizeObserver (see WebPane.tsx), so opening and closing the rail
+ * repositions the live page automatically.
+ */
+function HighlightRail({
+  highlights,
+  anchored,
+  activeId,
+  inPdf,
+  onOpen,
+  onClose
+}: {
+  highlights: Highlight[]
+  anchored: Set<string> | null
+  activeId: string | null
+  inPdf: boolean
+  onOpen: (h: Highlight) => void
+  onClose: () => void
+}): React.JSX.Element {
+  return (
+    <aside className="flex w-72 flex-shrink-0 flex-col border-l border-neutral-200 bg-neutral-50/50 dark:border-neutral-800 dark:bg-neutral-900/30">
+      <div className="flex items-center gap-1.5 border-b border-neutral-200 px-3 py-2 dark:border-neutral-800">
+        <span className="flex-1 text-xs font-semibold uppercase tracking-wide text-neutral-400">
+          Highlights <span className="tabular-nums text-neutral-500">{highlights.length}</span>
+        </span>
+        <button
+          onClick={onClose}
+          aria-label="Hide highlights"
+          title="Hide highlights"
+          className="grid h-6 w-6 place-items-center rounded text-neutral-400 hover:bg-neutral-200/70 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+        >
+          <Icon name="close" size={13} />
+        </button>
+      </div>
+      <ul className="min-h-0 flex-1 overflow-y-auto p-1.5">
+        {highlights.map((h) => {
+          const missing = anchored !== null && !anchored.has(h.id)
+          return (
+            <li key={h.id}>
+              <button
+                type="button"
+                onClick={() => onOpen(h)}
+                title={inPdf ? 'Show in the PDF' : 'Show on the live page'}
+                className={`flex w-full gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                  h.id === activeId
+                    ? 'bg-emerald-600/10'
+                    : 'hover:bg-neutral-200/60 dark:hover:bg-neutral-800/70'
+                }`}
+              >
+                <span
+                  aria-hidden
+                  className="mt-0.5 w-1 shrink-0 self-stretch rounded-full"
+                  style={{ backgroundColor: colorFor(h.color) }}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="line-clamp-4 text-xs leading-snug text-neutral-700 dark:text-neutral-200">
+                    {h.text}
+                  </span>
+                  {h.note && (
+                    <span className="mt-1 block text-[11px] leading-snug text-neutral-500 dark:text-neutral-400">
+                      {h.note}
+                    </span>
+                  )}
+                  {missing && (
+                    <span className="mt-1 block text-[11px] text-neutral-400">
+                      {inPdf ? 'Not found in this PDF' : 'Not found on the current page'}
+                    </span>
+                  )}
+                </span>
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+    </aside>
+  )
+}

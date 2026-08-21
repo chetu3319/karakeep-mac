@@ -117,10 +117,27 @@ export function useTags(): UseQueryResult<KKTag[], Error> {
   return useQuery({ queryKey: ['tags'], queryFn: () => window.kk.tags.get() })
 }
 
-export function useAllHighlights(): UseQueryResult<{ highlights: Highlight[]; nextCursor?: string | null }, Error> {
-  return useQuery({
+/**
+ * The global highlight stream, paginated.
+ *
+ * The sidebar's Highlights view filters by colour, but `GET /highlights`
+ * accepts only `cursor` and `limit` — there is no colour parameter (see
+ * main/api.ts). So the filter is applied client-side over whatever pages
+ * have been pulled, and the view keeps pulling as the user scrolls. The
+ * consequence is worth being honest about in the UI: a colour filter is
+ * complete only for the highlights loaded so far, which is why
+ * HighlightsList labels its count "of N loaded" rather than claiming a
+ * library total.
+ */
+export function useAllHighlights(
+  enabled = true
+): UseInfiniteQueryResult<{ pages: { highlights: Highlight[]; nextCursor?: string | null }[] }, Error> {
+  return useInfiniteQuery({
     queryKey: ['highlights', 'all'],
-    queryFn: () => window.kk.highlights.get({ limit: 100 })
+    queryFn: ({ pageParam }) => window.kk.highlights.get({ limit: 50, cursor: pageParam as string | undefined }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage: { nextCursor?: string | null }) => lastPage.nextCursor || undefined,
+    enabled
   })
 }
 

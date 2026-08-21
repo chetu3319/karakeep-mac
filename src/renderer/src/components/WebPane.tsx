@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
+import Icon from './Icon'
 import type { Highlight, WebPaneState } from '../../../shared/types'
 
 export default function WebPane({
@@ -111,39 +112,46 @@ export default function WebPane({
 
   return (
     <div className="relative flex h-full flex-col">
-      <div className="flex items-center gap-1 border-b border-neutral-200 px-2 py-1.5 dark:border-neutral-800">
+      <div className="flex items-center gap-0.5 border-b border-neutral-200 px-2 py-1.5 dark:border-neutral-800">
         <button
           onClick={() => window.kk.webpane.back()}
           disabled={!state.canGoBack}
-          className="rounded p-1.5 text-neutral-500 hover:bg-neutral-100 disabled:opacity-30 dark:hover:bg-neutral-800"
+          className="grid h-7 w-7 place-items-center rounded-md text-neutral-500 hover:bg-neutral-100 disabled:opacity-30 dark:hover:bg-neutral-800"
           title="Back"
+          aria-label="Back"
         >
-          ←
+          <Icon name="arrow-left" />
         </button>
         <button
           onClick={() => window.kk.webpane.forward()}
           disabled={!state.canGoForward}
-          className="rounded p-1.5 text-neutral-500 hover:bg-neutral-100 disabled:opacity-30 dark:hover:bg-neutral-800"
+          className="grid h-7 w-7 place-items-center rounded-md text-neutral-500 hover:bg-neutral-100 disabled:opacity-30 dark:hover:bg-neutral-800"
           title="Forward"
+          aria-label="Forward"
         >
-          →
+          <Icon name="arrow-right" />
         </button>
         <button
           onClick={() => (state.isLoading ? window.kk.webpane.stop() : window.kk.webpane.reload())}
-          className="rounded p-1.5 text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+          className="grid h-7 w-7 place-items-center rounded-md text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
           title={state.isLoading ? 'Stop' : 'Reload'}
+          aria-label={state.isLoading ? 'Stop loading' : 'Reload'}
         >
-          {state.isLoading ? '✕' : '⟳'}
+          <Icon name={state.isLoading ? 'close' : 'reload'} />
         </button>
-        <div className="ml-2 flex-1 truncate rounded-md bg-neutral-100 px-2 py-1 text-xs text-neutral-600 dark:bg-neutral-900 dark:text-neutral-400">
+        <div
+          className="ml-1.5 flex-1 truncate rounded-md bg-neutral-100 px-2 py-1 text-xs text-neutral-600 dark:bg-neutral-900 dark:text-neutral-400"
+          title={state.url || url}
+        >
           {state.url || url}
         </div>
         <button
           onClick={() => window.kk.webpane.openExternal(state.url || url)}
-          className="rounded px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
-          title="Open in Safari"
+          className="ml-1 flex h-7 items-center gap-1 rounded-md px-2 text-xs text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+          title="Open in your default browser"
         >
-          Open in Safari ↗
+          Open in Safari
+          <Icon name="external" size={12} />
         </button>
       </div>
       {state.error && (
