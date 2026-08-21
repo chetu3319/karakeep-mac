@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { hexForColor as colorFor } from '../../../shared/highlightUi'
-import type { Bookmark, Highlight, UpdateBookmarkInput } from '../../../shared/types'
+import type { Bookmark, Highlight, UpdateBookmarkInput, WebPaneState } from '../../../shared/types'
 import { useBookmark, useDeleteBookmark, useHighlightsForBookmark, useUpdateBookmark } from '../lib/queries'
 import { displayForBookmark } from '../lib/bookmarkDisplay'
 import { usePref } from '../lib/prefs'
@@ -16,6 +16,15 @@ import TagEditor from './TagEditor'
 import WebPane from './WebPane'
 
 type Tab = 'preview' | 'pdf' | 'web'
+
+const EMPTY_WEB_STATE: WebPaneState = {
+  url: '',
+  title: '',
+  isLoading: true,
+  canGoBack: false,
+  canGoForward: false,
+  error: null
+}
 
 export default function DetailPane({
   bookmark: selected,
@@ -54,6 +63,12 @@ export default function DetailPane({
   // you work with highlights open is a habit, not a per-bookmark decision.
   const [railOpen, setRailOpen] = usePref('highlightRailOpen', false)
 
+  // Navigation state for the live pane. It lives here rather than in
+  // WebPane because the back/forward/reload buttons moved into this
+  // toolbar; one subscription now feeds both them and WebPane's own
+  // effects.
+  const [webState, setWebState] = useState<WebPaneState>(EMPTY_WEB_STATE)
+
   function patch(input: UpdateBookmarkInput): void {
     if (!bookmark) return
     setActionError(null)
@@ -87,6 +102,23 @@ export default function DetailPane({
   }, [bookmark])
   const pdfFileName = bookmark?.content?.fileName || 'document.pdf'
 
+  // Needed by the tab-defaulting effect below, which runs before the
+  // early return that used to be the only place `display` was computed.
+  const display = useMemo(() => (bookmark ? displayForBookmark(bookmark) : null), [bookmark])
+  const url = display?.url
+
+  /**
+   * Where a bookmark opens.
+   *
+   * A stored PDF *is* the bookmark, so it opens on the PDF. Anything with
+   * a URL opens on the live page: Preview is a metadata card — title, tags,
+   * note, summary — and landing there means every bookmark costs a second
+   * click before you can read the thing you saved. Preview is left as the
+   * default only for bookmarks that have no page to show: plain text
+   * notes, and stored images.
+   */
+  const defaultTab: Tab = pdfAssetId ? 'pdf' : url ? 'web' : 'preview'
+
   // The PDF pane reports which highlights it could place, the same way the
   // Web pane's preload does — one list, whichever pane is showing.
   const handleAnchorStatus = useCallback((anchoredIds: string[]) => {
@@ -115,13 +147,17 @@ export default function DetailPane({
   }, [bookmark])
 
   useEffect(() => {
-    // A stored PDF *is* the bookmark, so open on it rather than on a preview
-    // card that only restates the file name.
-    setTab(pdfAssetId ? 'pdf' : 'preview')
+    setTab(defaultTab)
     setAnchored(null)
     setFocusHighlightId(null)
+    // Nav state describes the *previous* bookmark's page until main pushes
+    // an update; leaving it would light up Back for a page this bookmark
+    // has never been on.
+    setWebState(EMPTY_WEB_STATE)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookmark?.id])
+
+  useEffect(() => window.kk.webpane.onState((next) => setWebState(next)), [])
 
   /**
    * A highlight opened from the sidebar's Highlights view arrives as a
@@ -145,18 +181,30 @@ export default function DetailPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookmark?.id])
 
+  // Now that Web is the default tab, "we are on the Web tab" is true from
+  // the moment a bookmark is selected — so the smoke harness must key its
+  // web screenshot off the explicit switch it asked for, not off the tab
+  // value, or it would capture step 3 before step 2's page had settled.
+  // State, not a ref: with Web as the default tab the harness's
+  // setTab('web') is a no-op, React bails out of the re-render, and an
+  // effect keyed only on `tab` would never re-run — so the run would stall
+  // until its 25s safety timeout instead of reporting the page ready.
+  const [smokeSwitchedToWeb, setSmokeSwitchedToWeb] = useState(false)
   useEffect(() => {
     if (!window.kk.dev.isSmoke) return
-    window.kk.dev.onSwitchToWeb(() => setTab('web'))
+    window.kk.dev.onSwitchToWeb(() => {
+      setSmokeSwitchedToWeb(true)
+      setTab('web')
+    })
   }, [])
 
   useEffect(() => {
-    if (tab === 'web' && window.kk.dev.isSmoke) {
+    if (tab === 'web' && smokeSwitchedToWeb && window.kk.dev.isSmoke) {
       const t = setTimeout(() => window.kk.dev.notifyWebReady(), 1500)
       return () => clearTimeout(t)
     }
     return undefined
-  }, [tab])
+  }, [tab, smokeSwitchedToWeb])
 
   function openHighlight(h: Highlight): void {
     setFocusHighlightId(h.id)
@@ -193,14 +241,35 @@ export default function DetailPane({
   }
 
   const content = bookmark.content
-  const display = displayForBookmark(bookmark)
-  const title = display.title
-  const url = display.url
+  const title = display?.title ?? 'Untitled'
   const tabs: Tab[] = ['preview', ...(pdfAssetId ? (['pdf'] as Tab[]) : []), 'web']
+  // On the Web tab the page may have been navigated away from the
+  // bookmark's own URL. Copying and opening should follow where the user
+  // actually is — and, with the address bar gone, the tooltip is now the
+  // only place that current URL is visible.
+  const activeUrl = (tab === 'web' ? webState.url || url : url) ?? ''
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-1 border-b border-neutral-200 px-3 pt-2 dark:border-neutral-800">
+        {/*
+          Collapsing the bookmark list took its own chevron away with it,
+          and the strip that carries the expand control only exists when
+          the *sidebar* is hidden — so sidebar-open + list-collapsed had no
+          way back to the list at all short of the ⌃⌘L shortcut. The handle
+          belongs at the edge the pane would reappear from.
+        */}
+        {listCollapsed && (
+          <button
+            type="button"
+            onClick={onExpandList}
+            title="Show bookmark list (⌃⌘L)"
+            aria-label="Show bookmark list"
+            className="-ml-1 mb-1.5 grid h-7 w-7 flex-shrink-0 place-items-center rounded-md text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+          >
+            <Icon name="chevron-right" />
+          </button>
+        )}
         {tabs.map((t) => (
           <button
             key={t}
@@ -217,6 +286,60 @@ export default function DetailPane({
         ))}
 
         <div className="ml-auto flex items-center gap-0.5 pb-1.5">
+          {/* Live-page navigation, only while the live page is showing.
+              These were the useful half of the toolbar that used to sit
+              under the tab row alongside the read-only address field. */}
+          {tab === 'web' && url && (
+            <>
+              <button
+                type="button"
+                onClick={() => window.kk.webpane.back()}
+                disabled={!webState.canGoBack}
+                title="Back"
+                aria-label="Back"
+                className="grid h-7 w-7 place-items-center rounded-md text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-neutral-800"
+              >
+                <Icon name="arrow-left" />
+              </button>
+              <button
+                type="button"
+                onClick={() => window.kk.webpane.forward()}
+                disabled={!webState.canGoForward}
+                title="Forward"
+                aria-label="Forward"
+                className="grid h-7 w-7 place-items-center rounded-md text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-neutral-800"
+              >
+                <Icon name="arrow-right" />
+              </button>
+              <button
+                type="button"
+                onClick={() => (webState.isLoading ? window.kk.webpane.stop() : window.kk.webpane.reload())}
+                title={webState.isLoading ? 'Stop' : 'Reload'}
+                aria-label={webState.isLoading ? 'Stop loading' : 'Reload'}
+                className="grid h-7 w-7 place-items-center rounded-md text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800"
+              >
+                <Icon name={webState.isLoading ? 'close' : 'reload'} />
+              </button>
+              <span className="mx-1 h-4 w-px bg-neutral-200 dark:bg-neutral-800" aria-hidden />
+            </>
+          )}
+
+          {activeUrl && (
+            <>
+              <CopyLinkButton url={activeUrl} />
+              <button
+                type="button"
+                onClick={() => window.kk.webpane.openExternal(activeUrl)}
+                title={`Open in your default browser — ${activeUrl}`}
+                className="flex h-7 items-center gap-1 rounded-md px-2 text-xs text-neutral-500 hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+              >
+                <Icon name="external" size={13} />
+                Open in browser
+              </button>
+              <span className="mx-1 h-4 w-px bg-neutral-200 dark:bg-neutral-800" aria-hidden />
+            </>
+          )}
+
           {highlights.length > 0 && (
             <button
               type="button"
@@ -330,17 +453,17 @@ export default function DetailPane({
               {content?.description && (
                 <p className="mb-4 text-sm text-neutral-600 dark:text-neutral-300">{content.description}</p>
               )}
-              {display.kind === 'text' && content?.text && (
+              {display?.kind === 'text' && content?.text && (
                 <blockquote className="mb-4 rounded-lg border-l-4 border-neutral-300 bg-neutral-50 p-3 text-sm text-neutral-700 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-300">
                   {content.text}
                 </blockquote>
               )}
-              {display.kind === 'asset' && (
+              {display?.kind === 'asset' && (
                 <div className="mb-4 flex items-center gap-3 rounded-lg border border-neutral-200 bg-neutral-50 p-3 text-sm dark:border-neutral-800 dark:bg-neutral-900">
                   <span className="text-2xl">{content?.assetType === 'pdf' ? '📄' : '📎'}</span>
                   <div className="min-w-0 flex-1">
                     <div className="truncate font-medium text-neutral-800 dark:text-neutral-200">
-                      {display.subtitle || 'Attached file'}
+                      {display?.subtitle || 'Attached file'}
                     </div>
                     {content?.size && (
                       <div className="text-xs text-neutral-500">{(content.size / 1024 / 1024).toFixed(1)} MB</div>
@@ -416,14 +539,15 @@ export default function DetailPane({
                 url={url}
                 bookmarkId={bookmark.id}
                 highlights={highlights}
+                state={webState}
                 focusHighlightId={focusHighlightId}
                 onFocusHandled={clearFocus}
               />
             ) : (
               <div className="p-5 text-sm text-neutral-400">
-                {display.kind === 'asset'
+                {display?.kind === 'asset'
                   ? 'This bookmark is a stored file with no source URL to load live.'
-                  : display.kind === 'text'
+                  : display?.kind === 'text'
                     ? 'This note has no source URL to load live.'
                     : 'This bookmark has no URL to load.'}
               </div>
@@ -536,5 +660,51 @@ function HighlightRail({
         })}
       </ul>
     </aside>
+  )
+}
+
+/**
+ * Copy the current link.
+ *
+ * Confirmation is the icon itself flipping to a tick for a moment.
+ * Copying is silent by nature — without some acknowledgement the only way
+ * to know it worked is to go and paste somewhere — and a toast for
+ * something this small would be louder than the action.
+ */
+function CopyLinkButton({ url }: { url: string }): React.JSX.Element {
+  const [copied, setCopied] = useState(false)
+
+  // A component unmounted inside the confirmation window (switching
+  // bookmarks straight after copying) would otherwise set state on a dead
+  // component.
+  useEffect(() => {
+    if (!copied) return
+    const t = setTimeout(() => setCopied(false), 1400)
+    return () => clearTimeout(t)
+  }, [copied])
+
+  // Reset if the link changes under us — a tick left over from the
+  // previous page would be claiming something untrue about this one.
+  useEffect(() => setCopied(false), [url])
+
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        void navigator.clipboard
+          .writeText(url)
+          .then(() => setCopied(true))
+          .catch(() => undefined)
+      }}
+      title={copied ? 'Copied' : `Copy link — ${url}`}
+      aria-label="Copy link"
+      className={`grid h-7 w-7 place-items-center rounded-md ${
+        copied
+          ? 'text-emerald-600 dark:text-emerald-400'
+          : 'text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800'
+      }`}
+    >
+      <Icon name={copied ? 'check' : 'copy'} />
+    </button>
   )
 }

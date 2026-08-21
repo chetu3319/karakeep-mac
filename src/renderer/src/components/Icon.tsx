@@ -43,6 +43,8 @@ export type IconName =
   | 'monitor'
   | 'rows'
   | 'list'
+  | 'copy'
+  | 'check'
 
 // Single- or multi-path outlines on a 24x24 grid, stroked (not filled)
 // unless the name ends in `-filled`.
@@ -74,7 +76,9 @@ const PATHS: Record<IconName, string> = {
   moon: 'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z',
   monitor: 'M3 5a1 1 0 0 1 1-1h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1zM8 20h8M12 16v4',
   rows: 'M3 5h18M3 12h18M3 19h18',
-  list: 'M4 6h16M4 12h16M4 18h16'
+  list: 'M4 6h16M4 12h16M4 18h16',
+  copy: 'M9 9a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2zM5 15H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1',
+  check: 'M4 12.5l5 5L20 6.5'
 }
 
 export default function Icon({
