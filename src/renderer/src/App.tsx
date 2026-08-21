@@ -25,10 +25,8 @@ type AuthState = { status: 'loading' } | { status: 'onboarding' } | { status: 'r
  * Height reserved for the macOS traffic lights.
  *
  * With `titleBarStyle: 'hiddenInset'` the buttons float over the renderer
- * at `trafficLightPosition` (main/index.ts), so *something* on screen has
- * to leave room for them. Normally that is the sidebar's own header. When
- * the sidebar is hidden there is nothing on the left any more, so a slim
- * strip takes over — see TitlebarStrip.
+ * at `trafficLightPosition` (main/index.ts), so whichever pane is
+ * currently leftmost has to leave room for them — see TitlebarSlot.
  */
 const TITLEBAR_H = 52
 /** Left inset that clears the three buttons plus a margin. */
@@ -114,9 +112,9 @@ export default function App(): React.JSX.Element {
   const inFocusMode = sidebarCollapsed && listCollapsed
 
   // Edge case considered: bookmark list collapsed with nothing selected
-  // leaves the DetailPane on its empty state. That is NOT a stranded state —
-  // the expand chevrons in TitlebarStrip are rendered in every collapse
-  // state, so the list is always one click (or ⌃⌘L) away.
+  // leaves the DetailPane on its empty state. That is NOT a stranded
+  // state — every collapsed pane has exactly one expand control on screen
+  // in every combination (see TitlebarSlot), plus ⌃⌘S / ⌃⌘L / ⌃⌘F.
 
   const toggleSidebar = useCallback(() => setSidebarCollapsed((c) => !c), [setSidebarCollapsed])
   const toggleList = useCallback(() => setListCollapsed((c) => !c), [setListCollapsed])
@@ -310,21 +308,39 @@ export default function App(): React.JSX.Element {
 }
 
 /**
- * The window's drag region and traffic-light clearance *when the sidebar
- * is hidden*.
+ * The window's title area, rendered by whichever pane is currently
+ * leftmost.
  *
- * The app used to carry a permanent full-width header: an app name on the
- * left, three cryptic glyph toggles and an account row on the right, and
- * roughly 900px of nothing in between on a default-size window. All of
- * that now lives in the sidebar, which runs the full height of the window.
+ * There is one rule about pane controls in this app, and everything here
+ * follows from it:
  *
- * This strip is what's left over for the one case the sidebar can't
- * cover — macOS still draws its traffic lights at a fixed point over the
- * renderer, so with the sidebar hidden something has to hold that space
- * and stay draggable. It earns its 44px by carrying the way back: the
- * expand controls for whichever panes are hidden.
+ *   **Collapse lives on the pane it collapses. Expand lives in the
+ *   window's title row.**
+ *
+ * Collapsing is something you do *to* a pane you are looking at, so its
+ * chevron belongs on that pane (Sidebar's header, BookmarkList's header).
+ * Expanding is something you do when the pane is not there to be clicked,
+ * so those controls collect in the one place that is always present and
+ * always in the same corner.
+ *
+ * Without that rule the controls were placed case by case, and the cases
+ * overlapped: with both panes collapsed, "show bookmark list" rendered
+ * twice — once in the old full-width strip and once in the detail pane's
+ * toolbar directly beneath it, two identical chevrons about fifty pixels
+ * apart.
+ *
+ * The slot only exists when the sidebar is hidden, because when the
+ * sidebar is showing it *is* the leftmost pane and its own header plays
+ * this role. It is scoped to the leftmost column rather than spanning the
+ * window: a full-width bar with one small button at x=86 was reproducing
+ * the expanse of empty header this whole redesign set out to remove.
+ *
+ * Because both variants sit at the window's top-left with the same inset,
+ * the "show sidebar" button does not move when the bookmark list is
+ * expanded out from under it — the slot changes which column renders it,
+ * but not where it lands on screen.
  */
-function TitlebarStrip({
+function TitlebarSlot({
   listCollapsed,
   onExpandSidebar,
   onExpandList
@@ -335,7 +351,7 @@ function TitlebarStrip({
 }): React.JSX.Element {
   return (
     <div
-      className="titlebar-drag flex flex-shrink-0 items-center gap-1 border-b border-neutral-200 bg-neutral-50/60 pr-3 dark:border-neutral-800 dark:bg-neutral-900/40"
+      className="titlebar-drag flex flex-shrink-0 items-center gap-1 border-b border-neutral-200 bg-neutral-50/60 pr-2 dark:border-neutral-800 dark:bg-neutral-900/40"
       style={{ height: TITLEBAR_H, paddingLeft: TRAFFIC_LIGHT_INSET }}
     >
       <button
@@ -346,6 +362,8 @@ function TitlebarStrip({
       >
         <Icon name="sidebar" />
       </button>
+      {/* Only reachable with the sidebar hidden too — with the sidebar
+          showing, its header carries this control instead. */}
       {listCollapsed && (
         <button
           onClick={onExpandList}
@@ -531,50 +549,54 @@ function Library({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // The title area belongs to whichever column is leftmost. With the
+  // sidebar showing, that is the sidebar and its own header handles it.
+  const slot = (
+    <TitlebarSlot
+      listCollapsed={listCollapsed}
+      onExpandSidebar={onToggleSidebar}
+      onExpandList={onToggleList}
+    />
+  )
+
   return (
-    <div className="flex h-full flex-col">
-      {/* Only when the sidebar can't hold the traffic lights. */}
-      {sidebarCollapsed && (
-        <TitlebarStrip
-          listCollapsed={listCollapsed}
-          onExpandSidebar={onToggleSidebar}
-          onExpandList={onToggleList}
-        />
+    <div className="flex h-full">
+      {/* Collapsed panes are unmounted entirely (not just hidden) so a
+          zero-width Sidebar/BookmarkList can't still capture tab focus or
+          act as a drop target, and so re-expanding always mounts a fresh
+          component instance with no stale drag state or detached
+          listeners left over from before the collapse. */}
+      {!sidebarCollapsed && (
+        <>
+          <div className="min-w-0 flex-shrink-0" style={{ width: sidebarWidth }}>
+            <Sidebar
+              selected={selection}
+              onSelect={onSelectionChange}
+              user={user}
+              onAddBookmark={onAddBookmark}
+              onOpenSettings={onOpenSettings}
+              onSignOut={onSignOut}
+              onCollapse={onToggleSidebar}
+              listCollapsed={listCollapsed}
+              onExpandList={onToggleList}
+            />
+          </div>
+          <Resizer
+            ariaLabel="Resize sidebar"
+            width={sidebarWidth}
+            min={PANE_LIMITS.sidebar.min}
+            max={PANE_LIMITS.sidebar.max}
+            defaultWidth={DEFAULT_WIDTHS.sidebar}
+            onWidth={onSidebarWidth}
+          />
+        </>
       )}
 
-      <div className="flex min-h-0 flex-1">
-        {/* Collapsed panes are unmounted entirely (not just hidden) so a
-            zero-width Sidebar/BookmarkList can't still capture tab focus or
-            act as a drop target, and so re-expanding always mounts a fresh
-            component instance with no stale drag state or detached
-            listeners left over from before the collapse. */}
-        {!sidebarCollapsed && (
-          <>
-            <div className="min-w-0 flex-shrink-0" style={{ width: sidebarWidth }}>
-              <Sidebar
-                selected={selection}
-                onSelect={onSelectionChange}
-                user={user}
-                onAddBookmark={onAddBookmark}
-                onOpenSettings={onOpenSettings}
-                onSignOut={onSignOut}
-                onCollapse={onToggleSidebar}
-              />
-            </div>
-            <Resizer
-              ariaLabel="Resize sidebar"
-              width={sidebarWidth}
-              min={PANE_LIMITS.sidebar.min}
-              max={PANE_LIMITS.sidebar.max}
-              defaultWidth={DEFAULT_WIDTHS.sidebar}
-              onWidth={onSidebarWidth}
-            />
-          </>
-        )}
-
-        {!listCollapsed && (
-          <>
-            <div className="min-w-0 flex-shrink-0" style={{ width: listWidth }}>
+      {!listCollapsed && (
+        <>
+          <div className="flex min-w-0 flex-shrink-0 flex-col" style={{ width: listWidth }}>
+            {sidebarCollapsed && slot}
+            <div className="min-h-0 flex-1">
               {selection.type === 'highlights' ? (
                 <HighlightsList
                   colors={selection.colors}
@@ -592,18 +614,21 @@ function Library({
                 />
               )}
             </div>
-            <Resizer
-              ariaLabel="Resize bookmark list"
-              width={listWidth}
-              min={PANE_LIMITS.list.min}
-              max={PANE_LIMITS.list.max}
-              defaultWidth={DEFAULT_WIDTHS.list}
-              onWidth={onListWidth}
-            />
-          </>
-        )}
+          </div>
+          <Resizer
+            ariaLabel="Resize bookmark list"
+            width={listWidth}
+            min={PANE_LIMITS.list.min}
+            max={PANE_LIMITS.list.max}
+            defaultWidth={DEFAULT_WIDTHS.list}
+            onWidth={onListWidth}
+          />
+        </>
+      )}
 
-        <div className="min-w-0 flex-1">
+      <div className="flex min-w-0 flex-1 flex-col">
+        {sidebarCollapsed && listCollapsed && slot}
+        <div className="min-h-0 flex-1">
           <DetailPane
             bookmark={selectedBookmark}
             onDeleted={onBookmarkDeleted}

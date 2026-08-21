@@ -253,23 +253,13 @@ export default function DetailPane({
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-1 border-b border-neutral-200 px-3 pt-2 dark:border-neutral-800">
         {/*
-          Collapsing the bookmark list took its own chevron away with it,
-          and the strip that carries the expand control only exists when
-          the *sidebar* is hidden — so sidebar-open + list-collapsed had no
-          way back to the list at all short of the ⌃⌘L shortcut. The handle
-          belongs at the edge the pane would reappear from.
+          No pane-expand control here. This toolbar is for actions on the
+          bookmark; "show the bookmark list" is window chrome, and it lives
+          in the window's title row (Sidebar's header, or TitlebarSlot when
+          the sidebar is hidden). Putting a copy here as well is what
+          produced two identical chevrons fifty pixels apart with both
+          panes collapsed.
         */}
-        {listCollapsed && (
-          <button
-            type="button"
-            onClick={onExpandList}
-            title="Show bookmark list (⌃⌘L)"
-            aria-label="Show bookmark list"
-            className="-ml-1 mb-1.5 grid h-7 w-7 flex-shrink-0 place-items-center rounded-md text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
-          >
-            <Icon name="chevron-right" />
-          </button>
-        )}
         {tabs.map((t) => (
           <button
             key={t}

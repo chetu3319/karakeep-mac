@@ -36,6 +36,8 @@ interface SidebarProps {
   onOpenSettings: () => void
   onSignOut: () => void
   onCollapse: () => void
+  listCollapsed: boolean
+  onExpandList: () => void
 }
 
 // The three feed-backed views, in the order they appear above the list
@@ -74,7 +76,9 @@ export default function Sidebar({
   onAddBookmark,
   onOpenSettings,
   onSignOut,
-  onCollapse
+  onCollapse,
+  listCollapsed,
+  onExpandList
 }: SidebarProps): React.JSX.Element {
   const listsQuery = useLists()
   const tagsQuery = useTags()
@@ -389,13 +393,31 @@ export default function Sidebar({
         region. This is what replaced the full-width header bar: on a
         1280px window that bar spent roughly 900px saying nothing.
       */}
-      <div className="titlebar-drag flex h-[52px] flex-shrink-0 items-center justify-end pl-[86px] pr-2">
+      <div className="titlebar-drag flex h-[52px] flex-shrink-0 items-center gap-1 pl-[86px] pr-2">
+        {/*
+          With the sidebar showing, this header *is* the window's title
+          row, so it carries the expand control for the bookmark list when
+          that pane is hidden — see TitlebarSlot in App.tsx for why every
+          expand control collects in one row rather than being placed
+          wherever each pane happens to border.
+        */}
+        {listCollapsed && (
+          <button
+            type="button"
+            onClick={onExpandList}
+            title="Show bookmark list (⌃⌘L)"
+            aria-label="Show bookmark list"
+            className="titlebar-no-drag grid h-7 w-7 place-items-center rounded-md text-neutral-400 hover:bg-neutral-200/70 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+          >
+            <Icon name="chevron-right" />
+          </button>
+        )}
         <button
           type="button"
           onClick={onCollapse}
           title="Hide sidebar (⌃⌘S)"
           aria-label="Hide sidebar"
-          className="titlebar-no-drag rounded-md p-1.5 text-neutral-400 hover:bg-neutral-200/70 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+          className="titlebar-no-drag ml-auto grid h-7 w-7 place-items-center rounded-md text-neutral-400 hover:bg-neutral-200/70 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
         >
           <Icon name="chevron-left" />
         </button>
