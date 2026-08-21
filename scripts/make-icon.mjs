@@ -1,32 +1,19 @@
 #!/usr/bin/env node
 /**
- * Build the macOS app icon from the Karakeep mark.
+ * Build the macOS app icon.
  *
- * The upstream mark is drawn for the web: it bleeds to the edge of its
- * canvas, and the page and bookmark inside it are *transparent* knockouts
- * rather than white shapes. Both are right for a favicon composited onto a
- * page, and wrong for a Dock icon — full-bleed art sits visibly larger
- * than every native icon beside it, and transparent knockouts would let
- * the user's wallpaper show through the middle of the bookmark, which
- * reads as a rendering bug rather than a design.
+ * The artwork is generated rather than checked in as an opaque binary, so
+ * the geometry below is inspectable and the icon can be rebuilt at any
+ * size. Rendering goes through Electron (already a dependency, and the
+ * only renderer here that handles SVG with real transparency), then sips
+ * and iconutil, both part of macOS. No new dependencies.
  *
- * So this rebuilds it from the vector source at icon proportions:
+ * The design is deliberately generic: a bookmark ribbon on an emerald
+ * tile. The ribbon is the category's universal symbol rather than anyone's
+ * trademark, and emerald is this app's own accent — the same colour as the
+ * New bookmark button and every selected row.
  *
- *   - the artwork is inset to 824px within a 1024px canvas, the
- *     proportion Apple's icon grid uses, so it sits at the same visual
- *     size as its neighbours;
- *   - the knockouts are painted white, matching how the mark actually
- *     *appears* everywhere it is used, rather than how it is stored.
- *
- * The mark's own corner radius is left alone. It is tighter than the
- * macOS squircle, so this reads as the Karakeep icon rather than as a
- * platform-native tile — which is the point of using it.
- *
- * Rendering goes through Electron (already a dependency, and the only
- * renderer here that handles SVG with real transparency), then sips and
- * iconutil, both part of macOS. No new dependencies.
- *
- * Usage: node scripts/make-icon.mjs
+ * Usage: npm run icon
  * Output: build-resources/icon.icns, build-resources/icon.png
  */
 import { spawnSync } from 'node:child_process'
@@ -38,41 +25,97 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const outDir = join(root, 'build-resources')
 const work = join(root, 'build-resources', '.iconwork')
 
-/**
- * The Karakeep mark, as three subpaths in its own 598x166 lockup
- * coordinate space: the rounded square, then the page and the bookmark
- * that are knocked out of it.
- *
- * Copied from the logo Karakeep serves at /icons/karakeep-full.svg (the
- * first path of that file — the rest is the wordmark). Kept as data here
- * so the build does not depend on reaching a running server.
- */
-const MARK = {
-  tile:
-    'M116.76,26.63L32.75,26.63C29.64,26.63 27.12,29.15 27.12,32.26L27.12,115.84C27.12,118.95 29.64,121.47 32.75,121.47L116.76,121.47C119.87,121.47 122.39,118.95 122.39,115.84L122.39,32.26C122.39,29.15 119.87,26.63 116.76,26.63Z',
-  page:
-    'M68.75,107.54C68.75,108.35 68.09,109.01 67.28,109.01L41.38,109.01C40.57,109.01 39.91,108.35 39.91,107.54L39.91,40.25C39.91,39.44 40.57,38.78 41.38,38.78L66.87,38.78C67.68,38.78 68.34,39.44 68.34,40.25L68.34,65.86C68.34,65.86 68.2,76.88 68.75,85.53L68.75,107.54Z',
-  bookmark:
-    'M109.19,107.54C109.19,108.71 107.89,109.41 106.91,108.77L95.1,101.05C94.59,100.72 93.93,100.73 93.43,101.09L83.08,108.58C82.65,108.89 82.14,108.92 81.71,108.75C81.33,108.48 81.08,108.05 81.08,107.55L81.08,55.29C82.48,55.01 84.04,54.87 85.84,54.87C94.69,54.87 109.19,59.86 109.19,73.96L109.19,107.54Z'
-}
-
-// Bounding box of the tile subpath in that source space.
-const SRC = { x: 27.12, y: 26.63, w: 95.27, h: 94.84 }
-
 const CANVAS = 1024
-/** Apple's icon grid: the rounded-rect body fills 824 of a 1024 canvas. */
+/** Apple's icon grid: the tile fills 824 of a 1024 canvas. */
 const BODY = 824
 
+/**
+ * Tailwind emerald-400 -> emerald-700. A wide range on purpose: a tighter
+ * one (500 -> 700) renders as a flat sage green at Dock size, where the
+ * gradient is only ~60px tall and needs the contrast to read as depth
+ * rather than as a slightly dirty fill.
+ */
+const TILE_TOP = '#34d399'
+const TILE_BOTTOM = '#047857'
+
+/**
+ * macOS app tiles are not rounded rectangles. They are superellipses —
+ * the curvature eases into the straight edge instead of meeting it at a
+ * tangent, which is why a plain `rx` rounded rect looks subtly wrong
+ * sitting in the Dock next to real ones.
+ *
+ * |x/a|^n + |y/a|^n = 1 is a close match and, unlike the Bézier
+ * constructions, is exact at any size. The exponent is not a guess: it is
+ * the least-squares fit to the alpha profile of /System/Applications/
+ * Notes.app's own icon, measured at 2/5/10/20% down from the top edge.
+ * Sampled densely enough that the polygon is indistinguishable from a
+ * curve at 1024px.
+ */
+const SQUIRCLE_N = 5.1
+
+function squirclePath(cx, cy, half, n = SQUIRCLE_N, steps = 720) {
+  const pts = []
+  for (let i = 0; i < steps; i++) {
+    const t = (i / steps) * 2 * Math.PI
+    const ct = Math.cos(t)
+    const st = Math.sin(t)
+    // Signed |cos|^(2/n) form — the standard superellipse parameterisation.
+    const x = Math.sign(ct) * Math.abs(ct) ** (2 / n) * half
+    const y = Math.sign(st) * Math.abs(st) ** (2 / n) * half
+    pts.push(`${(cx + x).toFixed(2)},${(cy + y).toFixed(2)}`)
+  }
+  return `M${pts.join('L')}Z`
+}
+
+/**
+ * The bookmark: rounded top corners, square shoulders, a V cut out of the
+ * bottom. Kept wide and short rather than the thin ribbon a UI icon would
+ * use — at 16px in the Finder sidebar a thin one closes up into a smudge.
+ */
+function bookmarkPath({ x, y, w, h, notch, r }) {
+  const x1 = x + w
+  const y1 = y + h
+  const cx = x + w / 2
+  return [
+    `M${x + r},${y}`,
+    `L${x1 - r},${y}`,
+    `Q${x1},${y} ${x1},${y + r}`,
+    `L${x1},${y1}`,
+    `L${cx},${y1 - notch}`,
+    `L${x},${y1}`,
+    `L${x},${y + r}`,
+    `Q${x},${y} ${x + r},${y}`,
+    'Z'
+  ].join(' ')
+}
+
 function buildSvg() {
-  const scale = BODY / SRC.w
-  const tx = (CANVAS - SRC.w * scale) / 2 - SRC.x * scale
-  const ty = (CANVAS - SRC.h * scale) / 2 - SRC.y * scale
+  const half = BODY / 2
+  const centre = CANVAS / 2
+
+  const w = 264
+  const h = 444
+  const bookmark = bookmarkPath({
+    x: centre - w / 2,
+    // Optically centred rather than measured-centred: the V removes mass
+    // from the bottom, so a mathematically centred ribbon reads as
+    // sitting slightly high.
+    y: centre - h / 2 - 18,
+    w,
+    h,
+    notch: 92,
+    r: 22
+  })
+
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CANVAS}" height="${CANVAS}" viewBox="0 0 ${CANVAS} ${CANVAS}">
-  <g transform="translate(${tx.toFixed(3)},${ty.toFixed(3)}) scale(${scale.toFixed(6)})">
-    <path d="${MARK.tile}" fill="#000000"/>
-    <path d="${MARK.page}" fill="#ffffff"/>
-    <path d="${MARK.bookmark}" fill="#ffffff"/>
-  </g>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="${TILE_TOP}"/>
+      <stop offset="1" stop-color="${TILE_BOTTOM}"/>
+    </linearGradient>
+  </defs>
+  <path d="${squirclePath(centre, centre, half)}" fill="url(#tile)"/>
+  <path d="${bookmark}" fill="#ffffff"/>
 </svg>`
 }
 
@@ -111,7 +154,7 @@ app.whenReady().then(async () => {
   const win = new BrowserWindow({
     width: css,
     height: css,
-    // Off the side of the display so the render does not flash a black
+    // Off the side of the display so the render does not flash a coloured
     // square over whatever the user is doing. It still composites, which
     // is what capturePage needs.
     x: -4000,
@@ -171,8 +214,7 @@ sh('sips', ['-z', String(CANVAS), String(CANVAS), master, '--out', master])
 // artwork rather than nine separate renders that could drift.
 const iconset = join(work, 'icon.iconset')
 mkdirSync(iconset, { recursive: true })
-const sizes = [16, 32, 128, 256, 512]
-for (const size of sizes) {
+for (const size of [16, 32, 128, 256, 512]) {
   for (const scale of [1, 2]) {
     const px = size * scale
     const name = scale === 1 ? `icon_${size}x${size}.png` : `icon_${size}x${size}@2x.png`
