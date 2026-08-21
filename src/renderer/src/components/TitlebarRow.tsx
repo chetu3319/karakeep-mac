@@ -1,5 +1,5 @@
 import React from 'react'
-import Icon from './Icon'
+import Icon, { type IconName } from './Icon'
 
 /**
  * The window's title area, and the only home for the pane toggles.
@@ -18,12 +18,18 @@ import Icon from './Icon'
  * toggle twice returns you to where you started without the pointer
  * moving.
  *
- * **Each pane keeps one icon in both directions.** A sidebar that
- * collapsed with `‹` and expanded with a panel glyph was two controls as
- * far as recognition is concerned. The side-panel icon means "the
- * sidebar", and `‹` means "the bookmark list", regardless of which way the
- * click will go — state is carried by the tooltip and by dimming, neither
- * of which shifts anything.
+ * **Each pane keeps one control, but a chevron still points.** The
+ * sidebar's glyph is a picture of the pane, so it names its target and
+ * stays put in both directions — swapping it for a chevron on collapse
+ * made it read as a second, different control.
+ *
+ * The bookmark list's is a chevron, and a chevron that does not point the
+ * way it moves is worse than no chevron at all: it flips to `‹` while the
+ * pane is showing, because the click folds it away to the left, and to `›`
+ * while it is hidden, because the click brings it back from the left. The
+ * *position* is what must not move — the glyph inside it is free to say
+ * which direction the click goes, and dimming still marks which pane is
+ * currently out.
  *
  * Rendered by whichever pane is currently leftmost, because with
  * `titleBarStyle: 'hiddenInset'` macOS draws its traffic lights over that
@@ -61,7 +67,7 @@ export default function TitlebarRow({
         onToggle={onToggleSidebar}
       />
       <PaneToggle
-        icon="chevron-left"
+        icon={listCollapsed ? 'chevron-right' : 'chevron-left'}
         collapsed={listCollapsed}
         label="bookmark list"
         shortcut="⌃⌘L"
@@ -78,7 +84,7 @@ function PaneToggle({
   shortcut,
   onToggle
 }: {
-  icon: 'sidebar' | 'chevron-left'
+  icon: IconName
   collapsed: boolean
   label: string
   shortcut: string
