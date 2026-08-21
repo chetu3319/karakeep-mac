@@ -59,6 +59,9 @@ export const IPC = {
   MENU_TOGGLE_SIDEBAR_EVENT: 'menu:toggle-sidebar',
   MENU_TOGGLE_LIST_EVENT: 'menu:toggle-list',
   MENU_TOGGLE_FOCUS_MODE_EVENT: 'menu:toggle-focus-mode',
+  MENU_NEW_BOOKMARK_EVENT: 'menu:new-bookmark',
+  MENU_FOCUS_SEARCH_EVENT: 'menu:focus-search',
+  MENU_OPEN_SETTINGS_EVENT: 'menu:open-settings',
 
   // Web pane (WebContentsView)
   WEBPANE_NAVIGATE: 'webpane:navigate',

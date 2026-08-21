@@ -1,13 +1,18 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import Onboarding from './components/Onboarding'
 import Sidebar from './components/Sidebar'
 import BookmarkList from './components/BookmarkList'
+import HighlightsList from './components/HighlightsList'
 import DetailPane from './components/DetailPane'
 import AddBookmarkDialog from './components/AddBookmarkDialog'
+import SettingsDialog from './components/SettingsDialog'
+import ConfirmDialog from './components/ConfirmDialog'
+import TitlebarRow from './components/TitlebarRow'
 import { useBookmarksList, useLists, flattenBookmarks } from './lib/queries'
 import { useCreateFileBookmarks } from './lib/fileBookmarks'
+import { readPref, usePref, writePref } from './lib/prefs'
+import { parseSelection, type Selection } from './lib/selection'
 import type { Bookmark, User } from '../../shared/types'
-import type { Selection } from './lib/selection'
 
 /** True when a drag is carrying actual files rather than one of our own custom payloads. */
 function isFileDrag(dt: DataTransfer | null): boolean {
@@ -16,38 +21,23 @@ function isFileDrag(dt: DataTransfer | null): boolean {
 
 type AuthState = { status: 'loading' } | { status: 'onboarding' } | { status: 'ready'; user: User }
 
-// Sidebar/list collapse state is view-only chrome, not user data (unlike
-// e.g. listOrder, which lives in main/store.ts because it's real user
-// data synced via IPC). We read it synchronously from localStorage at
-// first render so the layout is correct on the very first paint — an
-// async IPC round-trip to main would mean the panes render expanded and
-// then visibly snap closed a frame later on every launch.
-const LS_SIDEBAR_COLLAPSED = 'kk:sidebarCollapsed'
-const LS_LIST_COLLAPSED = 'kk:listCollapsed'
-
-function readCollapsedFlag(key: string): boolean {
-  try {
-    return window.localStorage.getItem(key) === '1'
-  } catch {
-    return false
-  }
-}
-
-function writeCollapsedFlag(key: string, value: boolean): void {
-  try {
-    if (value) window.localStorage.setItem(key, '1')
-    else window.localStorage.removeItem(key)
-  } catch {
-    // localStorage can throw in some sandboxed contexts; collapse state
-    // just won't persist across launches, which is harmless.
-  }
-}
+const PANE_LIMITS = { sidebar: { min: 180, max: 380 }, list: { min: 260, max: 560 } }
+const DEFAULT_WIDTHS = { sidebar: 230, list: 360 }
 
 export default function App(): React.JSX.Element {
   const [auth, setAuth] = useState<AuthState>({ status: 'loading' })
-  const [selection, setSelection] = useState<Selection>({ type: 'all' })
+  // Reopen where the user left off. An id that has since been deleted
+  // server-side just yields an empty list pane, which is self-explanatory
+  // and one sidebar click away from fixed — better than always dumping
+  // everyone back at "All bookmarks".
+  const [selection, setSelection] = useState<Selection>(() => parseSelection(readPref('selection', null)))
   const [selectedBookmark, setSelectedBookmark] = useState<Bookmark | null>(null)
+  const [focusHighlightId, setFocusHighlightId] = useState<string | null>(null)
   const [addingBookmark, setAddingBookmark] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [confirmSignOut, setConfirmSignOut] = useState(false)
+
+  useEffect(() => writePref('selection', selection), [selection])
 
   // ── Drop files onto the window to file them ──
   const createFileBookmarks = useCreateFileBookmarks()
@@ -95,8 +85,11 @@ export default function App(): React.JSX.Element {
     if (result.created.length > 0) setSelectedBookmark(result.created[0])
   }
 
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readCollapsedFlag(LS_SIDEBAR_COLLAPSED))
-  const [listCollapsed, setListCollapsed] = useState(() => readCollapsedFlag(LS_LIST_COLLAPSED))
+  const [sidebarCollapsed, setSidebarCollapsed] = usePref('sidebarCollapsed', false)
+  const [listCollapsed, setListCollapsed] = usePref('listCollapsed', false)
+  const [sidebarWidth, setSidebarWidth] = usePref('sidebarWidth', DEFAULT_WIDTHS.sidebar)
+  const [listWidth, setListWidth] = usePref('listWidth', DEFAULT_WIDTHS.list)
+
   // Focus Mode is *derived* from the panes rather than tracked in its own
   // state field. A separate boolean desynced the moment the user collapsed
   // or expanded one pane by hand while in Focus Mode: the flag still said
@@ -107,30 +100,15 @@ export default function App(): React.JSX.Element {
   const priorPanesRef = useRef<{ sidebar: boolean; list: boolean } | null>(null)
   const inFocusMode = sidebarCollapsed && listCollapsed
 
-  useEffect(() => writeCollapsedFlag(LS_SIDEBAR_COLLAPSED, sidebarCollapsed), [sidebarCollapsed])
-  useEffect(() => writeCollapsedFlag(LS_LIST_COLLAPSED, listCollapsed), [listCollapsed])
-
   // Edge case considered: bookmark list collapsed with nothing selected
-  // leaves the DetailPane on its empty state. That is NOT a stranded state —
-  // the titlebar toggles are rendered in every collapse state, so the list
-  // is always one click (or Ctrl+Cmd+L) away.
-  //
-  // An earlier version auto-expanded the list whenever selectedBookmark went
-  // null. That looked like belt-and-braces but broke two things: selection is
-  // null on every launch, so it clobbered the persisted collapsed preference
-  // (and the write-through effect below then deleted the localStorage key
-  // outright), and it made Focus Mode impossible to enter with nothing
-  // selected — the list sprang straight back open. No auto-expand here.
+  // leaves the DetailPane on its empty state. That is NOT a stranded
+  // state — both pane toggles are on screen at a fixed position in every
+  // combination (see TitlebarRow), plus ⌃⌘S / ⌃⌘L / ⌃⌘F.
 
-  function toggleSidebar(): void {
-    setSidebarCollapsed((c) => !c)
-  }
+  const toggleSidebar = useCallback(() => setSidebarCollapsed((c) => !c), [setSidebarCollapsed])
+  const toggleList = useCallback(() => setListCollapsed((c) => !c), [setListCollapsed])
 
-  function toggleList(): void {
-    setListCollapsed((c) => !c)
-  }
-
-  function toggleFocusMode(): void {
+  const toggleFocusMode = useCallback(() => {
     if (!inFocusMode) {
       priorPanesRef.current = { sidebar: sidebarCollapsed, list: listCollapsed }
       setSidebarCollapsed(true)
@@ -146,19 +124,18 @@ export default function App(): React.JSX.Element {
     setSidebarCollapsed(restore.sidebar)
     setListCollapsed(restore.list)
     priorPanesRef.current = null
-  }
+  }, [inFocusMode, sidebarCollapsed, listCollapsed, setSidebarCollapsed, setListCollapsed])
 
   useEffect(() => {
-    const offSidebar = window.kk.window.onToggleSidebar(toggleSidebar)
-    const offList = window.kk.window.onToggleList(toggleList)
-    const offFocus = window.kk.window.onToggleFocusMode(toggleFocusMode)
-    return () => {
-      offSidebar()
-      offList()
-      offFocus()
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sidebarCollapsed, listCollapsed])
+    const offs = [
+      window.kk.window.onToggleSidebar(toggleSidebar),
+      window.kk.window.onToggleList(toggleList),
+      window.kk.window.onToggleFocusMode(toggleFocusMode),
+      window.kk.window.onNewBookmark(() => setAddingBookmark(true)),
+      window.kk.window.onOpenSettings(() => setSettingsOpen(true))
+    ]
+    return () => offs.forEach((off) => off())
+  }, [toggleSidebar, toggleList, toggleFocusMode])
 
   useEffect(() => {
     let cancelled = false
@@ -176,6 +153,23 @@ export default function App(): React.JSX.Element {
       cancelled = true
     }
   }, [])
+
+  async function signOut(): Promise<void> {
+    setConfirmSignOut(false)
+    setSettingsOpen(false)
+    await window.kk.config.signOut()
+    setAuth({ status: 'onboarding' })
+  }
+
+  function changeSelection(next: Selection): void {
+    // A sidebar list/tag switch must clear the current bookmark —
+    // otherwise the detail pane (and, worse, the live WebContentsView it
+    // drives) keeps showing a bookmark that's no longer even in the
+    // filtered list.
+    setSelection(next)
+    setSelectedBookmark(null)
+    setFocusHighlightId(null)
+  }
 
   return (
     <div
@@ -203,17 +197,24 @@ export default function App(): React.JSX.Element {
         void handleFileDrop(Array.from(e.dataTransfer.files))
       }}
     >
-      <Titlebar
-        auth={auth}
-        onSignOut={() => setAuth({ status: 'onboarding' })}
-        onAddBookmark={() => setAddingBookmark(true)}
-        sidebarCollapsed={sidebarCollapsed}
-        listCollapsed={listCollapsed}
-        onToggleSidebar={toggleSidebar}
-        onToggleList={toggleList}
-        onToggleFocusMode={toggleFocusMode}
-      />
       {addingBookmark && <AddBookmarkDialog onClose={() => setAddingBookmark(false)} />}
+      {settingsOpen && auth.status === 'ready' && (
+        <SettingsDialog
+          user={auth.user}
+          onClose={() => setSettingsOpen(false)}
+          onSignOut={() => setConfirmSignOut(true)}
+          onReauthenticated={(user) => setAuth({ status: 'ready', user })}
+        />
+      )}
+      {confirmSignOut && (
+        <ConfirmDialog
+          title="Sign out of Karakeep?"
+          description="Your API key is removed from this Mac's Keychain and you'll need to paste it again to sign back in. Your bookmarks, lists and sidebar arrangement stay exactly as they are."
+          confirmLabel="Sign out"
+          onConfirm={() => void signOut()}
+          onCancel={() => setConfirmSignOut(false)}
+        />
+      )}
 
       {fileDragActive && (
         <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-emerald-600/10 backdrop-blur-[1px]">
@@ -231,7 +232,7 @@ export default function App(): React.JSX.Element {
 
       {(importStatus || importError) && (
         <div
-          className={`flex items-start justify-between gap-2 border-b px-3 py-2 text-xs ${
+          className={`z-30 flex items-start justify-between gap-2 border-b px-3 py-2 text-xs ${
             importError
               ? 'border-red-100 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400'
               : 'border-emerald-100 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400'
@@ -245,34 +246,49 @@ export default function App(): React.JSX.Element {
           )}
         </div>
       )}
+
       <div className="min-h-0 flex-1">
         {auth.status === 'loading' && (
-          <div className="flex h-full items-center justify-center text-sm text-neutral-400">Loading…</div>
+          <div className="titlebar-drag flex h-full items-center justify-center text-sm text-neutral-400">
+            Loading…
+          </div>
         )}
         {auth.status === 'onboarding' && (
           <Onboarding onSignedIn={(user) => setAuth({ status: 'ready', user })} />
         )}
         {auth.status === 'ready' && (
           <Library
+            user={auth.user}
             selection={selection}
-            onSelectionChange={(s) => {
-              // A sidebar list/tag switch must clear the current selection —
-              // otherwise the detail pane (and, worse, the live
-              // WebContentsView it drives) keeps showing a bookmark that's
-              // no longer even in the filtered list.
-              setSelection(s)
-              setSelectedBookmark(null)
-            }}
+            onSelectionChange={changeSelection}
             selectedBookmark={selectedBookmark}
-            onSelectBookmark={setSelectedBookmark}
+            onSelectBookmark={(b) => {
+              setSelectedBookmark(b)
+              setFocusHighlightId(null)
+            }}
+            focusHighlightId={focusHighlightId}
+            onOpenHighlight={(b, highlightId) => {
+              setSelectedBookmark(b)
+              setFocusHighlightId(highlightId)
+            }}
+            onFocusHighlightHandled={() => setFocusHighlightId(null)}
             onBookmarkDeleted={(id) =>
               // Only the pane showing the deleted bookmark clears; deleting
               // some other row from its context menu must not blank out
               // whatever the user was reading.
               setSelectedBookmark((current) => (current && current.id === id ? null : current))
             }
+            onAddBookmark={() => setAddingBookmark(true)}
+            onOpenSettings={() => setSettingsOpen(true)}
+            onSignOut={() => setConfirmSignOut(true)}
             sidebarCollapsed={sidebarCollapsed}
             listCollapsed={listCollapsed}
+            onToggleSidebar={toggleSidebar}
+            onToggleList={toggleList}
+            sidebarWidth={sidebarWidth}
+            listWidth={listWidth}
+            onSidebarWidth={setSidebarWidth}
+            onListWidth={setListWidth}
           />
         )}
       </div>
@@ -280,109 +296,122 @@ export default function App(): React.JSX.Element {
   )
 }
 
-function Titlebar({
-  auth,
-  onSignOut,
-  onAddBookmark,
-  sidebarCollapsed,
-  listCollapsed,
-  onToggleSidebar,
-  onToggleList,
-  onToggleFocusMode
+/**
+ * Draggable divider between two panes.
+ *
+ * Pointer capture rather than window-level mousemove listeners: capture
+ * keeps receiving events when the pointer leaves the 5px handle (which it
+ * does immediately on any real drag) and it releases cleanly if the drag
+ * ends outside the window.
+ *
+ * The width is committed on every move rather than at the end. That does
+ * mean the native WebContentsView in the Web tab is repositioned
+ * continuously while dragging — but it is repositioned *in lockstep* with
+ * its container, which is the property that matters. Committing only on
+ * release would leave the pane's frame and its native content visibly
+ * disagreeing for the whole drag.
+ */
+function Resizer({
+  ariaLabel,
+  width,
+  min,
+  max,
+  defaultWidth,
+  onWidth
 }: {
-  auth: AuthState
-  onSignOut: () => void
-  onAddBookmark: () => void
-  sidebarCollapsed: boolean
-  listCollapsed: boolean
-  onToggleSidebar: () => void
-  onToggleList: () => void
-  onToggleFocusMode: () => void
+  ariaLabel: string
+  width: number
+  min: number
+  max: number
+  /** Double-clicking the divider returns the pane to this width. */
+  defaultWidth: number
+  onWidth: (next: number) => void
 }): React.JSX.Element {
-  async function signOut(): Promise<void> {
-    await window.kk.config.signOut()
-    onSignOut()
-  }
+  const startRef = useRef<{ x: number; width: number } | null>(null)
 
   return (
-    <div className="titlebar-drag flex h-11 flex-shrink-0 items-center justify-between border-b border-neutral-200 bg-neutral-50/80 pl-20 pr-3 backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/80">
-      <span className="text-sm font-medium text-neutral-600 dark:text-neutral-300">Karakeep</span>
-      {auth.status === 'ready' && (
-        <div className="titlebar-no-drag flex items-center gap-2">
-          {/* Always visible in every collapse state — this is the "way
-              back" when both panes are collapsed (e.g. Focus Mode). */}
-          <button
-            onClick={onToggleSidebar}
-            title={sidebarCollapsed ? 'Show Sidebar' : 'Hide Sidebar'}
-            aria-pressed={sidebarCollapsed}
-            className={`rounded px-1.5 py-1 text-xs ${
-              sidebarCollapsed
-                ? 'bg-neutral-200/70 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200'
-                : 'text-neutral-400 hover:bg-neutral-200/60 hover:text-neutral-600 dark:hover:bg-neutral-800 dark:hover:text-neutral-300'
-            }`}
-          >
-            ▥
-          </button>
-          <button
-            onClick={onToggleList}
-            title={listCollapsed ? 'Show Bookmark List' : 'Hide Bookmark List'}
-            aria-pressed={listCollapsed}
-            className={`rounded px-1.5 py-1 text-xs ${
-              listCollapsed
-                ? 'bg-neutral-200/70 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200'
-                : 'text-neutral-400 hover:bg-neutral-200/60 hover:text-neutral-600 dark:hover:bg-neutral-800 dark:hover:text-neutral-300'
-            }`}
-          >
-            ☰
-          </button>
-          <button
-            onClick={onToggleFocusMode}
-            title="Focus Mode"
-            aria-pressed={sidebarCollapsed && listCollapsed}
-            className={`rounded px-1.5 py-1 text-xs ${
-              sidebarCollapsed && listCollapsed
-                ? 'bg-neutral-200/70 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200'
-                : 'text-neutral-400 hover:bg-neutral-200/60 hover:text-neutral-600 dark:hover:bg-neutral-800 dark:hover:text-neutral-300'
-            }`}
-          >
-            ⛶
-          </button>
-          <span className="mx-1 h-4 w-px bg-neutral-300 dark:bg-neutral-700" aria-hidden />
-          <button
-            onClick={onAddBookmark}
-            className="flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-700"
-          >
-            + Add bookmark
-          </button>
-          <span className="text-xs text-neutral-500">{auth.user.email || auth.user.name}</span>
-          <button
-            onClick={signOut}
-            className="rounded px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-200/60 dark:hover:bg-neutral-800"
-          >
-            Sign out
-          </button>
-        </div>
-      )}
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={ariaLabel}
+      aria-valuenow={width}
+      aria-valuemin={min}
+      aria-valuemax={max}
+      tabIndex={0}
+      onPointerDown={(e) => {
+        startRef.current = { x: e.clientX, width }
+        e.currentTarget.setPointerCapture(e.pointerId)
+      }}
+      onPointerMove={(e) => {
+        const start = startRef.current
+        if (!start) return
+        onWidth(Math.min(max, Math.max(min, start.width + (e.clientX - start.x))))
+      }}
+      onPointerUp={(e) => {
+        startRef.current = null
+        e.currentTarget.releasePointerCapture(e.pointerId)
+      }}
+      onDoubleClick={() => onWidth(defaultWidth)}
+      onKeyDown={(e) => {
+        // A divider you can only move with a mouse is a divider some
+        // people simply cannot move.
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault()
+          onWidth(Math.max(min, width - (e.shiftKey ? 40 : 8)))
+        } else if (e.key === 'ArrowRight') {
+          e.preventDefault()
+          onWidth(Math.min(max, width + (e.shiftKey ? 40 : 8)))
+        }
+      }}
+      className="group relative z-10 -mr-[3px] w-[6px] flex-shrink-0 cursor-col-resize touch-none focus-visible:outline-none"
+    >
+      <span className="absolute inset-y-0 left-[2px] w-[2px] bg-transparent transition-colors group-hover:bg-emerald-500/60 group-focus-visible:bg-emerald-500" />
     </div>
   )
 }
 
 function Library({
+  user,
   selection,
   onSelectionChange,
   selectedBookmark,
   onSelectBookmark,
+  focusHighlightId,
+  onOpenHighlight,
+  onFocusHighlightHandled,
   onBookmarkDeleted,
+  onAddBookmark,
+  onOpenSettings,
+  onSignOut,
   sidebarCollapsed,
-  listCollapsed
+  listCollapsed,
+  onToggleSidebar,
+  onToggleList,
+  sidebarWidth,
+  listWidth,
+  onSidebarWidth,
+  onListWidth
 }: {
+  user: User
   selection: Selection
   onSelectionChange: (s: Selection) => void
   selectedBookmark: Bookmark | null
   onSelectBookmark: (b: Bookmark) => void
+  focusHighlightId: string | null
+  onOpenHighlight: (b: Bookmark, highlightId: string) => void
+  onFocusHighlightHandled: () => void
   onBookmarkDeleted: (id: string) => void
+  onAddBookmark: () => void
+  onOpenSettings: () => void
+  onSignOut: () => void
   sidebarCollapsed: boolean
   listCollapsed: boolean
+  onToggleSidebar: () => void
+  onToggleList: () => void
+  sidebarWidth: number
+  listWidth: number
+  onSidebarWidth: (n: number) => void
+  onListWidth: (n: number) => void
 }): React.JSX.Element {
   // Smoke-run scaffolding only: the real list lives in BookmarkList, which
   // runs its own filtered query. Gating this on the smoke flag keeps normal
@@ -438,36 +467,97 @@ function Library({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Grid template is driven from state via inline style (Tailwind's static
-  // classes can't express a runtime-computed column list). Collapsed columns
-  // go to 0px with no transition — the DetailPane's Web tab is a native
-  // WebContentsView positioned by main from the container div's rect
-  // (see WebPane.tsx), and a CSS width/transform transition here would make
-  // that native content visibly tear away from its frame while animating.
-  // Snapping instantly keeps the frame in lockstep at every point in time.
-  const gridTemplateColumns = `${sidebarCollapsed ? '0px' : '220px'} ${listCollapsed ? '0px' : '360px'} minmax(0,1fr)`
+  // The title area belongs to whichever column is leftmost; with the
+  // sidebar showing, that is the sidebar and it renders this itself. Same
+  // component, same inset, so the toggles land on the same pixels either
+  // way and hiding a pane never moves the control that brings it back.
+  const titlebar = (
+    <TitlebarRow
+      sidebarCollapsed={sidebarCollapsed}
+      listCollapsed={listCollapsed}
+      onToggleSidebar={onToggleSidebar}
+      onToggleList={onToggleList}
+    />
+  )
 
   return (
-    <div className="grid h-full grid-rows-[minmax(0,1fr)]" style={{ gridTemplateColumns }}>
+    <div className="flex h-full">
       {/* Collapsed panes are unmounted entirely (not just hidden) so a
           zero-width Sidebar/BookmarkList can't still capture tab focus or
           act as a drop target, and so re-expanding always mounts a fresh
           component instance with no stale drag state or detached
           listeners left over from before the collapse. */}
-      <div className="min-w-0 overflow-hidden">
-        {!sidebarCollapsed && <Sidebar selected={selection} onSelect={onSelectionChange} />}
-      </div>
-      <div className="min-w-0 overflow-hidden">
-        {!listCollapsed && (
-          <BookmarkList
-            selection={selection}
-            selectedId={selectedBookmark?.id ?? null}
-            onSelectBookmark={onSelectBookmark}
-            onBookmarkDeleted={onBookmarkDeleted}
+      {!sidebarCollapsed && (
+        <>
+          <div className="min-w-0 flex-shrink-0" style={{ width: sidebarWidth }}>
+            <Sidebar
+              selected={selection}
+              onSelect={onSelectionChange}
+              user={user}
+              onAddBookmark={onAddBookmark}
+              onOpenSettings={onOpenSettings}
+              onSignOut={onSignOut}
+              listCollapsed={listCollapsed}
+              onToggleSidebar={onToggleSidebar}
+              onToggleList={onToggleList}
+            />
+          </div>
+          <Resizer
+            ariaLabel="Resize sidebar"
+            width={sidebarWidth}
+            min={PANE_LIMITS.sidebar.min}
+            max={PANE_LIMITS.sidebar.max}
+            defaultWidth={DEFAULT_WIDTHS.sidebar}
+            onWidth={onSidebarWidth}
           />
-        )}
+        </>
+      )}
+
+      {!listCollapsed && (
+        <>
+          <div className="flex min-w-0 flex-shrink-0 flex-col" style={{ width: listWidth }}>
+            {sidebarCollapsed && titlebar}
+            <div className="min-h-0 flex-1">
+              {selection.type === 'highlights' ? (
+                <HighlightsList
+                  colors={selection.colors}
+                  selectedId={focusHighlightId}
+                  onOpenHighlight={onOpenHighlight}
+                />
+              ) : (
+                <BookmarkList
+                  selection={selection}
+                  selectedId={selectedBookmark?.id ?? null}
+                  onSelectBookmark={onSelectBookmark}
+                  onBookmarkDeleted={onBookmarkDeleted}
+                />
+              )}
+            </div>
+          </div>
+          <Resizer
+            ariaLabel="Resize bookmark list"
+            width={listWidth}
+            min={PANE_LIMITS.list.min}
+            max={PANE_LIMITS.list.max}
+            defaultWidth={DEFAULT_WIDTHS.list}
+            onWidth={onListWidth}
+          />
+        </>
+      )}
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        {sidebarCollapsed && listCollapsed && titlebar}
+        <div className="min-h-0 flex-1">
+          <DetailPane
+            bookmark={selectedBookmark}
+            onDeleted={onBookmarkDeleted}
+            focusHighlightId={focusHighlightId}
+            onFocusHighlightHandled={onFocusHighlightHandled}
+            listCollapsed={listCollapsed}
+            onExpandList={onToggleList}
+          />
+        </div>
       </div>
-      <DetailPane bookmark={selectedBookmark} onDeleted={onBookmarkDeleted} />
     </div>
   )
 }

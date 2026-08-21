@@ -1,6 +1,6 @@
-import { app, BrowserWindow, ipcMain, shell, Menu } from 'electron'
+import { app, BrowserWindow, ipcMain, screen, shell, Menu } from 'electron'
 import { join } from 'node:path'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { KarakeepApiClient } from './api'
 import * as store from './store'
 import { loadDotEnvLocal } from './env'
@@ -23,6 +23,24 @@ import type {
 const isDev = !app.isPackaged
 const projectRoot = join(__dirname, '../..')
 
+/**
+ * In a packaged build the icon comes from the app bundle, but `npm run
+ * dev` runs inside the stock Electron binary and inherits its default
+ * icon — so the Dock shows a generic Electron logo the whole time anyone
+ * is working on the app. Point it at the same artwork the build ships.
+ */
+function setDevDockIcon(): void {
+  if (!isDev || process.platform !== 'darwin' || !app.dock) return
+  const icon = join(projectRoot, 'build-resources', 'icon.png')
+  if (!existsSync(icon)) return
+  try {
+    app.dock.setIcon(icon)
+  } catch {
+    // Cosmetic only — a dev run without its Dock icon is not worth
+    // failing startup over.
+  }
+}
+
 let apiClient: KarakeepApiClient | null = null
 let mainWindow: BrowserWindow | null = null
 let webPane: WebPaneManager | null = null
@@ -43,14 +61,45 @@ function requirePane(): WebPaneManager {
   return webPane
 }
 
+/**
+ * Clamp a remembered window position back onto a display that still
+ * exists. Restoring raw stored coordinates strands the window off-screen
+ * for anyone who undocks an external monitor between launches — with a
+ * hidden titlebar there is then no visible chrome to drag it back with.
+ */
+function visibleBounds(state: store.WindowState): { width: number; height: number; x?: number; y?: number } {
+  const width = Math.max(960, Math.round(state.width))
+  const height = Math.max(600, Math.round(state.height))
+  if (state.x === undefined || state.y === undefined) return { width, height }
+
+  const displays = screen.getAllDisplays()
+  const onScreen = displays.some((d) => {
+    const a = d.workArea
+    // At least a 100x40 grab handle's worth of the titlebar has to land
+    // inside a work area for the window to be reachable.
+    return (
+      state.x! + width > a.x + 100 &&
+      state.x! < a.x + a.width - 100 &&
+      state.y! + 40 > a.y &&
+      state.y! < a.y + a.height - 40
+    )
+  })
+  return onScreen ? { width, height, x: Math.round(state.x), y: Math.round(state.y) } : { width, height }
+}
+
 function createWindow(): BrowserWindow {
+  const saved = store.getWindowState()
+  const bounds = saved ? visibleBounds(saved) : { width: 1280, height: 820 }
+
   const win = new BrowserWindow({
-    width: 1280,
-    height: 820,
+    ...bounds,
     minWidth: 960,
     minHeight: 600,
     titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 16, y: 16 },
+    // The sidebar now runs the full height of the window and owns the
+    // traffic-light inset itself (see Sidebar.tsx), so this y only has to
+    // agree with the spacer the sidebar reserves.
+    trafficLightPosition: { x: 16, y: 18 },
     backgroundColor: '#00000000',
     show: false,
     webPreferences: {
@@ -61,7 +110,33 @@ function createWindow(): BrowserWindow {
     }
   })
 
+  if (saved?.maximized) win.maximize()
+
   win.on('ready-to-show', () => win.show())
+
+  // Debounced: 'resize' and 'move' fire per frame while dragging, and a
+  // synchronous JSON write per frame would make dragging the window
+  // stutter.
+  let persistTimer: NodeJS.Timeout | null = null
+  const persist = (): void => {
+    if (persistTimer) clearTimeout(persistTimer)
+    persistTimer = setTimeout(() => {
+      if (win.isDestroyed()) return
+      const maximized = win.isMaximized()
+      // getNormalBounds() rather than getBounds(): while maximized the
+      // latter reports the screen, so saving it would make "restore down"
+      // a no-op forever after.
+      const b = win.getNormalBounds()
+      store.setWindowState({ width: b.width, height: b.height, x: b.x, y: b.y, maximized })
+    }, 400)
+  }
+  win.on('resize', persist)
+  win.on('move', persist)
+  win.on('maximize', persist)
+  win.on('unmaximize', persist)
+  win.on('close', () => {
+    if (persistTimer) clearTimeout(persistTimer)
+  })
 
   if (isDev && process.env['ELECTRON_RENDERER_URL']) {
     win.loadURL(process.env['ELECTRON_RENDERER_URL'])
@@ -582,6 +657,8 @@ app.whenReady().then(() => {
     KARAKEEP_API_KEY: env['KARAKEEP_API_KEY'] || process.env['KARAKEEP_API_KEY']
   })
   apiClient = makeClientFromStore()
+
+  setDevDockIcon()
 
   Menu.setApplicationMenu(
     buildAppMenu(() => BrowserWindow.getFocusedWindow() || mainWindow)

@@ -2,6 +2,7 @@ import React, { useMemo, useRef, useState } from 'react'
 import { useCreateBookmark, useAddBookmarkToList, useAttachTags, useLists } from '../lib/queries'
 import { useCreateFileBookmarks } from '../lib/fileBookmarks'
 import { buildByParent, orderedChildren } from '../lib/listTree'
+import Modal from './Modal'
 import type { KKList } from '../../../shared/types'
 
 // What the file picker offers. Karakeep stores images and PDFs as assets;
@@ -112,13 +113,11 @@ export default function AddBookmarkDialog({ onClose }: { onClose: () => void }):
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onMouseDown={onClose}>
-      <form
-        onMouseDown={(e) => e.stopPropagation()}
-        onSubmit={submit}
-        className="w-[440px] rounded-2xl border border-neutral-200 bg-white p-6 shadow-xl dark:border-neutral-800 dark:bg-neutral-900"
-      >
-        <h2 className="mb-4 text-lg font-semibold text-neutral-900 dark:text-neutral-100">Add bookmark</h2>
+    <Modal onClose={onClose} labelledBy="add-bookmark-title" className="w-[440px]">
+      <form onSubmit={submit} className="p-6">
+        <h2 id="add-bookmark-title" className="mb-4 text-lg font-semibold text-neutral-900 dark:text-neutral-100">
+          Add bookmark
+        </h2>
 
         <div className="mb-4 flex gap-1 rounded-lg bg-neutral-100 p-1 dark:bg-neutral-800">
           {(['link', 'text', 'file'] as Mode[]).map((m) => (
@@ -276,6 +275,6 @@ export default function AddBookmarkDialog({ onClose }: { onClose: () => void }):
           </button>
         </div>
       </form>
-    </div>
+    </Modal>
   )
 }

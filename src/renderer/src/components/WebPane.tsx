@@ -1,11 +1,26 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useRef } from 'react'
 import type { Highlight, WebPaneState } from '../../../shared/types'
 
+/**
+ * The live page, and nothing else.
+ *
+ * This used to carry its own toolbar: back / forward / reload, a read-only
+ * address field, and an "Open in Safari" button. That put a third bar of
+ * chrome under the window titlebar and the tab row, and the address field
+ * — the widest thing in it — was pure display, not a control. Those
+ * actions now live in the detail pane's utility bar next to favourite and
+ * archive, where every other per-bookmark action already is, so the live
+ * page gets the whole pane.
+ *
+ * Navigation *state* is owned by DetailPane and passed in, so one
+ * subscription feeds both the buttons and this component's own effects.
+ */
 export default function WebPane({
   active,
   url,
   bookmarkId,
   highlights,
+  state,
   focusHighlightId,
   onFocusHandled
 }: {
@@ -13,19 +28,12 @@ export default function WebPane({
   url: string
   bookmarkId: string
   highlights: Highlight[]
-  /** Highlight to scroll to once the page is loaded (set by the Preview list). */
+  state: WebPaneState
+  /** Highlight to scroll to once the page is loaded (set by the highlight rail). */
   focusHighlightId?: string | null
   onFocusHandled?: () => void
 }): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
-  const [state, setState] = useState<WebPaneState>({
-    url,
-    title: '',
-    isLoading: true,
-    canGoBack: false,
-    canGoForward: false,
-    error: null
-  })
 
   // Navigate whenever the active bookmark/url changes.
   useEffect(() => {
@@ -51,8 +59,8 @@ export default function WebPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, bookmarkId, signature])
 
-  // Scroll to a highlight the user clicked in the Preview list, once the
-  // page has actually finished loading (marks don't exist before that).
+  // Scroll to a highlight the user clicked in the rail, once the page has
+  // actually finished loading (marks don't exist before that).
   useEffect(() => {
     if (!active || !focusHighlightId || state.isLoading) return
     const t = setTimeout(() => {
@@ -104,48 +112,8 @@ export default function WebPane({
     }
   }, [active])
 
-  useEffect(() => {
-    const off = window.kk.webpane.onState((s) => setState(s))
-    return off
-  }, [])
-
   return (
     <div className="relative flex h-full flex-col">
-      <div className="flex items-center gap-1 border-b border-neutral-200 px-2 py-1.5 dark:border-neutral-800">
-        <button
-          onClick={() => window.kk.webpane.back()}
-          disabled={!state.canGoBack}
-          className="rounded p-1.5 text-neutral-500 hover:bg-neutral-100 disabled:opacity-30 dark:hover:bg-neutral-800"
-          title="Back"
-        >
-          ←
-        </button>
-        <button
-          onClick={() => window.kk.webpane.forward()}
-          disabled={!state.canGoForward}
-          className="rounded p-1.5 text-neutral-500 hover:bg-neutral-100 disabled:opacity-30 dark:hover:bg-neutral-800"
-          title="Forward"
-        >
-          →
-        </button>
-        <button
-          onClick={() => (state.isLoading ? window.kk.webpane.stop() : window.kk.webpane.reload())}
-          className="rounded p-1.5 text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
-          title={state.isLoading ? 'Stop' : 'Reload'}
-        >
-          {state.isLoading ? '✕' : '⟳'}
-        </button>
-        <div className="ml-2 flex-1 truncate rounded-md bg-neutral-100 px-2 py-1 text-xs text-neutral-600 dark:bg-neutral-900 dark:text-neutral-400">
-          {state.url || url}
-        </div>
-        <button
-          onClick={() => window.kk.webpane.openExternal(state.url || url)}
-          className="rounded px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
-          title="Open in Safari"
-        >
-          Open in Safari ↗
-        </button>
-      </div>
       {state.error && (
         <div className="border-b border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400">
           Failed to load: {state.error}
