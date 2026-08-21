@@ -7,7 +7,7 @@ import DetailPane from './components/DetailPane'
 import AddBookmarkDialog from './components/AddBookmarkDialog'
 import SettingsDialog from './components/SettingsDialog'
 import ConfirmDialog from './components/ConfirmDialog'
-import Icon from './components/Icon'
+import TitlebarRow from './components/TitlebarRow'
 import { useBookmarksList, useLists, flattenBookmarks } from './lib/queries'
 import { useCreateFileBookmarks } from './lib/fileBookmarks'
 import { readPref, usePref, writePref } from './lib/prefs'
@@ -20,17 +20,6 @@ function isFileDrag(dt: DataTransfer | null): boolean {
 }
 
 type AuthState = { status: 'loading' } | { status: 'onboarding' } | { status: 'ready'; user: User }
-
-/**
- * Height reserved for the macOS traffic lights.
- *
- * With `titleBarStyle: 'hiddenInset'` the buttons float over the renderer
- * at `trafficLightPosition` (main/index.ts), so whichever pane is
- * currently leftmost has to leave room for them — see TitlebarSlot.
- */
-const TITLEBAR_H = 52
-/** Left inset that clears the three buttons plus a margin. */
-const TRAFFIC_LIGHT_INSET = 86
 
 const PANE_LIMITS = { sidebar: { min: 180, max: 380 }, list: { min: 260, max: 560 } }
 const DEFAULT_WIDTHS = { sidebar: 230, list: 360 }
@@ -113,8 +102,8 @@ export default function App(): React.JSX.Element {
 
   // Edge case considered: bookmark list collapsed with nothing selected
   // leaves the DetailPane on its empty state. That is NOT a stranded
-  // state — every collapsed pane has exactly one expand control on screen
-  // in every combination (see TitlebarSlot), plus ⌃⌘S / ⌃⌘L / ⌃⌘F.
+  // state — both pane toggles are on screen at a fixed position in every
+  // combination (see TitlebarRow), plus ⌃⌘S / ⌃⌘L / ⌃⌘F.
 
   const toggleSidebar = useCallback(() => setSidebarCollapsed((c) => !c), [setSidebarCollapsed])
   const toggleList = useCallback(() => setListCollapsed((c) => !c), [setListCollapsed])
@@ -308,77 +297,6 @@ export default function App(): React.JSX.Element {
 }
 
 /**
- * The window's title area, rendered by whichever pane is currently
- * leftmost.
- *
- * There is one rule about pane controls in this app, and everything here
- * follows from it:
- *
- *   **Collapse lives on the pane it collapses. Expand lives in the
- *   window's title row.**
- *
- * Collapsing is something you do *to* a pane you are looking at, so its
- * chevron belongs on that pane (Sidebar's header, BookmarkList's header).
- * Expanding is something you do when the pane is not there to be clicked,
- * so those controls collect in the one place that is always present and
- * always in the same corner.
- *
- * Without that rule the controls were placed case by case, and the cases
- * overlapped: with both panes collapsed, "show bookmark list" rendered
- * twice — once in the old full-width strip and once in the detail pane's
- * toolbar directly beneath it, two identical chevrons about fifty pixels
- * apart.
- *
- * The slot only exists when the sidebar is hidden, because when the
- * sidebar is showing it *is* the leftmost pane and its own header plays
- * this role. It is scoped to the leftmost column rather than spanning the
- * window: a full-width bar with one small button at x=86 was reproducing
- * the expanse of empty header this whole redesign set out to remove.
- *
- * Because both variants sit at the window's top-left with the same inset,
- * the "show sidebar" button does not move when the bookmark list is
- * expanded out from under it — the slot changes which column renders it,
- * but not where it lands on screen.
- */
-function TitlebarSlot({
-  listCollapsed,
-  onExpandSidebar,
-  onExpandList
-}: {
-  listCollapsed: boolean
-  onExpandSidebar: () => void
-  onExpandList: () => void
-}): React.JSX.Element {
-  return (
-    <div
-      className="titlebar-drag flex flex-shrink-0 items-center gap-1 border-b border-neutral-200 bg-neutral-50/60 pr-2 dark:border-neutral-800 dark:bg-neutral-900/40"
-      style={{ height: TITLEBAR_H, paddingLeft: TRAFFIC_LIGHT_INSET }}
-    >
-      <button
-        onClick={onExpandSidebar}
-        title="Show sidebar (⌃⌘S)"
-        aria-label="Show sidebar"
-        className="titlebar-no-drag grid h-7 w-7 place-items-center rounded-md text-neutral-400 hover:bg-neutral-200/70 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
-      >
-        <Icon name="sidebar" />
-      </button>
-      {/* Only reachable with the sidebar hidden too — with the sidebar
-          showing, its header carries this control instead. */}
-      {listCollapsed && (
-        <button
-          onClick={onExpandList}
-          title="Show bookmark list (⌃⌘L)"
-          aria-label="Show bookmark list"
-          className="titlebar-no-drag grid h-7 w-7 place-items-center rounded-md text-neutral-400 hover:bg-neutral-200/70 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
-        >
-          <Icon name="chevron-right" />
-        </button>
-      )}
-    </div>
-  )
-}
-
-/**
  * Draggable divider between two panes.
  *
  * Pointer capture rather than window-level mousemove listeners: capture
@@ -549,13 +467,16 @@ function Library({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // The title area belongs to whichever column is leftmost. With the
-  // sidebar showing, that is the sidebar and its own header handles it.
-  const slot = (
-    <TitlebarSlot
+  // The title area belongs to whichever column is leftmost; with the
+  // sidebar showing, that is the sidebar and it renders this itself. Same
+  // component, same inset, so the toggles land on the same pixels either
+  // way and hiding a pane never moves the control that brings it back.
+  const titlebar = (
+    <TitlebarRow
+      sidebarCollapsed={sidebarCollapsed}
       listCollapsed={listCollapsed}
-      onExpandSidebar={onToggleSidebar}
-      onExpandList={onToggleList}
+      onToggleSidebar={onToggleSidebar}
+      onToggleList={onToggleList}
     />
   )
 
@@ -576,9 +497,9 @@ function Library({
               onAddBookmark={onAddBookmark}
               onOpenSettings={onOpenSettings}
               onSignOut={onSignOut}
-              onCollapse={onToggleSidebar}
               listCollapsed={listCollapsed}
-              onExpandList={onToggleList}
+              onToggleSidebar={onToggleSidebar}
+              onToggleList={onToggleList}
             />
           </div>
           <Resizer
@@ -595,14 +516,13 @@ function Library({
       {!listCollapsed && (
         <>
           <div className="flex min-w-0 flex-shrink-0 flex-col" style={{ width: listWidth }}>
-            {sidebarCollapsed && slot}
+            {sidebarCollapsed && titlebar}
             <div className="min-h-0 flex-1">
               {selection.type === 'highlights' ? (
                 <HighlightsList
                   colors={selection.colors}
                   selectedId={focusHighlightId}
                   onOpenHighlight={onOpenHighlight}
-                  onCollapse={onToggleList}
                 />
               ) : (
                 <BookmarkList
@@ -610,7 +530,6 @@ function Library({
                   selectedId={selectedBookmark?.id ?? null}
                   onSelectBookmark={onSelectBookmark}
                   onBookmarkDeleted={onBookmarkDeleted}
-                  onCollapse={onToggleList}
                 />
               )}
             </div>
@@ -627,7 +546,7 @@ function Library({
       )}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        {sidebarCollapsed && listCollapsed && slot}
+        {sidebarCollapsed && listCollapsed && titlebar}
         <div className="min-h-0 flex-1">
           <DetailPane
             bookmark={selectedBookmark}

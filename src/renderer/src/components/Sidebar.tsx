@@ -20,6 +20,7 @@ import { usePref, usePrefSet } from '../lib/prefs'
 import ConfirmDialog from './ConfirmDialog'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu'
 import Icon, { type IconName } from './Icon'
+import TitlebarRow from './TitlebarRow'
 import { BOOKMARK_DRAG_MIME, currentBookmarkDrag, type BookmarkDragPayload } from '../lib/dragTypes'
 import { errMessage } from '../lib/errors'
 
@@ -35,9 +36,9 @@ interface SidebarProps {
   onAddBookmark: () => void
   onOpenSettings: () => void
   onSignOut: () => void
-  onCollapse: () => void
   listCollapsed: boolean
-  onExpandList: () => void
+  onToggleSidebar: () => void
+  onToggleList: () => void
 }
 
 // The three feed-backed views, in the order they appear above the list
@@ -76,9 +77,9 @@ export default function Sidebar({
   onAddBookmark,
   onOpenSettings,
   onSignOut,
-  onCollapse,
   listCollapsed,
-  onExpandList
+  onToggleSidebar,
+  onToggleList
 }: SidebarProps): React.JSX.Element {
   const listsQuery = useLists()
   const tagsQuery = useTags()
@@ -385,43 +386,16 @@ export default function Sidebar({
 
   return (
     <aside className="flex h-full flex-col border-r border-neutral-200 bg-neutral-50/60 dark:border-neutral-800 dark:bg-neutral-900/40">
-      {/*
-        The window's own title area. With `titleBarStyle: 'hiddenInset'`
-        the traffic lights float over the renderer at
-        trafficLightPosition (see main/index.ts), so the sidebar reserves
-        the height and the left inset for them and takes over the drag
-        region. This is what replaced the full-width header bar: on a
-        1280px window that bar spent roughly 900px saying nothing.
-      */}
-      <div className="titlebar-drag flex h-[52px] flex-shrink-0 items-center gap-1 pl-[86px] pr-2">
-        {/*
-          With the sidebar showing, this header *is* the window's title
-          row, so it carries the expand control for the bookmark list when
-          that pane is hidden — see TitlebarSlot in App.tsx for why every
-          expand control collects in one row rather than being placed
-          wherever each pane happens to border.
-        */}
-        {listCollapsed && (
-          <button
-            type="button"
-            onClick={onExpandList}
-            title="Show bookmark list (⌃⌘L)"
-            aria-label="Show bookmark list"
-            className="titlebar-no-drag grid h-7 w-7 place-items-center rounded-md text-neutral-400 hover:bg-neutral-200/70 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
-          >
-            <Icon name="chevron-right" />
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={onCollapse}
-          title="Hide sidebar (⌃⌘S)"
-          aria-label="Hide sidebar"
-          className="titlebar-no-drag ml-auto grid h-7 w-7 place-items-center rounded-md text-neutral-400 hover:bg-neutral-200/70 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
-        >
-          <Icon name="chevron-left" />
-        </button>
-      </div>
+      {/* The sidebar is the leftmost pane whenever it is showing, so it
+          holds the window's title row — and therefore both pane toggles,
+          at the same coordinates App renders them at when the sidebar is
+          hidden. See TitlebarRow. */}
+      <TitlebarRow
+        sidebarCollapsed={false}
+        listCollapsed={listCollapsed}
+        onToggleSidebar={onToggleSidebar}
+        onToggleList={onToggleList}
+      />
 
       <div className="titlebar-no-drag px-2 pb-2">
         <button

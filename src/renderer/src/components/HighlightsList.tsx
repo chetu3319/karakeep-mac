@@ -30,14 +30,12 @@ import type { Bookmark, Highlight } from '../../../shared/types'
 export default function HighlightsList({
   colors,
   selectedId,
-  onOpenHighlight,
-  onCollapse
+  onOpenHighlight
 }: {
   colors: string[]
   selectedId: string | null
   /** Select the source bookmark and scroll its pane to this highlight. */
   onOpenHighlight: (bookmark: Bookmark, highlightId: string) => void
-  onCollapse: () => void
 }): React.JSX.Element {
   const query = useAllHighlights()
 
@@ -105,15 +103,6 @@ export default function HighlightsList({
                 : `${loaded.length} loaded${query.hasNextPage ? '+' : ''}`}
           </div>
         </div>
-        <button
-          type="button"
-          onClick={onCollapse}
-          title="Hide highlights list (⌃⌘L)"
-          aria-label="Hide highlights list"
-          className="grid h-7 w-7 flex-shrink-0 place-items-center rounded-md text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
-        >
-          <Icon name="chevron-left" />
-        </button>
       </div>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto" data-testid="highlights-list">

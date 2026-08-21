@@ -41,14 +41,12 @@ export default function BookmarkList({
   selection,
   selectedId,
   onSelectBookmark,
-  onBookmarkDeleted,
-  onCollapse
+  onBookmarkDeleted
 }: {
   selection: Selection
   selectedId: string | null
   onSelectBookmark: (b: Bookmark) => void
   onBookmarkDeleted: (id: string) => void
-  onCollapse: () => void
 }): React.JSX.Element {
   const [query, setQuery] = useState('')
   const debouncedQuery = useDebounced(query, 350)
@@ -323,17 +321,6 @@ export default function BookmarkList({
             className="grid h-7 w-7 flex-shrink-0 place-items-center rounded-md text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
           >
             <Icon name={density === 'comfortable' ? 'rows' : 'list'} size={15} />
-          </button>
-          {/* Collocated with the pane it hides, rather than in a distant
-              corner of the window chrome. */}
-          <button
-            type="button"
-            onClick={onCollapse}
-            title="Hide bookmark list (⌃⌘L)"
-            aria-label="Hide bookmark list"
-            className="grid h-7 w-7 flex-shrink-0 place-items-center rounded-md text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
-          >
-            <Icon name="chevron-left" />
           </button>
         </div>
 
