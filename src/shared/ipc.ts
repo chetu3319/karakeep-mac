@@ -63,6 +63,15 @@ export const IPC = {
   MENU_FOCUS_SEARCH_EVENT: 'menu:focus-search',
   MENU_OPEN_SETTINGS_EVENT: 'menu:open-settings',
 
+  // AI streaming (Gemini)
+  AI_STREAM_START: 'ai:stream-start',
+  AI_STREAM_ABORT: 'ai:stream-abort',
+  AI_STREAM_CHUNK_EVENT: 'ai:stream-chunk', // main -> renderer push
+  AI_STREAM_DONE_EVENT: 'ai:stream-done',   // main -> renderer push
+  AI_STREAM_ERROR_EVENT: 'ai:stream-error', // main -> renderer push
+  AI_TEST_CONNECTION: 'ai:test-connection',
+  AI_SET_CONFIG: 'ai:set-config',
+
   // Web pane (WebContentsView)
   WEBPANE_NAVIGATE: 'webpane:navigate',
   WEBPANE_SET_BOUNDS: 'webpane:set-bounds',

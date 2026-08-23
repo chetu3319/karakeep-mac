@@ -36,8 +36,10 @@ import {
   highlightPopoverStylesheet,
   placePopover
 } from '../../../shared/highlightUi'
-import type { Highlight } from '../../../shared/types'
+import type { AiMode, Highlight } from '../../../shared/types'
 import { useCreateHighlight, useDeleteHighlight, useUpdateHighlight } from '../lib/queries'
+import SelectionAiHUD from './SelectionAiHUD'
+import PageAiDrawer from './PageAiDrawer'
 import {
   buildPageIndex,
   resolveAnchor,
@@ -90,6 +92,7 @@ interface PlacedHighlight {
 export interface PdfPaneProps {
   assetId: string
   fileName: string
+  title?: string
   bookmarkId: string
   highlights: Highlight[]
   /** Highlight to scroll to, set when one is clicked in the Preview tab. */
@@ -100,7 +103,7 @@ export interface PdfPaneProps {
 }
 
 export default function PdfPane(props: PdfPaneProps): React.JSX.Element {
-  const { assetId, fileName } = props
+  const { assetId, fileName, title } = props
   const [buffer, setBuffer] = useState<ArrayBuffer | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const { engine, isLoading: engineLoading, error: engineError } = usePdfiumEngine({
@@ -189,6 +192,8 @@ function PdfMessage({
  */
 function PdfSurface({
   assetId,
+  fileName,
+  title,
   bookmarkId,
   highlights,
   focusHighlightId,
@@ -350,6 +355,84 @@ function PdfSurface({
   )
 
   const [noteDraftFor, setNoteDraftFor] = useState<string | null>(null)
+
+  // ── AI in-situ and page-level assistant state ───────────────────────────
+  interface AiSelectionState {
+    anchorRect: Rect
+    pageIndex: number
+    selectionText: string
+    surroundingContext: string
+    pageText: string
+    startOffset: number
+    endOffset: number
+    initialMode: AiMode
+  }
+
+  const [aiSelectionState, setAiSelectionState] = useState<AiSelectionState | null>(null)
+  const [aiDrawerOpen, setAiDrawerOpen] = useState(false)
+  const [currentPageText, setCurrentPageText] = useState('')
+
+  const askAiFromSelection = useCallback(
+    async (rect: Rect, pageIndex: number, mode: AiMode = 'micro-dejargon') => {
+      if (!selection || !index || !doc) return
+      const scope = selection.forDocument(documentId)
+      const range = scope.getState().selection
+      if (!range) return
+
+      const a = toGlobal(index, range.start.page, range.start.index)
+      const b = toGlobal(index, range.end.page, range.end.index)
+      const start = Math.min(a, b)
+      const end = Math.max(a, b) + 1
+
+      const text = (await textForSpans(engine, doc, spansForRange(index, start, end))).trim()
+      if (!text) return
+
+      const ctxStart = Math.max(0, start - 200)
+      const ctxEnd = Math.min(index.total, end + 200)
+      const surrounding = (await textForSpans(engine, doc, spansForRange(index, ctxStart, ctxEnd))).trim()
+      const pageContent = await pageText(pageIndex)
+
+      scope.clear()
+      setAiSelectionState({
+        anchorRect: rect,
+        pageIndex,
+        selectionText: text,
+        surroundingContext: surrounding,
+        pageText: pageContent,
+        startOffset: start,
+        endOffset: end,
+        initialMode: mode
+      })
+    },
+    [selection, index, doc, documentId, engine, pageText]
+  )
+
+  const handleSaveAiAsHighlight = async (note: string): Promise<void> => {
+    if (!aiSelectionState) return
+    const created = await createHighlight.mutateAsync({
+      bookmarkId,
+      startOffset: aiSelectionState.startOffset,
+      endOffset: aiSelectionState.endOffset,
+      color: DEFAULT_HIGHLIGHT_COLOR,
+      text: aiSelectionState.selectionText,
+      note
+    })
+    setAiSelectionState(null)
+    setActiveId(created.id)
+  }
+
+  const aiHudAnchor = useCallback((): DOMRect | null => {
+    if (!aiSelectionState) return null
+    const pageEl = document.querySelector(`[data-pdf-page="${aiSelectionState.pageIndex}"]`)
+    if (!pageEl) return null
+    const box = pageEl.getBoundingClientRect()
+    return new DOMRect(
+      box.left + aiSelectionState.anchorRect.origin.x,
+      box.top + aiSelectionState.anchorRect.origin.y,
+      aiSelectionState.anchorRect.size.width,
+      aiSelectionState.anchorRect.size.height
+    )
+  }, [aiSelectionState])
 
   // Dev smoke only: announce readiness, and on request drive the exact path a
   // user drives — select text in the page, then create a highlight from it.
@@ -624,6 +707,7 @@ function PdfSurface({
           await deleteHighlight.mutateAsync({ id, bookmarkId })
         }}
         onCreate={createFromSelection}
+        onAskAi={askAiFromSelection}
       />
     ),
     [
@@ -636,7 +720,8 @@ function PdfSurface({
       updateHighlight,
       deleteHighlight,
       bookmarkId,
-      createFromSelection
+      createFromSelection,
+      askAiFromSelection
     ]
   )
 
@@ -696,28 +781,76 @@ function PdfSurface({
           Fit
         </button>
 
+        <span className="mx-1 h-4 w-px bg-neutral-200 dark:bg-neutral-800" />
+
+        <button
+          type="button"
+          onClick={() => {
+            const next = !aiDrawerOpen
+            setAiDrawerOpen(next)
+            if (next && doc && index) {
+              void pageText(Math.max(0, scrollState.currentPage - 1)).then((t) => setCurrentPageText(t))
+            }
+          }}
+          className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium transition-colors ${
+            aiDrawerOpen
+              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+              : 'text-neutral-600 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800'
+          }`}
+          title="Toggle Page AI Co-Pilot"
+        >
+          <span>✨</span>
+          <span>AI Co-Pilot</span>
+        </button>
+
         <div className="ml-auto text-neutral-400">
           {indexing
             ? `Indexing text ${indexing.done}/${indexing.total}`
             : highlightCount > 0
               ? `${highlightCount} highlight${highlightCount === 1 ? '' : 's'}`
-              : 'Select text to highlight'}
+              : 'Select text to highlight or Ask AI'}
         </div>
       </div>
 
-      <div className="min-h-0 flex-1">
-        <Viewport
-          documentId={documentId}
-          className="h-full w-full overflow-auto bg-neutral-100 dark:bg-neutral-950"
-        >
-          {/* The interaction manager only sees pointer events that come
-              through its providers — without them the selection plugin never
-              gets a pointer-down and text cannot be selected at all. */}
-          <GlobalPointerProvider documentId={documentId}>
-            <Scroller documentId={documentId} renderPage={renderPage} />
-          </GlobalPointerProvider>
-        </Viewport>
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <div className="min-h-0 flex-1">
+          <Viewport
+            documentId={documentId}
+            className="h-full w-full overflow-auto bg-neutral-100 dark:bg-neutral-950"
+          >
+            {/* The interaction manager only sees pointer events that come
+                through its providers — without them the selection plugin never
+                gets a pointer-down and text cannot be selected at all. */}
+            <GlobalPointerProvider documentId={documentId}>
+              <Scroller documentId={documentId} renderPage={renderPage} />
+            </GlobalPointerProvider>
+          </Viewport>
+        </div>
+
+        {aiDrawerOpen && (
+          <PageAiDrawer
+            open={aiDrawerOpen}
+            onClose={() => setAiDrawerOpen(false)}
+            currentPage={scrollState.currentPage}
+            totalPages={totalPages}
+            pageText={currentPageText}
+            docTitle={title || fileName}
+          />
+        )}
       </div>
+
+      {aiSelectionState && (
+        <SelectionAiHUD
+          anchor={aiHudAnchor}
+          selectionText={aiSelectionState.selectionText}
+          surroundingContext={aiSelectionState.surroundingContext}
+          pageText={aiSelectionState.pageText}
+          docTitle={title || fileName}
+          initialMode={aiSelectionState.initialMode}
+          onDismiss={() => setAiSelectionState(null)}
+          onSaveAsHighlight={handleSaveAiAsHighlight}
+        />
+      )}
     </>
   )
 }
@@ -738,6 +871,7 @@ interface PdfPageProps {
   onRecolor: (id: string, color: string) => Promise<void>
   onDelete: (id: string) => Promise<void>
   onCreate: (color: string, withNote: boolean) => Promise<string | null>
+  onAskAi: (rect: Rect, pageIndex: number, mode?: AiMode) => void
 }
 
 function PdfPage({
@@ -755,7 +889,8 @@ function PdfPage({
   onSaveNote,
   onRecolor,
   onDelete,
-  onCreate
+  onCreate,
+  onAskAi
 }: PdfPageProps): React.JSX.Element {
   const geo = geometry.get(pageIndex)
 
@@ -866,7 +1001,14 @@ function PdfPage({
         pageIndex={pageIndex}
         scale={scale}
         selectionMenu={(menu: SelectionSelectionMenuProps) =>
-          menu.selected ? <SelectionMenu rect={menu.rect} pageIndex={pageIndex} onCreate={onCreate} /> : null
+          menu.selected ? (
+            <SelectionMenu
+              rect={menu.rect}
+              pageIndex={pageIndex}
+              onCreate={onCreate}
+              onAskAi={(mode) => onAskAi(menu.rect, pageIndex, mode)}
+            />
+          ) : null
         }
       />
 
@@ -1079,15 +1221,17 @@ function SwatchRow({
   )
 }
 
-/** Colour swatches + "Note", shown against a live text selection. */
+/** Colour swatches + "Note" + "Ask AI", shown against a live text selection. */
 function SelectionMenu({
   rect,
   pageIndex,
-  onCreate
+  onCreate,
+  onAskAi
 }: {
   rect: Rect
   pageIndex: number
   onCreate: (color: string, withNote: boolean) => Promise<string | null>
+  onAskAi?: (mode?: AiMode) => void
 }): React.JSX.Element {
   const [busy, setBusy] = useState(false)
 
@@ -1124,6 +1268,14 @@ function SelectionMenu({
         disabled={busy}
         onClick={() => void run(DEFAULT_HIGHLIGHT_COLOR, true)}
         data-kk-note=""
+      />
+      <div className="kh-sep" />
+      <PopButton
+        label="Ask AI"
+        icon="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"
+        disabled={busy}
+        onClick={() => onAskAi?.('micro-dejargon')}
+        data-kk-ai=""
       />
     </FloatingPopover>
   )

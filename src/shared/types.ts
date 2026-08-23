@@ -247,11 +247,59 @@ export interface AppConfig {
   baseUrl: string
   customHeaders?: Record<string, string>
   hasApiKey: boolean
+  hasGeminiApiKey?: boolean
+  geminiModel?: string
 }
 
 export interface AuthResult {
   ok: boolean
   user?: User
+  error?: string
+}
+
+// ─────────────────────────── AI Assistant (Gemini) ───────────────────────────
+export type AiMode =
+  | 'micro-explain'
+  | 'micro-dejargon'
+  | 'micro-formula'
+  | 'meso-page'
+  | 'macro-chat'
+  | 'custom'
+
+export interface AiChatMessage {
+  role: 'user' | 'model'
+  text: string
+}
+
+export interface AiStreamRequest {
+  requestId: string
+  mode: AiMode
+  selectionText?: string
+  surroundingContext?: string
+  pageText?: string
+  docTitle?: string
+  prompt?: string
+  history?: AiChatMessage[]
+}
+
+export interface AiStreamChunk {
+  requestId: string
+  delta: string
+}
+
+export interface AiStreamDone {
+  requestId: string
+  fullText: string
+}
+
+export interface AiStreamError {
+  requestId: string
+  error: string
+}
+
+export interface AiTestResult {
+  ok: boolean
+  model?: string
   error?: string
 }
 
@@ -283,3 +331,4 @@ export interface PendingHighlight {
   startOffset: number
   endOffset: number
 }
+

@@ -2,12 +2,14 @@ import { app, BrowserWindow, ipcMain, screen, shell, Menu } from 'electron'
 import { join } from 'node:path'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { KarakeepApiClient } from './api'
+import { aiService } from './ai'
 import * as store from './store'
 import { loadDotEnvLocal } from './env'
 import { buildAppMenu } from './menu'
 import { WebPaneManager } from './webpane'
 import { IPC } from '../shared/ipc'
 import type {
+  AiStreamRequest,
   AssetUploadInput,
   AuthResult,
   BookmarkListFilter,
@@ -243,6 +245,41 @@ function registerIpc(): void {
   ipcMain.handle(IPC.STORE_GET_LIST_ORDER, () => store.getListOrder())
   ipcMain.handle(IPC.STORE_SET_LIST_ORDER, (_e, order: ListOrder) => {
     store.setListOrder(order)
+  })
+
+  // ─────────────────────────── Gemini AI handlers ───────────────────────────
+  ipcMain.handle(IPC.AI_SET_CONFIG, (_e, input: { geminiApiKey?: string; geminiModel?: string }) => {
+    store.setAiConfig(input)
+    return store.getConfig()
+  })
+
+  ipcMain.handle(IPC.AI_TEST_CONNECTION, async (_e, input?: { apiKey?: string; model?: string }) => {
+    return aiService.testConnection(input?.apiKey, input?.model)
+  })
+
+  ipcMain.handle(IPC.AI_STREAM_ABORT, (_e, requestId: string) => {
+    aiService.abort(requestId)
+  })
+
+  ipcMain.handle(IPC.AI_STREAM_START, async (event, req: AiStreamRequest) => {
+    const sender = event.sender
+    try {
+      const fullText = await aiService.streamRequest(req, (delta) => {
+        if (!sender.isDestroyed()) {
+          sender.send(IPC.AI_STREAM_CHUNK_EVENT, { requestId: req.requestId, delta })
+        }
+      })
+      if (!sender.isDestroyed()) {
+        sender.send(IPC.AI_STREAM_DONE_EVENT, { requestId: req.requestId, fullText })
+      }
+      return { ok: true }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (!sender.isDestroyed()) {
+        sender.send(IPC.AI_STREAM_ERROR_EVENT, { requestId: req.requestId, error: message })
+      }
+      return { ok: false, error: message }
+    }
   })
 
   ipcMain.on(IPC.WINDOW_MINIMIZE, () => mainWindow?.minimize())

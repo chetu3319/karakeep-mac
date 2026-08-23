@@ -41,6 +41,11 @@ export default function SettingsDialog({
   const [apiKey, setApiKey] = useState('')
   const [headersText, setHeadersText] = useState('')
   const [hasStoredKey, setHasStoredKey] = useState(false)
+  const [geminiApiKey, setGeminiApiKey] = useState('')
+  const [geminiModel, setGeminiModel] = useState('gemini-2.5-flash')
+  const [hasStoredGeminiKey, setHasStoredGeminiKey] = useState(false)
+  const [testingAi, setTestingAi] = useState(false)
+  const [aiTestResult, setAiTestResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
@@ -49,6 +54,8 @@ export default function SettingsDialog({
     void window.kk.config.get().then((cfg) => {
       setBaseUrl(cfg.baseUrl || '')
       setHasStoredKey(cfg.hasApiKey)
+      setHasStoredGeminiKey(!!cfg.hasGeminiApiKey)
+      if (cfg.geminiModel) setGeminiModel(cfg.geminiModel)
       setHeadersText(
         Object.entries(cfg.customHeaders || {})
           .map(([k, v]) => `${k}: ${v}`)
@@ -56,6 +63,26 @@ export default function SettingsDialog({
       )
     })
   }, [])
+
+  async function testAi(): Promise<void> {
+    setTestingAi(true)
+    setAiTestResult(null)
+    try {
+      const res = await window.kk.ai.testConnection({
+        apiKey: geminiApiKey.trim() || undefined,
+        model: geminiModel
+      })
+      if (res.ok) {
+        setAiTestResult({ ok: true, message: `Connected to ${res.model || geminiModel}` })
+      } else {
+        setAiTestResult({ ok: false, message: res.error || 'Connection failed' })
+      }
+    } catch (err) {
+      setAiTestResult({ ok: false, message: err instanceof Error ? err.message : String(err) })
+    } finally {
+      setTestingAi(false)
+    }
+  }
 
   async function save(e: React.FormEvent): Promise<void> {
     e.preventDefault()
@@ -71,10 +98,18 @@ export default function SettingsDialog({
         if (k) customHeaders[k] = line.slice(idx + 1).trim()
       }
 
-      // An empty key field means "leave the stored one alone". config.set
-      // treats an empty string that way; sending it explicitly keeps that
-      // contract in one place rather than branching here.
+      // Save Karakeep server config
       await window.kk.config.set({ baseUrl: baseUrl.trim(), apiKey: apiKey.trim(), customHeaders })
+
+      // Save Gemini AI config if provided or changed
+      await window.kk.ai.setConfig({
+        geminiApiKey: geminiApiKey.trim() || undefined,
+        geminiModel
+      })
+      if (geminiApiKey.trim()) {
+        setGeminiApiKey('')
+        setHasStoredGeminiKey(true)
+      }
 
       const result = await window.kk.auth.test()
       if (!result.ok || !result.user) {
@@ -178,6 +213,55 @@ export default function SettingsDialog({
                 className="w-full rounded-lg border border-neutral-300 bg-transparent px-3 py-2 font-mono text-xs outline-none focus:border-emerald-500 dark:border-neutral-700"
               />
             </label>
+          </section>
+
+          <section>
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-neutral-400">AI Assistant (Gemini)</h3>
+              <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">Flow Co-Pilot</span>
+            </div>
+            <label className="mb-3 block text-sm">
+              <span className="mb-1 block text-xs text-neutral-600 dark:text-neutral-400">Model</span>
+              <select
+                value={geminiModel}
+                onChange={(e) => setGeminiModel(e.target.value)}
+                className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-500 dark:border-neutral-700 dark:bg-neutral-900"
+              >
+                <option value="gemini-2.5-flash">Gemini 2.5 Flash (Fast & responsive)</option>
+                <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                <option value="gemini-1.5-pro">Gemini 1.5 Pro (Deep analysis)</option>
+              </select>
+            </label>
+            <label className="mb-2 block text-sm">
+              <span className="mb-1 block text-xs text-neutral-600 dark:text-neutral-400">Gemini API key</span>
+              <input
+                type="password"
+                value={geminiApiKey}
+                onChange={(e) => setGeminiApiKey(e.target.value)}
+                placeholder={hasStoredGeminiKey ? 'Stored securely in Keychain — leave blank to keep it' : 'Paste your Gemini API key'}
+                spellCheck={false}
+                className="w-full rounded-lg border border-neutral-300 bg-transparent px-3 py-2 text-sm outline-none focus:border-emerald-500 dark:border-neutral-700"
+              />
+            </label>
+            <div className="mt-2 flex items-center justify-between">
+              <button
+                type="button"
+                onClick={() => void testAi()}
+                disabled={testingAi}
+                className="rounded border border-neutral-300 px-2.5 py-1 text-xs text-neutral-700 hover:bg-neutral-100 disabled:opacity-50 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
+              >
+                {testingAi ? 'Testing…' : 'Test Gemini'}
+              </button>
+              {aiTestResult && (
+                <span
+                  className={`text-xs font-medium ${
+                    aiTestResult.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
+                  }`}
+                >
+                  {aiTestResult.message}
+                </span>
+              )}
+            </div>
           </section>
 
           {error && (

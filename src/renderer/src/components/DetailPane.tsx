@@ -513,6 +513,7 @@ export default function DetailPane({
               <PdfPane
                 assetId={pdfAssetId}
                 fileName={pdfFileName}
+                title={display?.title || bookmark.title || pdfFileName}
                 bookmarkId={bookmark.id}
                 highlights={highlights}
                 focusHighlightId={tab === 'pdf' ? focusHighlightId : null}

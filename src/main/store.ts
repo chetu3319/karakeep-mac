@@ -13,6 +13,8 @@ interface OnDiskConfig {
   baseUrl?: string
   customHeaders?: Record<string, string>
   encryptedApiKey?: string // base64
+  encryptedGeminiApiKey?: string // base64
+  geminiModel?: string
   // Sibling ordering within a list parent (or 'root' for top level) is a
   // client-only concept — Karakeep's /lists response has no order/rank
   // field, so this never round-trips to the server. See shared/types.ts.
@@ -32,6 +34,11 @@ export interface ResolvedConfig {
   baseUrl: string
   apiKey: string
   customHeaders: Record<string, string>
+}
+
+export interface ResolvedAiConfig {
+  geminiApiKey: string
+  geminiModel: string
 }
 
 function configPath(): string {
@@ -54,13 +61,58 @@ function writeDisk(cfg: OnDiskConfig): void {
   writeFileSync(p, JSON.stringify(cfg, null, 2), 'utf-8')
 }
 
-export function getConfig(): { baseUrl: string; customHeaders: Record<string, string>; hasApiKey: boolean } {
+export function getConfig(): {
+  baseUrl: string
+  customHeaders: Record<string, string>
+  hasApiKey: boolean
+  hasGeminiApiKey: boolean
+  geminiModel: string
+} {
   const disk = readDisk()
+  const hasGeminiKey = !!disk.encryptedGeminiApiKey || !!process.env.GEMINI_API_KEY || !!process.env.GOOGLE_API_KEY
   return {
     baseUrl: disk.baseUrl || '',
     customHeaders: disk.customHeaders || {},
-    hasApiKey: !!disk.encryptedApiKey
+    hasApiKey: !!disk.encryptedApiKey,
+    hasGeminiApiKey: hasGeminiKey,
+    geminiModel: disk.geminiModel || 'gemini-2.5-flash'
   }
+}
+
+export function getResolvedAiConfig(): ResolvedAiConfig | null {
+  const disk = readDisk()
+  const model = disk.geminiModel || 'gemini-2.5-flash'
+  let apiKey = ''
+
+  if (disk.encryptedGeminiApiKey && safeStorage.isEncryptionAvailable()) {
+    try {
+      apiKey = safeStorage.decryptString(Buffer.from(disk.encryptedGeminiApiKey, 'base64'))
+    } catch {
+      // ignore decryption failure and fallback
+    }
+  }
+
+  if (!apiKey) {
+    apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || ''
+  }
+
+  if (!apiKey) return null
+  return { geminiApiKey: apiKey, geminiModel: model }
+}
+
+export function setAiConfig(input: { geminiApiKey?: string; geminiModel?: string }): void {
+  const disk = readDisk()
+  if (input.geminiModel) {
+    disk.geminiModel = input.geminiModel
+  }
+  if (input.geminiApiKey !== undefined) {
+    if (!input.geminiApiKey) {
+      delete disk.encryptedGeminiApiKey
+    } else if (safeStorage.isEncryptionAvailable()) {
+      disk.encryptedGeminiApiKey = safeStorage.encryptString(input.geminiApiKey).toString('base64')
+    }
+  }
+  writeDisk(disk)
 }
 
 export function getResolvedConfig(): ResolvedConfig | null {

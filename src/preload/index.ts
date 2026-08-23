@@ -1,6 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/ipc'
 import type {
+  AiStreamChunk,
+  AiStreamDone,
+  AiStreamError,
+  AiStreamRequest,
+  AiTestResult,
   AppConfig,
   AssetUploadInput,
   AuthResult,
@@ -86,6 +91,31 @@ const api = {
     get: (assetId: string): Promise<string> => ipcRenderer.invoke(IPC.API_GET_ASSET, assetId),
     getBytes: (assetId: string): Promise<ArrayBuffer> => ipcRenderer.invoke(IPC.API_GET_ASSET_BYTES, assetId),
     upload: (input: AssetUploadInput): Promise<UploadedAsset> => ipcRenderer.invoke(IPC.API_UPLOAD_ASSET, input)
+  },
+  ai: {
+    setConfig: (input: { geminiApiKey?: string; geminiModel?: string }): Promise<AppConfig> =>
+      ipcRenderer.invoke(IPC.AI_SET_CONFIG, input),
+    testConnection: (input?: { apiKey?: string; model?: string }): Promise<AiTestResult> =>
+      ipcRenderer.invoke(IPC.AI_TEST_CONNECTION, input),
+    startStream: (req: AiStreamRequest): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC.AI_STREAM_START, req),
+    abortStream: (requestId: string): Promise<void> =>
+      ipcRenderer.invoke(IPC.AI_STREAM_ABORT, requestId),
+    onStreamChunk: (cb: (chunk: AiStreamChunk) => void): (() => void) => {
+      const listener = (_e: unknown, chunk: AiStreamChunk): void => cb(chunk)
+      ipcRenderer.on(IPC.AI_STREAM_CHUNK_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.AI_STREAM_CHUNK_EVENT, listener)
+    },
+    onStreamDone: (cb: (done: AiStreamDone) => void): (() => void) => {
+      const listener = (_e: unknown, done: AiStreamDone): void => cb(done)
+      ipcRenderer.on(IPC.AI_STREAM_DONE_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.AI_STREAM_DONE_EVENT, listener)
+    },
+    onStreamError: (cb: (err: AiStreamError) => void): (() => void) => {
+      const listener = (_e: unknown, err: AiStreamError): void => cb(err)
+      ipcRenderer.on(IPC.AI_STREAM_ERROR_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.AI_STREAM_ERROR_EVENT, listener)
+    }
   },
   window: {
     minimize: (): void => ipcRenderer.send(IPC.WINDOW_MINIMIZE),
