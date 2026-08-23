@@ -812,8 +812,8 @@ function PdfSurface({
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        <div className="min-h-0 flex-1">
+      <div className="flex h-full min-h-0 flex-1 overflow-hidden">
+        <div className="h-full min-h-0 flex-1">
           <Viewport
             documentId={documentId}
             className="h-full w-full overflow-auto bg-neutral-100 dark:bg-neutral-950"

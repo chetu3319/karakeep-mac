@@ -84,11 +84,15 @@ export function getResolvedAiConfig(): ResolvedAiConfig | null {
   const model = disk.geminiModel || 'gemini-2.5-flash'
   let apiKey = ''
 
-  if (disk.encryptedGeminiApiKey && safeStorage.isEncryptionAvailable()) {
-    try {
-      apiKey = safeStorage.decryptString(Buffer.from(disk.encryptedGeminiApiKey, 'base64'))
-    } catch {
-      // ignore decryption failure and fallback
+  if (disk.encryptedGeminiApiKey) {
+    if (safeStorage.isEncryptionAvailable()) {
+      try {
+        apiKey = safeStorage.decryptString(Buffer.from(disk.encryptedGeminiApiKey, 'base64'))
+      } catch {
+        apiKey = disk.encryptedGeminiApiKey
+      }
+    } else {
+      apiKey = disk.encryptedGeminiApiKey
     }
   }
 
@@ -110,6 +114,8 @@ export function setAiConfig(input: { geminiApiKey?: string; geminiModel?: string
       delete disk.encryptedGeminiApiKey
     } else if (safeStorage.isEncryptionAvailable()) {
       disk.encryptedGeminiApiKey = safeStorage.encryptString(input.geminiApiKey).toString('base64')
+    } else {
+      disk.encryptedGeminiApiKey = input.geminiApiKey
     }
   }
   writeDisk(disk)

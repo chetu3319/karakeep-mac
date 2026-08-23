@@ -48,45 +48,56 @@ export default function SelectionAiHUD({
   }, [initialMode, selectionText, surroundingContext, pageText, docTitle, startStream])
 
   // Positioning
-  const updatePosition = (): void => {
-    if (!el.current) return
-    const rect = anchor()
-    if (!rect) return
-    placePopover(el.current, rect)
-  }
-
   useLayoutEffect(() => {
-    updatePosition()
+    const place = (): void => {
+      if (!el.current) return
+      const rect = anchor()
+      el.current.style.visibility = rect ? 'visible' : 'hidden'
+      if (rect) placePopover(el.current, rect)
+    }
+    place()
+
+    let frame = 0
+    const queue = (): void => {
+      if (frame) return
+      frame = requestAnimationFrame(() => {
+        frame = 0
+        place()
+      })
+    }
+    window.addEventListener('scroll', queue, true)
+    window.addEventListener('resize', queue)
+    return () => {
+      if (frame) cancelAnimationFrame(frame)
+      window.removeEventListener('scroll', queue, true)
+      window.removeEventListener('resize', queue)
+    }
   })
 
   useEffect(() => {
+    host.style.cssText = 'position: fixed; inset: 0; z-index: 2147483647; pointer-events: none;'
     document.body.appendChild(host)
-    const onScroll = (): void => updatePosition()
-    const onResize = (): void => updatePosition()
-
-    window.addEventListener('scroll', onScroll, true)
-    window.addEventListener('resize', onResize)
-
-    return () => {
-      window.removeEventListener('scroll', onScroll, true)
-      window.removeEventListener('resize', onResize)
-      host.remove()
-    }
+    return () => host.remove()
   }, [host])
 
   // Outside click & Esc handling
   useEffect(() => {
     const onDown = (e: PointerEvent): void => {
-      if (el.current && !el.current.contains(e.target as Node)) {
-        onDismiss()
-      }
+      if (el.current && e.composedPath().includes(el.current)) return
+      if ((e.target as Element)?.closest?.('[data-kk-ai]')) return
+      onDismiss()
     }
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') onDismiss()
     }
-    document.addEventListener('pointerdown', onDown, true)
-    document.addEventListener('keydown', onKey)
+
+    const timer = setTimeout(() => {
+      document.addEventListener('pointerdown', onDown, true)
+      document.addEventListener('keydown', onKey)
+    }, 60)
+
     return () => {
+      clearTimeout(timer)
       document.removeEventListener('pointerdown', onDown, true)
       document.removeEventListener('keydown', onKey)
     }
