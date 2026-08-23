@@ -669,12 +669,35 @@ function karakeepInit(): void {
   }
 
   let popover: OpenPopover | null = null
+  let activeAiHandler: {
+    requestId: string
+    onChunk: (delta: string) => void
+    onDone: (fullText: string) => void
+    onError: (error: string) => void
+  } | null = null
+
+  ipcRenderer.on(IPC.AI_STREAM_CHUNK_EVENT, (_e, chunk: { requestId: string; delta: string }) => {
+    if (activeAiHandler && activeAiHandler.requestId === chunk.requestId) {
+      activeAiHandler.onChunk(chunk.delta)
+    }
+  })
+  ipcRenderer.on(IPC.AI_STREAM_DONE_EVENT, (_e, done: { requestId: string; fullText: string }) => {
+    if (activeAiHandler && activeAiHandler.requestId === done.requestId) {
+      activeAiHandler.onDone(done.fullText)
+    }
+  })
+  ipcRenderer.on(IPC.AI_STREAM_ERROR_EVENT, (_e, err: { requestId: string; error: string }) => {
+    if (activeAiHandler && activeAiHandler.requestId === err.requestId) {
+      activeAiHandler.onError(err.error)
+    }
+  })
 
   function closePopover(): void {
     if (!popover) return
     if (popover.highlightId) {
       for (const el of marksFor(popover.highlightId)) delete el.dataset.khActive
     }
+    activeAiHandler = null
     popover.el.remove()
     popover = null
   }
@@ -876,6 +899,25 @@ function karakeepInit(): void {
       body.textContent = 'Thinking with Gemini…'
       saveBtn.style.display = 'none'
 
+      activeAiHandler = {
+        requestId: activeRequestId,
+        onChunk: (delta) => {
+          if (body.textContent === 'Thinking with Gemini…') body.textContent = ''
+          accumulatedText += delta
+          body.textContent = accumulatedText
+          reposition()
+        },
+        onDone: (fullText) => {
+          accumulatedText = fullText
+          body.textContent = fullText
+          saveBtn.style.display = 'inline-flex'
+          reposition()
+        },
+        onError: (error) => {
+          body.textContent = `AI Error: ${error}`
+        }
+      }
+
       void ipcRenderer.invoke(IPC.AI_STREAM_START, {
         requestId: activeRequestId,
         mode,
@@ -960,35 +1002,6 @@ function karakeepInit(): void {
     footer.appendChild(copyBtn)
 
     el.appendChild(footer)
-
-    // Listeners for AI stream
-    const onChunk = (_e: unknown, chunk: { requestId: string; delta: string }): void => {
-      if (chunk.requestId === activeRequestId) {
-        if (body.textContent === 'Thinking with Gemini…') body.textContent = ''
-        accumulatedText += chunk.delta
-        body.textContent = accumulatedText
-        reposition()
-      }
-    }
-
-    const onDone = (_e: unknown, done: { requestId: string; fullText: string }): void => {
-      if (done.requestId === activeRequestId) {
-        accumulatedText = done.fullText
-        body.textContent = done.fullText
-        saveBtn.style.display = 'inline-flex'
-        reposition()
-      }
-    }
-
-    const onError = (_e: unknown, err: { requestId: string; error: string }): void => {
-      if (err.requestId === activeRequestId) {
-        body.textContent = `AI Error: ${err.error}`
-      }
-    }
-
-    ipcRenderer.on(IPC.AI_STREAM_CHUNK_EVENT, onChunk)
-    ipcRenderer.on(IPC.AI_STREAM_DONE_EVENT, onDone)
-    ipcRenderer.on(IPC.AI_STREAM_ERROR_EVENT, onError)
 
     mountPopover('selection', el, anchor)
     startQuery('micro-dejargon')
