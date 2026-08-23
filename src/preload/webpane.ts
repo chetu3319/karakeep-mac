@@ -21,12 +21,14 @@ import { ipcRenderer } from 'electron'
 import {
   DEFAULT_HIGHLIGHT_COLOR,
   HIGHLIGHT_COLORS,
+  ICON_AI,
   ICON_COPY,
   ICON_NOTE,
   ICON_TRASH,
   highlightPopoverStylesheet,
   placePopover
 } from '../shared/highlightUi'
+import { IPC } from '../shared/ipc'
 
 const HIGHLIGHT_CLASS = 'karakeep-hl'
 const OVERLAY_HOST_ID = 'karakeep-hl-overlay'
@@ -819,7 +821,177 @@ function karakeepInit(): void {
       })
     )
 
+    const sep2 = document.createElement('div')
+    sep2.className = 'kh-sep'
+    el.appendChild(sep2)
+
+    el.appendChild(
+      makeButton('Ask AI', ICON_AI, () => {
+        const text = range.toString().trim()
+        const clone = range.cloneRange()
+        openAiPopover(clone, text)
+      })
+    )
+
     mountPopover('selection', el, anchor)
+  }
+
+  /** In-situ AI Assistant HUD for a web selection: simplify, define term, math decode, save to note. */
+  function openAiPopover(range: Range, text: string): void {
+    const el = newPopoverEl()
+    el.style.cssText =
+      'display: flex; flex-direction: column; width: 350px; max-height: 380px; padding: 10px; gap: 8px;'
+
+    const anchor = (): DOMRect | null => {
+      try {
+        const r = range.getBoundingClientRect()
+        return r.width || r.height ? r : null
+      } catch {
+        return null
+      }
+    }
+
+    let activeRequestId = `ai-web-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    let accumulatedText = ''
+
+    // Header toolbar
+    const header = document.createElement('div')
+    header.className = 'kh-toolbar'
+    header.style.cssText =
+      'border-bottom: 1px solid rgba(255,255,255,0.12); padding-bottom: 6px; margin-bottom: 2px;'
+
+    const modes = [
+      { id: 'micro-dejargon', label: '⚡ Simplify' },
+      { id: 'micro-explain', label: '📖 Term' },
+      { id: 'micro-formula', label: '🧮 Math' }
+    ]
+
+    const buttons: HTMLElement[] = []
+    function startQuery(mode: string): void {
+      if (activeRequestId) {
+        void ipcRenderer.invoke(IPC.AI_STREAM_ABORT, activeRequestId)
+      }
+      activeRequestId = `ai-web-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+      accumulatedText = ''
+      body.textContent = 'Thinking with Gemini…'
+      saveBtn.style.display = 'none'
+
+      void ipcRenderer.invoke(IPC.AI_STREAM_START, {
+        requestId: activeRequestId,
+        mode,
+        selectionText: text,
+        pageText: document.body?.innerText?.slice(0, 3500) || '',
+        docTitle: document.title
+      })
+    }
+
+    modes.forEach(({ id, label }) => {
+      const b = document.createElement('button')
+      b.className = 'kh-btn'
+      b.style.cssText = 'font-size: 11px; padding: 3px 7px; border-radius: 5px;'
+      b.textContent = label
+      b.addEventListener('click', (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        buttons.forEach((btn) => (btn.style.background = 'transparent'))
+        b.style.background = 'rgba(16, 185, 129, 0.25)'
+        startQuery(id)
+      })
+      buttons.push(b)
+      header.appendChild(b)
+    })
+    buttons[0].style.background = 'rgba(16, 185, 129, 0.25)'
+
+    const spacer = document.createElement('div')
+    spacer.className = 'kh-spacer'
+    header.appendChild(spacer)
+
+    const closeBtn = makeButton(
+      'Close',
+      'M18 6L6 18M6 6l12 12',
+      () => {
+        if (activeRequestId) void ipcRenderer.invoke(IPC.AI_STREAM_ABORT, activeRequestId)
+        closePopover()
+      },
+      false,
+      true
+    )
+    header.appendChild(closeBtn)
+
+    el.appendChild(header)
+
+    // Selection preview snippet
+    const snippet = document.createElement('div')
+    snippet.style.cssText =
+      'font-size: 11px; font-style: italic; opacity: 0.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 6px; background: rgba(255,255,255,0.06); border-radius: 4px;'
+    snippet.textContent = `"${text.slice(0, 80)}${text.length > 80 ? '…' : ''}"`
+    el.appendChild(snippet)
+
+    // Response body
+    const body = document.createElement('div')
+    body.className = 'kh-note-view'
+    body.style.cssText =
+      'flex: 1; max-height: 190px; font-size: 12px; line-height: 1.5; color: #f2f2f7; white-space: pre-wrap;'
+    body.textContent = 'Thinking with Gemini…'
+    el.appendChild(body)
+
+    // Footer actions
+    const footer = document.createElement('div')
+    footer.className = 'kh-toolbar'
+    footer.style.cssText =
+      'border-top: 1px solid rgba(255,255,255,0.12); padding-top: 6px; margin-top: 2px;'
+
+    const saveBtn = makeButton('Save as Note', ICON_NOTE, () => {
+      const clone = range.cloneRange()
+      closePopover()
+      window.getSelection()?.removeAllRanges()
+      const hl = createHighlight(clone, lastUsedColor, false)
+      if (hl && accumulatedText) setHighlightNote(hl, accumulatedText)
+    })
+    saveBtn.className = 'kh-btn kh-primary'
+    saveBtn.style.cssText = 'font-size: 11px; padding: 3px 8px; font-weight: 500;'
+    saveBtn.style.display = 'none'
+    footer.appendChild(saveBtn)
+
+    const copyBtn = makeButton('Copy', ICON_COPY, () => {
+      if (accumulatedText) void navigator.clipboard?.writeText(accumulatedText)
+    })
+    copyBtn.style.cssText = 'font-size: 11px; padding: 3px 8px;'
+    footer.appendChild(copyBtn)
+
+    el.appendChild(footer)
+
+    // Listeners for AI stream
+    const onChunk = (_e: unknown, chunk: { requestId: string; delta: string }): void => {
+      if (chunk.requestId === activeRequestId) {
+        if (body.textContent === 'Thinking with Gemini…') body.textContent = ''
+        accumulatedText += chunk.delta
+        body.textContent = accumulatedText
+        reposition()
+      }
+    }
+
+    const onDone = (_e: unknown, done: { requestId: string; fullText: string }): void => {
+      if (done.requestId === activeRequestId) {
+        accumulatedText = done.fullText
+        body.textContent = done.fullText
+        saveBtn.style.display = 'inline-flex'
+        reposition()
+      }
+    }
+
+    const onError = (_e: unknown, err: { requestId: string; error: string }): void => {
+      if (err.requestId === activeRequestId) {
+        body.textContent = `AI Error: ${err.error}`
+      }
+    }
+
+    ipcRenderer.on(IPC.AI_STREAM_CHUNK_EVENT, onChunk)
+    ipcRenderer.on(IPC.AI_STREAM_DONE_EVENT, onDone)
+    ipcRenderer.on(IPC.AI_STREAM_ERROR_EVENT, onError)
+
+    mountPopover('selection', el, anchor)
+    startQuery('micro-dejargon')
   }
 
   /** Popover for an existing highlight: recolour, note, copy, delete. */

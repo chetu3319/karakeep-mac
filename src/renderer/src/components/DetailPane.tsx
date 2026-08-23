@@ -14,6 +14,7 @@ import ListMembership from './ListMembership'
 import PdfPane from './PdfPane'
 import TagEditor from './TagEditor'
 import WebPane from './WebPane'
+import PageAiDrawer from './PageAiDrawer'
 
 type Tab = 'preview' | 'pdf' | 'web'
 
@@ -62,6 +63,7 @@ export default function DetailPane({
   // screen. As a rail it stays put across tabs. Persisted, because whether
   // you work with highlights open is a habit, not a per-bookmark decision.
   const [railOpen, setRailOpen] = usePref('highlightRailOpen', false)
+  const [webAiDrawerOpen, setWebAiDrawerOpen] = useState(false)
 
   // Navigation state for the live pane. It lives here rather than in
   // WebPane because the back/forward/reload buttons moved into this
@@ -346,6 +348,23 @@ export default function DetailPane({
               <span className="tabular-nums">{highlights.length}</span>
             </button>
           )}
+
+          {tab !== 'pdf' && (
+            <button
+              type="button"
+              onClick={() => setWebAiDrawerOpen((prev) => !prev)}
+              aria-pressed={webAiDrawerOpen}
+              title={webAiDrawerOpen ? 'Close AI Co-Pilot' : 'Open AI Co-Pilot'}
+              className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition ${
+                webAiDrawerOpen
+                  ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                  : 'text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800'
+              }`}
+            >
+              <span className="text-emerald-500">✨</span>
+              <span>AI Co-Pilot</span>
+            </button>
+          )}
           <button
             type="button"
             data-testid="detail-favourite"
@@ -554,6 +573,17 @@ export default function DetailPane({
             inPdf={!!pdfAssetId}
             onOpen={openHighlight}
             onClose={() => setRailOpen(false)}
+          />
+        )}
+
+        {webAiDrawerOpen && tab !== 'pdf' && (
+          <PageAiDrawer
+            open={webAiDrawerOpen}
+            onClose={() => setWebAiDrawerOpen(false)}
+            currentPage={1}
+            totalPages={1}
+            pageText={bookmark.content?.text || bookmark.content?.description || bookmark.title || ''}
+            docTitle={title}
           />
         )}
       </div>
