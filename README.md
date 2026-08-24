@@ -100,6 +100,12 @@ TanStack Query · zod · EmbedPDF/PDFium.
 - The `reference/` directory cited in a few source comments holds verbatim
   copies of the Karakeep browser extension and Raindrop sources that were read
   while building this. It is deliberately not part of this repository.
+- **AI chats are not persisted.** The sidebar co-pilot (`PageAiDrawer`) and the
+  in-situ selection HUD are backed by Gemini, but a conversation lives only in
+  React state and is gone on close, tab switch, or app restart. Karakeep's API
+  has no chat/conversation resource, so persistence would need a local store
+  here, keyed by bookmark id. See the `TODO(ai-chat-persistence)` comment at
+  the top of `src/renderer/src/components/PageAiDrawer.tsx`.
 
 ## Credits
 

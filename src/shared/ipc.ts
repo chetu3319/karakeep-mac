@@ -86,6 +86,11 @@ export const IPC = {
   WEBPANE_IS_ATTACHED: 'webpane:is-attached', // dev/smoke diagnostic — confirms actual detach, not just visual hide
   WEBPANE_APPLY_HIGHLIGHTS: 'webpane:apply-highlights', // re-push highlights without re-navigating
   WEBPANE_FOCUS_HIGHLIGHT: 'webpane:focus-highlight', // scroll a highlight into view in the live page
+  // Lets the sidebar chat ground itself in the live page's actual rendered
+  // text (see lib/useBookmarkText.ts) instead of only the crawled snapshot
+  // Karakeep stored at save time, which for a link bookmark can be stale or
+  // paywalled-thin.
+  WEBPANE_GET_PAGE_TEXT: 'webpane:get-page-text',
   WEBPANE_STATE_EVENT: 'webpane:state', // main -> renderer push
   WEBPANE_HIGHLIGHTS_CHANGED_EVENT: 'webpane:highlights-changed', // main -> renderer push
   WEBPANE_HIGHLIGHT_STATUS_EVENT: 'webpane:highlight-status' // main -> renderer push: which highlights anchored

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { placePopover } from '../../../shared/highlightUi'
 import type { AiMode } from '../../../shared/types'
 import { useAiStream } from '../lib/useAiStream'
+import { renderMarkdown } from '../lib/miniMarkdown'
 
 export interface SelectionAiHUDProps {
   anchor: () => DOMRect | null
@@ -13,6 +14,10 @@ export interface SelectionAiHUDProps {
   initialMode?: AiMode
   onDismiss: () => void
   onSaveAsHighlight?: (note: string) => Promise<void>
+  sourceUrl?: string
+  siteName?: string
+  author?: string
+  docKind?: 'pdf' | 'article' | 'note'
 }
 
 export default function SelectionAiHUD({
@@ -21,9 +26,13 @@ export default function SelectionAiHUD({
   surroundingContext,
   pageText,
   docTitle,
-  initialMode = 'micro-dejargon',
+  initialMode = 'micro-explain',
   onDismiss,
-  onSaveAsHighlight
+  onSaveAsHighlight,
+  sourceUrl,
+  siteName,
+  author,
+  docKind
 }: SelectionAiHUDProps): React.JSX.Element {
   const [host] = useState(() => document.createElement('div'))
   const el = useRef<HTMLDivElement>(null)
@@ -43,8 +52,13 @@ export default function SelectionAiHUD({
       selectionText,
       surroundingContext,
       pageText,
-      docTitle
+      docTitle,
+      sourceUrl,
+      siteName,
+      author,
+      docKind
     })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialMode, selectionText, surroundingContext, pageText, docTitle, startStream])
 
   // Positioning
@@ -111,7 +125,11 @@ export default function SelectionAiHUD({
       selectionText,
       surroundingContext,
       pageText,
-      docTitle
+      docTitle,
+      sourceUrl,
+      siteName,
+      author,
+      docKind
     })
   }
 
@@ -125,7 +143,11 @@ export default function SelectionAiHUD({
       selectionText,
       surroundingContext,
       pageText,
-      docTitle
+      docTitle,
+      sourceUrl,
+      siteName,
+      author,
+      docKind
     })
   }
 
@@ -152,7 +174,19 @@ export default function SelectionAiHUD({
     <div
       ref={el}
       data-no-interaction
-      className="fixed z-50 flex max-h-[380px] w-[380px] flex-col rounded-xl border border-neutral-200 bg-white/95 p-3.5 shadow-2xl backdrop-blur-md transition-shadow dark:border-neutral-700/80 dark:bg-neutral-900/95 dark:text-neutral-100"
+      data-kk-ai-hud
+      // The host is `pointer-events: none` (deliberate — see the effect
+      // below) so it never swallows clicks meant for the page underneath a
+      // full-viewport fixed overlay. That `none` inherits straight through
+      // to every descendant unless something in the panel opts back in, the
+      // same way the shared `.kh-pop` popover style does with its own
+      // `pointer-events: auto` rule (src/shared/highlightUi.ts). This panel
+      // is plain Tailwind rather than `.kh-pop`, so it has to opt in here
+      // instead — without it every button, tab, and input in the HUD is
+      // click-through, and the resulting click lands on the document
+      // underneath and immediately dismisses the HUD via the outside-click
+      // handler below.
+      className="pointer-events-auto fixed z-50 flex max-h-[380px] w-[380px] flex-col rounded-xl border border-neutral-200 bg-white/95 p-3.5 shadow-2xl backdrop-blur-md transition-shadow dark:border-neutral-700/80 dark:bg-neutral-900/95 dark:text-neutral-100"
       onPointerDown={(e) => {
         // Prevent clearing text selection on click
         if (!(e.target as HTMLElement).closest('input, textarea')) {
@@ -163,17 +197,12 @@ export default function SelectionAiHUD({
       {/* Header Tabs / Mode Switcher */}
       <div className="mb-2.5 flex items-center justify-between border-b border-neutral-200/80 pb-2 dark:border-neutral-800">
         <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => triggerMode('micro-dejargon')}
-            className={`rounded-md px-2 py-1 text-xs font-medium transition-colors ${
-              activeMode === 'micro-dejargon' && !showInput
-                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300'
-                : 'text-neutral-600 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800'
-            }`}
-          >
-            ⚡ Simplify
-          </button>
+          {/* Explain / Dejargonify / Define is the exact order and naming
+              the product spec asks for; Math stays as a fourth mode because
+              it earns its place for the arxiv/paper use case even though
+              the spec only names three. The PDF pane's SelectionMenu and
+              preload/webpane.ts's in-page popover both mirror this same
+              order and labels, so the two AI surfaces read as one feature. */}
           <button
             type="button"
             onClick={() => triggerMode('micro-explain')}
@@ -183,7 +212,30 @@ export default function SelectionAiHUD({
                 : 'text-neutral-600 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800'
             }`}
           >
-            📖 Term
+            💡 Explain
+          </button>
+          <button
+            type="button"
+            data-kk-ai-mode="micro-dejargon"
+            onClick={() => triggerMode('micro-dejargon')}
+            className={`rounded-md px-2 py-1 text-xs font-medium transition-colors ${
+              activeMode === 'micro-dejargon' && !showInput
+                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300'
+                : 'text-neutral-600 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800'
+            }`}
+          >
+            ⚡ Dejargonify
+          </button>
+          <button
+            type="button"
+            onClick={() => triggerMode('micro-define')}
+            className={`rounded-md px-2 py-1 text-xs font-medium transition-colors ${
+              activeMode === 'micro-define' && !showInput
+                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300'
+                : 'text-neutral-600 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800'
+            }`}
+          >
+            📖 Define
           </button>
           <button
             type="button"
@@ -255,8 +307,8 @@ export default function SelectionAiHUD({
             <p className="mt-0.5">{error}</p>
           </div>
         ) : (
-          <div className="whitespace-pre-wrap">
-            {text}
+          <div>
+            {text ? renderMarkdown(text) : null}
             {streaming && (
               <span className="ml-1 inline-block h-3.5 w-1.5 animate-pulse bg-emerald-500 align-middle" />
             )}

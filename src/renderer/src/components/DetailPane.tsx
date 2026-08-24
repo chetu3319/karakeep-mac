@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { hexForColor as colorFor } from '../../../shared/highlightUi'
 import type { Bookmark, Highlight, UpdateBookmarkInput, WebPaneState } from '../../../shared/types'
 import { useBookmark, useDeleteBookmark, useHighlightsForBookmark, useUpdateBookmark } from '../lib/queries'
+import { useBookmarkText } from '../lib/useBookmarkText'
 import { displayForBookmark } from '../lib/bookmarkDisplay'
 import { usePref } from '../lib/prefs'
 import { errMessage } from '../lib/errors'
@@ -108,6 +109,13 @@ export default function DetailPane({
   // early return that used to be the only place `display` was computed.
   const display = useMemo(() => (bookmark ? displayForBookmark(bookmark) : null), [bookmark])
   const url = display?.url
+
+  // Grounds the sidebar chat (PageAiDrawer, below) in the bookmark's real
+  // content rather than a two-line meta description — see
+  // lib/useBookmarkText.ts. Called unconditionally (before the `!bookmark`
+  // early return) because it's a hook; `enabled: !!bookmark` inside it makes
+  // that safe to call with a possibly-null bookmark.
+  const bookmarkText = useBookmarkText(bookmark, tab === 'web')
 
   /**
    * Where a bookmark opens.
@@ -538,6 +546,8 @@ export default function DetailPane({
                 focusHighlightId={tab === 'pdf' ? focusHighlightId : null}
                 onFocusHandled={clearFocus}
                 onAnchorStatus={handleAnchorStatus}
+                sourceUrl={content?.sourceUrl || content?.url || undefined}
+                author={content?.author || content?.publisher || undefined}
               />
             </div>
           )}
@@ -580,10 +590,15 @@ export default function DetailPane({
           <PageAiDrawer
             open={webAiDrawerOpen}
             onClose={() => setWebAiDrawerOpen(false)}
-            currentPage={1}
-            totalPages={1}
-            pageText={bookmark.content?.text || bookmark.content?.description || bookmark.title || ''}
+            scopeLabel={
+              display?.kind === 'text' ? 'this note' : display?.kind === 'link' ? 'this article' : 'this page'
+            }
+            pageText={bookmarkText.data?.text || bookmark.title || ''}
             docTitle={title}
+            sourceUrl={content?.url || content?.sourceUrl || undefined}
+            siteName={content?.publisher || undefined}
+            author={content?.author || undefined}
+            docKind={display?.kind === 'text' ? 'note' : 'article'}
           />
         )}
       </div>

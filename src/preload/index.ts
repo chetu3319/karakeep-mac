@@ -172,6 +172,11 @@ const api = {
       ipcRenderer.invoke(IPC.WEBPANE_APPLY_HIGHLIGHTS, { highlights }),
     focusHighlight: (highlightId: string): Promise<void> =>
       ipcRenderer.invoke(IPC.WEBPANE_FOCUS_HIGHLIGHT, highlightId),
+    // Reads document.body.innerText out of the live WebContentsView — see
+    // main/webpane.ts's getPageText(). Used by lib/useBookmarkText.ts to
+    // ground the sidebar chat in the actual rendered page rather than only
+    // whatever Karakeep's crawler captured at save time.
+    getPageText: (): Promise<string> => ipcRenderer.invoke(IPC.WEBPANE_GET_PAGE_TEXT),
     setBounds: (bounds: WebPaneBounds): Promise<void> => ipcRenderer.invoke(IPC.WEBPANE_SET_BOUNDS, bounds),
     show: (): Promise<void> => ipcRenderer.invoke(IPC.WEBPANE_SHOW),
     hide: (): Promise<void> => ipcRenderer.invoke(IPC.WEBPANE_HIDE),
@@ -217,6 +222,11 @@ const api = {
     // ready/act handshake. Lets the smoke run exercise the real user path
     // (select text -> create highlight) instead of a stubbed one.
     smokeBookmarkId: process.env['KK_SMOKE_BOOKMARK'] || null,
+    // Verification-only escape hatch: exercise the Ask AI HUD (selection ->
+    // Ask AI -> mode tabs -> dismiss) without ever reaching the swatch/note
+    // click that creates a highlight, so this can run against a bookmark
+    // that isn't the one write-testing is scoped to.
+    smokeAiOnly: process.env['KK_SMOKE_AI_ONLY'] === '1',
     notifyPdfReady: (): void => ipcRenderer.send('dev:smoke-pdf-ready'),
     notifyPdfHighlighted: (id: string): void => ipcRenderer.send('dev:smoke-pdf-highlighted', id),
     onPdfHighlight: (cb: () => void): void => {

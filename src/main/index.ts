@@ -261,6 +261,16 @@ function registerIpc(): void {
     aiService.abort(requestId)
   })
 
+  // Two independent failure surfaces are deliberately kept separate here:
+  // the invoke() return value reports only "the stream never started"
+  // (no API key configured, a synchronous validation error) — the renderer's
+  // useAiStream.startStream() turns a `{ ok: false }` return into its one
+  // onError call. Everything that goes wrong *after* the stream is underway
+  // (HTTP error, blocked/truncated response, network drop) is reported solely
+  // through AI_STREAM_ERROR_EVENT, which the hook's onStreamError listener
+  // turns into its own single onError call. Emitting both for the same
+  // failure — which the previous version did — fired onError twice for one
+  // real error.
   ipcMain.handle(IPC.AI_STREAM_START, async (event, req: AiStreamRequest) => {
     const sender = event.sender
     try {
@@ -274,11 +284,21 @@ function registerIpc(): void {
       }
       return { ok: true }
     } catch (err) {
+      // An aborted stream (user hit Stop, or a new query superseded this
+      // one) is not a failure — it's exactly what was asked for. Surfacing
+      // it as an error would flash a red error block for a click that
+      // worked correctly.
+      if (err instanceof Error && err.name === 'AbortError') {
+        return { ok: true, aborted: true }
+      }
       const message = err instanceof Error ? err.message : String(err)
       if (!sender.isDestroyed()) {
         sender.send(IPC.AI_STREAM_ERROR_EVENT, { requestId: req.requestId, error: message })
       }
-      return { ok: false, error: message }
+      // No `error` field here — the event above is the single source of
+      // truth for stream-in-progress failures. See the comment above this
+      // handler.
+      return { ok: false }
     }
   })
 
@@ -298,6 +318,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.WEBPANE_FOCUS_HIGHLIGHT, (_e, highlightId: string) => {
     webPane?.focusHighlight(highlightId)
   })
+  ipcMain.handle(IPC.WEBPANE_GET_PAGE_TEXT, () => webPane?.getPageText() ?? '')
   ipcMain.handle(IPC.WEBPANE_SET_BOUNDS, (_e, bounds: WebPaneBounds) => webPane?.setBounds(bounds))
   ipcMain.handle(IPC.WEBPANE_SHOW, () => webPane?.show())
   ipcMain.handle(IPC.WEBPANE_HIDE, () => webPane?.hide())

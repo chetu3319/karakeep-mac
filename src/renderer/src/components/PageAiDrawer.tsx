@@ -1,23 +1,49 @@
+// TODO(ai-chat-persistence): chats in this drawer are ephemeral — they live
+// only in this component's state and vanish on close, tab switch, or app
+// restart. Karakeep's API has no chat/conversation resource to persist them
+// to (see BRIEF.md's verified API surface), so saving would need a local
+// store here in the app, keyed by bookmark id, most likely a JSON file
+// alongside main/store.ts's config the same way listOrder is persisted
+// today. That also means deciding a retention/size policy (a long-running
+// research session could accumulate a lot of chat text) and whether history
+// should survive a bookmark's content being re-crawled. Out of scope for
+// now — see the footer note below and the bullet in README.md.
 import React, { useEffect, useRef, useState } from 'react'
 import type { AiChatMessage } from '../../../shared/types'
 import { useAiStream } from '../lib/useAiStream'
+import { renderMarkdown } from '../lib/miniMarkdown'
 
 export interface PageAiDrawerProps {
   open: boolean
   onClose: () => void
-  currentPage: number
-  totalPages: number
+  /**
+   * What this chat is grounded in, already phrased for display — e.g.
+   * "page 4 of 21" for a PDF, or "this article" / "this note" for the web
+   * surfaces. Replaces the old `currentPage`/`totalPages` pair, which only
+   * ever made sense for the PDF pane: DetailPane was passing the literal
+   * `currentPage={1} totalPages={1}` for every non-PDF bookmark, so every
+   * article chat claimed "Page 1 of 1" regardless of what was actually
+   * being read.
+   */
+  scopeLabel: string
   pageText: string
   docTitle: string
+  sourceUrl?: string
+  siteName?: string
+  author?: string
+  docKind?: 'pdf' | 'article' | 'note'
 }
 
 export default function PageAiDrawer({
   open,
   onClose,
-  currentPage,
-  totalPages,
+  scopeLabel,
   pageText,
-  docTitle
+  docTitle,
+  sourceUrl,
+  siteName,
+  author,
+  docKind
 }: PageAiDrawerProps): React.JSX.Element | null {
   const [messages, setMessages] = useState<AiChatMessage[]>([])
   const [input, setInput] = useState('')
@@ -36,19 +62,45 @@ export default function PageAiDrawer({
 
   if (!open) return null
 
-  const handleSend = (userQuestion: string): void => {
-    if (!userQuestion.trim() || streaming) return
-    const newHistory = [...messages, { role: 'user' as const, text: userQuestion }]
-    setMessages(newHistory)
-    setInput('')
-
+  // `history` is everything the model should see *before* the turn being
+  // sent — the caller decides what "before" means, because a retry sends
+  // the same trailing user message with the turns before it as history,
+  // while a fresh send appends a new user message and uses everything that
+  // came before it.
+  function send(prompt: string, history: AiChatMessage[]): void {
     void startStream({
       mode: 'meso-page',
-      prompt: userQuestion,
+      prompt,
       pageText,
       docTitle,
-      history: messages
+      sourceUrl,
+      siteName,
+      author,
+      docKind,
+      history
     })
+  }
+
+  const handleSend = (userQuestion: string): void => {
+    if (!userQuestion.trim() || streaming) return
+    const priorHistory = messages
+    setMessages((prev) => [...prev, { role: 'user', text: userQuestion }])
+    setInput('')
+    send(userQuestion, priorHistory)
+  }
+
+  /**
+   * A failed turn used to leave the user's message stranded in the
+   * transcript with no way forward short of retyping it. The failed turn is
+   * always the last message (nothing gets appended on error), so retrying
+   * just means replaying it with the same history it was sent with the
+   * first time.
+   */
+  const handleRetry = (): void => {
+    if (streaming || messages.length === 0) return
+    const last = messages[messages.length - 1]
+    if (last.role !== 'user') return
+    send(last.text, messages.slice(0, -1))
   }
 
   const quickAction = (promptText: string): void => {
@@ -71,9 +123,7 @@ export default function PageAiDrawer({
               Page AI Co-Pilot
             </h3>
           </div>
-          <p className="mt-0.5 text-[11px] text-neutral-500">
-            Grounded in Page {currentPage} of {totalPages || '—'}
-          </p>
+          <p className="mt-0.5 text-[11px] text-neutral-500">Grounded in {scopeLabel}</p>
         </div>
         <div className="flex items-center gap-1">
           {messages.length > 0 && (
@@ -98,6 +148,14 @@ export default function PageAiDrawer({
           </button>
         </div>
       </div>
+
+      {/* Ephemeral-chat notice — quiet, so it doesn't compete with the
+          quick-action chips, but present so nobody is surprised the
+          conversation is gone after closing the drawer. See the
+          TODO(ai-chat-persistence) at the top of this file. */}
+      <p className="border-b border-neutral-100 px-4 py-1.5 text-[10px] text-neutral-400 dark:border-neutral-800/60">
+        Chats aren't saved yet — closing this panel clears them.
+      </p>
 
       {/* Suggested Quick Prompt Chips */}
       {messages.length === 0 && !streaming && (
@@ -139,21 +197,21 @@ export default function PageAiDrawer({
             }`}
           >
             <div
-              className={`max-w-[90%] whitespace-pre-wrap rounded-xl px-3 py-2 ${
+              className={`max-w-[90%] rounded-xl px-3 py-2 ${
                 m.role === 'user'
-                  ? 'bg-emerald-600 text-white'
+                  ? 'whitespace-pre-wrap bg-emerald-600 text-white'
                   : 'bg-neutral-100 text-neutral-800 dark:bg-neutral-800 dark:text-neutral-200'
               }`}
             >
-              {m.text}
+              {m.role === 'model' ? renderMarkdown(m.text) : m.text}
             </div>
           </div>
         ))}
 
         {streaming && (
           <div className="flex flex-col items-start">
-            <div className="max-w-[90%] whitespace-pre-wrap rounded-xl bg-neutral-100 px-3 py-2 text-neutral-800 dark:bg-neutral-800 dark:text-neutral-200">
-              {text}
+            <div className="max-w-[90%] rounded-xl bg-neutral-100 px-3 py-2 text-neutral-800 dark:bg-neutral-800 dark:text-neutral-200">
+              {text ? renderMarkdown(text) : null}
               <span className="ml-1 inline-block h-3 w-1.5 animate-pulse bg-emerald-500 align-middle" />
               {!text && (
                 <span className="italic text-neutral-400">Analyzing with Gemini…</span>
@@ -166,6 +224,13 @@ export default function PageAiDrawer({
           <div className="rounded-lg bg-red-50 p-2.5 text-xs text-red-700 dark:bg-red-950/40 dark:text-red-300">
             <p className="font-semibold">Error</p>
             <p className="mt-0.5">{error}</p>
+            <button
+              type="button"
+              onClick={handleRetry}
+              className="mt-1.5 rounded border border-red-300 px-2 py-0.5 text-[11px] font-medium text-red-700 hover:bg-red-100 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950"
+            >
+              Retry
+            </button>
           </div>
         )}
 
@@ -185,7 +250,7 @@ export default function PageAiDrawer({
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={`Ask about page ${currentPage}…`}
+            placeholder={`Ask about ${scopeLabel}…`}
             disabled={streaming}
             className="flex-1 rounded-lg border border-neutral-300 bg-neutral-50 px-3 py-1.5 text-xs outline-none focus:border-emerald-500 dark:border-neutral-700 dark:bg-neutral-800"
           />

@@ -859,7 +859,124 @@ function karakeepInit(): void {
     mountPopover('selection', el, anchor)
   }
 
-  /** In-situ AI Assistant HUD for a web selection: simplify, define term, math decode, save to note. */
+  // ───────────────────────── AI context extraction ─────────────────────────
+  // The in-situ HUD used to send `document.body.innerText.slice(0, 3500)` as
+  // "page context" and no surrounding-paragraph context at all. For most
+  // articles the first 3500 characters of the *document* is nav chrome, a
+  // cookie banner, and a byline — never the paragraph the reader actually
+  // selected from. Everything below sources context from around the
+  // selection instead, which is what the product spec means by "the
+  // surrounding sentence or a window of words before and after."
+
+  /** Walks up from a selection node to the nearest block-level ancestor, so context extraction stays within one paragraph/section instead of spanning the whole document. */
+  function nearestBlockContainer(node: Node): HTMLElement {
+    let el: HTMLElement | null = node.nodeType === Node.ELEMENT_NODE ? (node as HTMLElement) : node.parentElement
+    while (el && el !== document.body) {
+      const display = getComputedStyle(el).display
+      if (display && display !== 'inline' && display !== 'inline-block' && display !== 'contents') return el
+      el = el.parentElement
+    }
+    return document.body || document.documentElement
+  }
+
+  // A raw character-count window almost always starts or ends mid-sentence,
+  // which reads as a scrap of text rather than the coherent context the
+  // model needs. These trim the *leading* partial sentence off the prefix
+  // and the *trailing* partial sentence off the suffix — but only when a
+  // real sentence boundary exists reasonably close to the cut, so a prefix
+  // that's all one long sentence isn't discarded entirely.
+  function trimLeadingPartialSentence(s: string): string {
+    const idx = s.search(/[.!?]\s+/)
+    return idx >= 0 && idx < 150 ? s.slice(idx + 1).trimStart() : s
+  }
+  function trimTrailingPartialSentence(s: string): string {
+    const candidates = ['. ', '! ', '? ', '.\n', '!\n', '?\n']
+    let cut = -1
+    for (const c of candidates) {
+      const idx = s.lastIndexOf(c)
+      if (idx > cut) cut = idx
+    }
+    return cut >= 0 && cut > s.length - 150 ? s.slice(0, cut + 1) : s
+  }
+
+  const SURROUNDING_WINDOW = 400
+
+  /** The immediate paragraph around a selection: up to ~400 chars before and after, snapped to sentence boundaries where one is nearby. */
+  function computeSurroundingContext(range: Range): string {
+    try {
+      const container = nearestBlockContainer(range.startContainer)
+      const preRange = document.createRange()
+      preRange.setStart(container, 0)
+      preRange.setEnd(range.startContainer, range.startOffset)
+      const prefix = trimLeadingPartialSentence(preRange.toString().slice(-SURROUNDING_WINDOW))
+
+      const postRange = document.createRange()
+      postRange.setStart(range.endContainer, range.endOffset)
+      postRange.setEnd(container, container.childNodes.length)
+      const suffix = trimTrailingPartialSentence(postRange.toString().slice(0, SURROUNDING_WINDOW))
+
+      return `${prefix} ${range.toString()} ${suffix}`.replace(/\s+/g, ' ').trim()
+    } catch {
+      return ''
+    }
+  }
+
+  const PAGE_TEXT_HALF_WINDOW = 1750
+
+  /** Page text centered on the selection rather than sliced from the top of the document — see the section comment above. */
+  function computePageTextAroundSelection(range: Range): string {
+    const full = document.body?.innerText || ''
+    if (!full) return ''
+    try {
+      const preRange = document.createRange()
+      preRange.setStart(document.body, 0)
+      preRange.setEnd(range.startContainer, range.startOffset)
+      // This is an approximate offset into `full`: Range.toString() and
+      // .innerText don't collapse whitespace identically. Good enough to
+      // center a window on — exactness isn't the goal, "near the selection
+      // rather than the top of the page" is.
+      const approxOffset = preRange.toString().length
+      const start = Math.max(0, approxOffset - PAGE_TEXT_HALF_WINDOW)
+      const end = Math.min(full.length, approxOffset + PAGE_TEXT_HALF_WINDOW)
+      return full.slice(start, end)
+    } catch {
+      return full.slice(0, PAGE_TEXT_HALF_WINDOW * 2)
+    }
+  }
+
+  /** Website/source metadata the product spec asks be injected alongside the selection — read straight off the live page, which is the one place this app can see it for a `link` bookmark. */
+  function getPageSourceMetadata(): { sourceUrl: string; siteName?: string; author?: string } {
+    const metaContent = (selector: string): string | undefined =>
+      document.querySelector<HTMLMetaElement>(selector)?.content || undefined
+    const siteName = metaContent('meta[property="og:site_name"]') || location.hostname
+    const author =
+      metaContent('meta[name="author"]') ||
+      metaContent('meta[property="article:author"]') ||
+      metaContent('meta[name="twitter:creator"]')
+    return { sourceUrl: location.href, siteName, author }
+  }
+
+  // Strips Markdown syntax down to clean plain text for the vanilla-DOM
+  // popover. This popover renders inside an untrusted third-party page (see
+  // the file header), so it must never use innerHTML on model output —
+  // unlike the two React surfaces (SelectionAiHUD, PageAiDrawer), which can
+  // safely build real elements via lib/miniMarkdown.tsx, this one sticks to
+  // `.textContent` and settles for readable plain text instead of rendered
+  // formatting.
+  function stripMarkdownToPlainText(md: string): string {
+    return md
+      .replace(/```[a-zA-Z0-9]*\n?/g, '')
+      .replace(/```/g, '')
+      .replace(/^#{1,6}\s+/gm, '')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/__([^_]+)__/g, '$1')
+      .replace(/\*([^*]+)\*/g, '$1')
+      .replace(/(^|\s)_([^_]+)_(?=\s|$)/g, '$1$2')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/^\s*[-*]\s+/gm, '• ')
+  }
+
+  /** In-situ AI Assistant HUD for a web selection: explain, dejargonify, define, math decode, save to note. */
   function openAiPopover(range: Range, text: string): void {
     const el = newPopoverEl()
     el.style.cssText =
@@ -883,11 +1000,22 @@ function karakeepInit(): void {
     header.style.cssText =
       'border-bottom: 1px solid rgba(255,255,255,0.12); padding-bottom: 6px; margin-bottom: 2px;'
 
+    // Same four modes, same order and labels, as the PDF/React HUD
+    // (SelectionAiHUD.tsx) — Explain / Dejargonify / Define is the exact
+    // spec wording, Math stays as a fourth mode for the paper-reading case.
     const modes = [
-      { id: 'micro-dejargon', label: '⚡ Simplify' },
-      { id: 'micro-explain', label: '📖 Term' },
+      { id: 'micro-explain', label: '💡 Explain' },
+      { id: 'micro-dejargon', label: '⚡ Dejargonify' },
+      { id: 'micro-define', label: '📖 Define' },
       { id: 'micro-formula', label: '🧮 Math' }
     ]
+
+    // Computed once per popover open rather than per mode switch: the
+    // selection and its surrounding DOM don't change while this popover is
+    // up, so there's no reason to re-walk the DOM on every button click.
+    const surroundingContext = computeSurroundingContext(range)
+    const pageTextAroundSelection = computePageTextAroundSelection(range)
+    const sourceMeta = getPageSourceMetadata()
 
     const buttons: HTMLElement[] = []
     function startQuery(mode: string): void {
@@ -904,12 +1032,14 @@ function karakeepInit(): void {
         onChunk: (delta) => {
           if (body.textContent === 'Thinking with Gemini…') body.textContent = ''
           accumulatedText += delta
-          body.textContent = accumulatedText
+          // .textContent only, never innerHTML — this popover lives inside
+          // the loaded page's own document, which is untrusted content.
+          body.textContent = stripMarkdownToPlainText(accumulatedText)
           reposition()
         },
         onDone: (fullText) => {
           accumulatedText = fullText
-          body.textContent = fullText
+          body.textContent = stripMarkdownToPlainText(fullText)
           saveBtn.style.display = 'inline-flex'
           reposition()
         },
@@ -922,8 +1052,13 @@ function karakeepInit(): void {
         requestId: activeRequestId,
         mode,
         selectionText: text,
-        pageText: document.body?.innerText?.slice(0, 3500) || '',
-        docTitle: document.title
+        surroundingContext,
+        pageText: pageTextAroundSelection,
+        docTitle: document.title,
+        sourceUrl: sourceMeta.sourceUrl,
+        siteName: sourceMeta.siteName,
+        author: sourceMeta.author,
+        docKind: 'article'
       })
     }
 
@@ -1004,7 +1139,7 @@ function karakeepInit(): void {
     el.appendChild(footer)
 
     mountPopover('selection', el, anchor)
-    startQuery('micro-dejargon')
+    startQuery('micro-explain')
   }
 
   /** Popover for an existing highlight: recolour, note, copy, delete. */
@@ -1378,6 +1513,15 @@ function karakeepInit(): void {
   }
 
   document.addEventListener('mouseup', (e) => {
+    // A press on our own popover — including the AI HUD's mode tabs, which
+    // deliberately leave the underlying window selection alone so "Ask AI"
+    // and "Note" still have text to act on — must not schedule a selection
+    // check. That check would fire 150ms later, find the same selection
+    // still live, and call openSelectionPopover() again: closePopover()
+    // tears down whatever is showing (the AI HUD, mid-answer) and a bare
+    // colour-swatch popover replaces it. That's what made clicking any
+    // control inside the AI popover look like the popover just vanishing.
+    if (overlay && e.composedPath?.().includes(overlay.host)) return
     // A plain click on an existing highlight opens that highlight's popover
     // instead — don't let the (collapsed) selection check race it. A drag
     // that merely *ends* on a highlight is still a selection, and must

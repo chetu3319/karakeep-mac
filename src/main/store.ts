@@ -14,6 +14,14 @@ interface OnDiskConfig {
   customHeaders?: Record<string, string>
   encryptedApiKey?: string // base64
   encryptedGeminiApiKey?: string // base64
+  // Set instead of encryptedGeminiApiKey only when safeStorage was
+  // unavailable at save time (see setAiConfig). Keeping the two fields
+  // separate means a decrypt *failure* on encryptedGeminiApiKey can never
+  // be confused with "this was deliberately stored unencrypted" — the old
+  // code conflated them by catching decryptString() and falling back to
+  // treating the (still-encrypted, undecryptable) blob as if it were the
+  // plaintext key, which handed Google a base64 blob instead of a real key.
+  plaintextGeminiApiKey?: string
   geminiModel?: string
   // Sibling ordering within a list parent (or 'root' for top level) is a
   // client-only concept — Karakeep's /lists response has no order/rank
@@ -39,6 +47,21 @@ export interface ResolvedConfig {
 export interface ResolvedAiConfig {
   geminiApiKey: string
   geminiModel: string
+}
+
+// The only two models the rest of the app knows how to prompt correctly
+// (see main/ai.ts's thinkingLevel/maxOutputTokens tables, which are keyed
+// off mode, not model, but were tuned against these two). Anything else —
+// most importantly a config written before this migration, holding
+// `gemini-2.5-flash`, `gemini-1.5-flash` or `gemini-1.5-pro` — 404s against
+// the live API on every single request, so it is treated as unset rather
+// than sent through.
+const SUPPORTED_GEMINI_MODELS = ['gemini-3.7-flash', 'gemini-3.1-pro-preview'] as const
+const DEFAULT_GEMINI_MODEL = 'gemini-3.7-flash'
+
+function resolveGeminiModel(stored: string | undefined): string {
+  if (stored && (SUPPORTED_GEMINI_MODELS as readonly string[]).includes(stored)) return stored
+  return DEFAULT_GEMINI_MODEL
 }
 
 function configPath(): string {
@@ -67,32 +90,48 @@ export function getConfig(): {
   hasApiKey: boolean
   hasGeminiApiKey: boolean
   geminiModel: string
+  // True only when a Gemini key is on disk in `plaintextGeminiApiKey` — i.e.
+  // safeStorage was unavailable when it was saved. Settings uses this to
+  // show a warning; it is never true just because decryption is possible.
+  geminiKeyUnencrypted: boolean
 } {
   const disk = readDisk()
-  const hasGeminiKey = !!disk.encryptedGeminiApiKey || !!process.env.GEMINI_API_KEY || !!process.env.GOOGLE_API_KEY
+  const hasGeminiKey =
+    !!disk.encryptedGeminiApiKey ||
+    !!disk.plaintextGeminiApiKey ||
+    !!process.env.GEMINI_API_KEY ||
+    !!process.env.GOOGLE_API_KEY
   return {
     baseUrl: disk.baseUrl || '',
     customHeaders: disk.customHeaders || {},
     hasApiKey: !!disk.encryptedApiKey,
     hasGeminiApiKey: hasGeminiKey,
-    geminiModel: disk.geminiModel || 'gemini-2.5-flash'
+    geminiModel: resolveGeminiModel(disk.geminiModel),
+    geminiKeyUnencrypted: !!disk.plaintextGeminiApiKey
   }
 }
 
 export function getResolvedAiConfig(): ResolvedAiConfig | null {
   const disk = readDisk()
-  const model = disk.geminiModel || 'gemini-2.5-flash'
+  const model = resolveGeminiModel(disk.geminiModel)
   let apiKey = ''
 
-  if (disk.encryptedGeminiApiKey) {
-    if (safeStorage.isEncryptionAvailable()) {
-      try {
-        apiKey = safeStorage.decryptString(Buffer.from(disk.encryptedGeminiApiKey, 'base64'))
-      } catch {
-        apiKey = disk.encryptedGeminiApiKey
-      }
-    } else {
-      apiKey = disk.encryptedGeminiApiKey
+  // `plaintextGeminiApiKey` and `encryptedGeminiApiKey` are mutually
+  // exclusive by construction (see setAiConfig) — which one is set records
+  // how the key was actually stored, so there is no ambiguity to resolve
+  // here the way the old single-field version had to guess at.
+  if (disk.plaintextGeminiApiKey) {
+    apiKey = disk.plaintextGeminiApiKey
+  } else if (disk.encryptedGeminiApiKey && safeStorage.isEncryptionAvailable()) {
+    try {
+      apiKey = safeStorage.decryptString(Buffer.from(disk.encryptedGeminiApiKey, 'base64'))
+    } catch {
+      // A genuine decrypt failure (corrupted blob, Keychain entry deleted
+      // out from under us, key material from a different machine). The old
+      // code fell back to using the raw encrypted/base64 bytes *as* the API
+      // key here, which just sends Google garbage instead of failing
+      // cleanly — treat this the same as "no key configured".
+      apiKey = ''
     }
   }
 
@@ -112,10 +151,21 @@ export function setAiConfig(input: { geminiApiKey?: string; geminiModel?: string
   if (input.geminiApiKey !== undefined) {
     if (!input.geminiApiKey) {
       delete disk.encryptedGeminiApiKey
+      delete disk.plaintextGeminiApiKey
     } else if (safeStorage.isEncryptionAvailable()) {
       disk.encryptedGeminiApiKey = safeStorage.encryptString(input.geminiApiKey).toString('base64')
+      delete disk.plaintextGeminiApiKey
     } else {
-      disk.encryptedGeminiApiKey = input.geminiApiKey
+      // No Keychain available — this mirrors the deliberate fallback in
+      // setConfig()'s sibling for the Karakeep API key (commit c905f0d):
+      // storing the key unencrypted beats not storing it at all, since the
+      // whole AI feature is otherwise unusable on this machine. The
+      // distinct field name is what lets getResolvedAiConfig() and
+      // getConfig() tell "stored in the clear on purpose" apart from "the
+      // encrypted blob failed to decrypt" — see the comments there.
+      disk.plaintextGeminiApiKey = input.geminiApiKey
+      delete disk.encryptedGeminiApiKey
+      console.warn('[store] safeStorage encryption unavailable; Gemini API key will be stored unencrypted')
     }
   }
   writeDisk(disk)

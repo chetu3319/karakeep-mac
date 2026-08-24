@@ -9,6 +9,10 @@ export interface StartStreamOptions {
   docTitle?: string
   prompt?: string
   history?: AiChatMessage[]
+  sourceUrl?: string
+  siteName?: string
+  author?: string
+  docKind?: 'pdf' | 'article' | 'note'
 }
 
 export function useAiStream(options?: {
@@ -86,10 +90,19 @@ export function useAiStream(options?: {
       }
 
       const res = await window.kk.ai.startStream(request)
-      if (!res.ok) {
+      // `res.error` is only ever set for a failure to *start* the stream (no
+      // key configured, a bad request) — main/index.ts deliberately omits it
+      // for a failure *during* streaming, because that path already reported
+      // itself through AI_STREAM_ERROR_EVENT (handled by the onStreamError
+      // listener above) and calling onError here too would fire it twice for
+      // one real error. `res.ok === false` with no `error` also covers a
+      // stream that was aborted mid-flight; nothing to surface there either.
+      if (!res.ok && res.error) {
         setStreaming(false)
-        setError(res.error || 'Failed to start AI generation')
-        callbacksRef.current?.onError?.(res.error || 'Failed to start AI generation')
+        setError(res.error)
+        callbacksRef.current?.onError?.(res.error)
+      } else if (!res.ok) {
+        setStreaming(false)
       }
     },
     [abortStream]

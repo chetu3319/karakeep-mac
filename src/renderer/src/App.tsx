@@ -30,7 +30,15 @@ export default function App(): React.JSX.Element {
   // server-side just yields an empty list pane, which is self-explanatory
   // and one sidebar click away from fixed — better than always dumping
   // everyone back at "All bookmarks".
-  const [selection, setSelection] = useState<Selection>(() => parseSelection(readPref('selection', null)))
+  // KK_SMOKE_BOOKMARK pins a run to one bookmark that may not belong to
+  // whatever list a previous manual session left selected in localStorage
+  // — the pinned-bookmark effect below only searches the *current*
+  // selection's list, so start pinned runs on "All bookmarks" rather than
+  // replaying the persisted selection, or the pin can silently miss and
+  // the fallback grabs list[0] instead of the bookmark the run asked for.
+  const [selection, setSelection] = useState<Selection>(() =>
+    window.kk.dev.smokeBookmarkId ? { type: 'all' } : parseSelection(readPref('selection', null))
+  )
   const [selectedBookmark, setSelectedBookmark] = useState<Bookmark | null>(null)
   const [focusHighlightId, setFocusHighlightId] = useState<string | null>(null)
   const [addingBookmark, setAddingBookmark] = useState(false)
