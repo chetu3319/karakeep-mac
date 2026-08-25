@@ -2,12 +2,14 @@ import { app, BrowserWindow, ipcMain, screen, shell, Menu } from 'electron'
 import { join } from 'node:path'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { KarakeepApiClient } from './api'
+import { aiService } from './ai'
 import * as store from './store'
 import { loadDotEnvLocal } from './env'
 import { buildAppMenu } from './menu'
 import { WebPaneManager } from './webpane'
 import { IPC } from '../shared/ipc'
 import type {
+  AiStreamRequest,
   AssetUploadInput,
   AuthResult,
   BookmarkListFilter,
@@ -245,6 +247,61 @@ function registerIpc(): void {
     store.setListOrder(order)
   })
 
+  // ─────────────────────────── Gemini AI handlers ───────────────────────────
+  ipcMain.handle(IPC.AI_SET_CONFIG, (_e, input: { geminiApiKey?: string; geminiModel?: string }) => {
+    store.setAiConfig(input)
+    return store.getConfig()
+  })
+
+  ipcMain.handle(IPC.AI_TEST_CONNECTION, async (_e, input?: { apiKey?: string; model?: string }) => {
+    return aiService.testConnection(input?.apiKey, input?.model)
+  })
+
+  ipcMain.handle(IPC.AI_STREAM_ABORT, (_e, requestId: string) => {
+    aiService.abort(requestId)
+  })
+
+  // Two independent failure surfaces are deliberately kept separate here:
+  // the invoke() return value reports only "the stream never started"
+  // (no API key configured, a synchronous validation error) — the renderer's
+  // useAiStream.startStream() turns a `{ ok: false }` return into its one
+  // onError call. Everything that goes wrong *after* the stream is underway
+  // (HTTP error, blocked/truncated response, network drop) is reported solely
+  // through AI_STREAM_ERROR_EVENT, which the hook's onStreamError listener
+  // turns into its own single onError call. Emitting both for the same
+  // failure — which the previous version did — fired onError twice for one
+  // real error.
+  ipcMain.handle(IPC.AI_STREAM_START, async (event, req: AiStreamRequest) => {
+    const sender = event.sender
+    try {
+      const fullText = await aiService.streamRequest(req, (delta) => {
+        if (!sender.isDestroyed()) {
+          sender.send(IPC.AI_STREAM_CHUNK_EVENT, { requestId: req.requestId, delta })
+        }
+      })
+      if (!sender.isDestroyed()) {
+        sender.send(IPC.AI_STREAM_DONE_EVENT, { requestId: req.requestId, fullText })
+      }
+      return { ok: true }
+    } catch (err) {
+      // An aborted stream (user hit Stop, or a new query superseded this
+      // one) is not a failure — it's exactly what was asked for. Surfacing
+      // it as an error would flash a red error block for a click that
+      // worked correctly.
+      if (err instanceof Error && err.name === 'AbortError') {
+        return { ok: true, aborted: true }
+      }
+      const message = err instanceof Error ? err.message : String(err)
+      if (!sender.isDestroyed()) {
+        sender.send(IPC.AI_STREAM_ERROR_EVENT, { requestId: req.requestId, error: message })
+      }
+      // No `error` field here — the event above is the single source of
+      // truth for stream-in-progress failures. See the comment above this
+      // handler.
+      return { ok: false }
+    }
+  })
+
   ipcMain.on(IPC.WINDOW_MINIMIZE, () => mainWindow?.minimize())
   ipcMain.on(IPC.WINDOW_MAXIMIZE, () => {
     if (!mainWindow) return
@@ -261,6 +318,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.WEBPANE_FOCUS_HIGHLIGHT, (_e, highlightId: string) => {
     webPane?.focusHighlight(highlightId)
   })
+  ipcMain.handle(IPC.WEBPANE_GET_PAGE_TEXT, () => webPane?.getPageText() ?? '')
   ipcMain.handle(IPC.WEBPANE_SET_BOUNDS, (_e, bounds: WebPaneBounds) => webPane?.setBounds(bounds))
   ipcMain.handle(IPC.WEBPANE_SHOW, () => webPane?.show())
   ipcMain.handle(IPC.WEBPANE_HIDE, () => webPane?.hide())

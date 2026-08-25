@@ -41,6 +41,13 @@ export default function SettingsDialog({
   const [apiKey, setApiKey] = useState('')
   const [headersText, setHeadersText] = useState('')
   const [hasStoredKey, setHasStoredKey] = useState(false)
+  const [geminiApiKey, setGeminiApiKey] = useState('')
+  const [geminiModel, setGeminiModel] = useState('gemini-3.7-flash')
+  const [hasStoredGeminiKey, setHasStoredGeminiKey] = useState(false)
+  const [geminiKeyUnencrypted, setGeminiKeyUnencrypted] = useState(false)
+  const [removingGeminiKey, setRemovingGeminiKey] = useState(false)
+  const [testingAi, setTestingAi] = useState(false)
+  const [aiTestResult, setAiTestResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
@@ -49,6 +56,9 @@ export default function SettingsDialog({
     void window.kk.config.get().then((cfg) => {
       setBaseUrl(cfg.baseUrl || '')
       setHasStoredKey(cfg.hasApiKey)
+      setHasStoredGeminiKey(!!cfg.hasGeminiApiKey)
+      setGeminiKeyUnencrypted(!!cfg.geminiKeyUnencrypted)
+      if (cfg.geminiModel) setGeminiModel(cfg.geminiModel)
       setHeadersText(
         Object.entries(cfg.customHeaders || {})
           .map(([k, v]) => `${k}: ${v}`)
@@ -56,6 +66,47 @@ export default function SettingsDialog({
       )
     })
   }, [])
+
+  async function testAi(): Promise<void> {
+    setTestingAi(true)
+    setAiTestResult(null)
+    try {
+      const res = await window.kk.ai.testConnection({
+        apiKey: geminiApiKey.trim() || undefined,
+        model: geminiModel
+      })
+      if (res.ok) {
+        setAiTestResult({ ok: true, message: `Connected to ${res.model || geminiModel}` })
+      } else {
+        setAiTestResult({ ok: false, message: res.error || 'Connection failed' })
+      }
+    } catch (err) {
+      setAiTestResult({ ok: false, message: err instanceof Error ? err.message : String(err) })
+    } finally {
+      setTestingAi(false)
+    }
+  }
+
+  /**
+   * `setConfig` (and `setAiConfig`) treat an *empty* key as "leave the
+   * stored one alone" — that's what lets "just change the server URL" work
+   * without blanking a perfectly good key (see the file-level comment).
+   * That convention has no way to express "actually delete it," so clearing
+   * a key needs its own explicit call that sends the empty string on
+   * purpose rather than routing through the field the form normally saves.
+   */
+  async function removeGeminiKey(): Promise<void> {
+    setRemovingGeminiKey(true)
+    try {
+      await window.kk.ai.setConfig({ geminiApiKey: '' })
+      setHasStoredGeminiKey(false)
+      setGeminiKeyUnencrypted(false)
+      setGeminiApiKey('')
+      setAiTestResult(null)
+    } finally {
+      setRemovingGeminiKey(false)
+    }
+  }
 
   async function save(e: React.FormEvent): Promise<void> {
     e.preventDefault()
@@ -71,10 +122,31 @@ export default function SettingsDialog({
         if (k) customHeaders[k] = line.slice(idx + 1).trim()
       }
 
-      // An empty key field means "leave the stored one alone". config.set
-      // treats an empty string that way; sending it explicitly keeps that
-      // contract in one place rather than branching here.
+      // Save Karakeep server config
       await window.kk.config.set({ baseUrl: baseUrl.trim(), apiKey: apiKey.trim(), customHeaders })
+
+      // The Gemini key is saved before the Karakeep auth test below runs,
+      // so a failed auth test (bad server URL, bad Karakeep API key) still
+      // leaves a just-typed Gemini key persisted even though the dialog
+      // reports failure and keeps itself open. This is intentional, not an
+      // oversight: the two credentials are for entirely independent
+      // services (Google's API vs. this user's Karakeep instance), and
+      // there is no shared transaction to roll back — Gemini's key isn't
+      // even validated by `auth.test()`. Discarding a correctly-typed
+      // Gemini key just because the *Karakeep* fields had a typo would be
+      // the more surprising behaviour, and would force retyping a secret
+      // for no reason connected to it.
+      const aiCfg = await window.kk.ai.setConfig({
+        geminiApiKey: geminiApiKey.trim() || undefined,
+        geminiModel
+      })
+      if (geminiApiKey.trim()) {
+        setGeminiApiKey('')
+        setHasStoredGeminiKey(true)
+        // Reflects however it actually got stored (encrypted vs. plaintext
+        // fallback) rather than assuming encryption succeeded.
+        setGeminiKeyUnencrypted(!!aiCfg.geminiKeyUnencrypted)
+      }
 
       const result = await window.kk.auth.test()
       if (!result.ok || !result.user) {
@@ -178,6 +250,71 @@ export default function SettingsDialog({
                 className="w-full rounded-lg border border-neutral-300 bg-transparent px-3 py-2 font-mono text-xs outline-none focus:border-emerald-500 dark:border-neutral-700"
               />
             </label>
+          </section>
+
+          <section>
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-neutral-400">AI Assistant (Gemini)</h3>
+              <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">Flow Co-Pilot</span>
+            </div>
+            <label className="mb-3 block text-sm">
+              <span className="mb-1 block text-xs text-neutral-600 dark:text-neutral-400">Model</span>
+              <select
+                value={geminiModel}
+                onChange={(e) => setGeminiModel(e.target.value)}
+                className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-500 dark:border-neutral-700 dark:bg-neutral-900"
+              >
+                <option value="gemini-3.7-flash">Gemini 3.7 Flash (fast, for in-situ answers)</option>
+                <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro (preview — deeper analysis)</option>
+              </select>
+            </label>
+            <label className="mb-2 block text-sm">
+              <span className="mb-1 block text-xs text-neutral-600 dark:text-neutral-400">Gemini API key</span>
+              <input
+                type="password"
+                value={geminiApiKey}
+                onChange={(e) => setGeminiApiKey(e.target.value)}
+                placeholder={hasStoredGeminiKey ? 'Stored securely in Keychain — leave blank to keep it' : 'Paste your Gemini API key'}
+                spellCheck={false}
+                className="w-full rounded-lg border border-neutral-300 bg-transparent px-3 py-2 text-sm outline-none focus:border-emerald-500 dark:border-neutral-700"
+              />
+            </label>
+            {geminiKeyUnencrypted && (
+              <p className="mb-2 rounded bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+                Keychain encryption isn't available on this machine, so this key is stored unencrypted in the app's config file.
+              </p>
+            )}
+            <div className="mt-2 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void testAi()}
+                  disabled={testingAi}
+                  className="rounded border border-neutral-300 px-2.5 py-1 text-xs text-neutral-700 hover:bg-neutral-100 disabled:opacity-50 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
+                >
+                  {testingAi ? 'Testing…' : 'Test Gemini'}
+                </button>
+                {hasStoredGeminiKey && (
+                  <button
+                    type="button"
+                    onClick={() => void removeGeminiKey()}
+                    disabled={removingGeminiKey}
+                    className="rounded border border-neutral-300 px-2.5 py-1 text-xs text-neutral-500 hover:border-red-300 hover:bg-red-50 hover:text-red-600 disabled:opacity-50 dark:border-neutral-700 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+                  >
+                    {removingGeminiKey ? 'Removing…' : 'Remove key'}
+                  </button>
+                )}
+              </div>
+              {aiTestResult && (
+                <span
+                  className={`text-xs font-medium ${
+                    aiTestResult.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
+                  }`}
+                >
+                  {aiTestResult.message}
+                </span>
+              )}
+            </div>
           </section>
 
           {error && (

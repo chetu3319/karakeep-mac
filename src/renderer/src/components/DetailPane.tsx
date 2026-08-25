@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { hexForColor as colorFor } from '../../../shared/highlightUi'
 import type { Bookmark, Highlight, UpdateBookmarkInput, WebPaneState } from '../../../shared/types'
 import { useBookmark, useDeleteBookmark, useHighlightsForBookmark, useUpdateBookmark } from '../lib/queries'
+import { useBookmarkText } from '../lib/useBookmarkText'
 import { displayForBookmark } from '../lib/bookmarkDisplay'
 import { usePref } from '../lib/prefs'
 import { errMessage } from '../lib/errors'
@@ -14,6 +15,7 @@ import ListMembership from './ListMembership'
 import PdfPane from './PdfPane'
 import TagEditor from './TagEditor'
 import WebPane from './WebPane'
+import PageAiDrawer from './PageAiDrawer'
 
 type Tab = 'preview' | 'pdf' | 'web'
 
@@ -62,6 +64,7 @@ export default function DetailPane({
   // screen. As a rail it stays put across tabs. Persisted, because whether
   // you work with highlights open is a habit, not a per-bookmark decision.
   const [railOpen, setRailOpen] = usePref('highlightRailOpen', false)
+  const [webAiDrawerOpen, setWebAiDrawerOpen] = useState(false)
 
   // Navigation state for the live pane. It lives here rather than in
   // WebPane because the back/forward/reload buttons moved into this
@@ -106,6 +109,13 @@ export default function DetailPane({
   // early return that used to be the only place `display` was computed.
   const display = useMemo(() => (bookmark ? displayForBookmark(bookmark) : null), [bookmark])
   const url = display?.url
+
+  // Grounds the sidebar chat (PageAiDrawer, below) in the bookmark's real
+  // content rather than a two-line meta description — see
+  // lib/useBookmarkText.ts. Called unconditionally (before the `!bookmark`
+  // early return) because it's a hook; `enabled: !!bookmark` inside it makes
+  // that safe to call with a possibly-null bookmark.
+  const bookmarkText = useBookmarkText(bookmark, tab === 'web')
 
   /**
    * Where a bookmark opens.
@@ -346,6 +356,23 @@ export default function DetailPane({
               <span className="tabular-nums">{highlights.length}</span>
             </button>
           )}
+
+          {tab !== 'pdf' && (
+            <button
+              type="button"
+              onClick={() => setWebAiDrawerOpen((prev) => !prev)}
+              aria-pressed={webAiDrawerOpen}
+              title={webAiDrawerOpen ? 'Close AI Co-Pilot' : 'Open AI Co-Pilot'}
+              className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition ${
+                webAiDrawerOpen
+                  ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                  : 'text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800'
+              }`}
+            >
+              <span className="text-emerald-500">✨</span>
+              <span>AI Co-Pilot</span>
+            </button>
+          )}
           <button
             type="button"
             data-testid="detail-favourite"
@@ -513,11 +540,14 @@ export default function DetailPane({
               <PdfPane
                 assetId={pdfAssetId}
                 fileName={pdfFileName}
+                title={display?.title || bookmark.title || pdfFileName}
                 bookmarkId={bookmark.id}
                 highlights={highlights}
                 focusHighlightId={tab === 'pdf' ? focusHighlightId : null}
                 onFocusHandled={clearFocus}
                 onAnchorStatus={handleAnchorStatus}
+                sourceUrl={content?.sourceUrl || content?.url || undefined}
+                author={content?.author || content?.publisher || undefined}
               />
             </div>
           )}
@@ -553,6 +583,22 @@ export default function DetailPane({
             inPdf={!!pdfAssetId}
             onOpen={openHighlight}
             onClose={() => setRailOpen(false)}
+          />
+        )}
+
+        {webAiDrawerOpen && tab !== 'pdf' && (
+          <PageAiDrawer
+            open={webAiDrawerOpen}
+            onClose={() => setWebAiDrawerOpen(false)}
+            scopeLabel={
+              display?.kind === 'text' ? 'this note' : display?.kind === 'link' ? 'this article' : 'this page'
+            }
+            pageText={bookmarkText.data?.text || bookmark.title || ''}
+            docTitle={title}
+            sourceUrl={content?.url || content?.sourceUrl || undefined}
+            siteName={content?.publisher || undefined}
+            author={content?.author || undefined}
+            docKind={display?.kind === 'text' ? 'note' : 'article'}
           />
         )}
       </div>

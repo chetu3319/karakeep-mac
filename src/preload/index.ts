@@ -1,6 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/ipc'
 import type {
+  AiStreamChunk,
+  AiStreamDone,
+  AiStreamError,
+  AiStreamRequest,
+  AiTestResult,
   AppConfig,
   AssetUploadInput,
   AuthResult,
@@ -87,6 +92,44 @@ const api = {
     getBytes: (assetId: string): Promise<ArrayBuffer> => ipcRenderer.invoke(IPC.API_GET_ASSET_BYTES, assetId),
     upload: (input: AssetUploadInput): Promise<UploadedAsset> => ipcRenderer.invoke(IPC.API_UPLOAD_ASSET, input)
   },
+  ai: (() => {
+    const chunkListeners = new Set<(chunk: AiStreamChunk) => void>()
+    const doneListeners = new Set<(done: AiStreamDone) => void>()
+    const errorListeners = new Set<(err: AiStreamError) => void>()
+
+    ipcRenderer.on(IPC.AI_STREAM_CHUNK_EVENT, (_e, chunk: AiStreamChunk) => {
+      chunkListeners.forEach((cb) => cb(chunk))
+    })
+    ipcRenderer.on(IPC.AI_STREAM_DONE_EVENT, (_e, done: AiStreamDone) => {
+      doneListeners.forEach((cb) => cb(done))
+    })
+    ipcRenderer.on(IPC.AI_STREAM_ERROR_EVENT, (_e, err: AiStreamError) => {
+      errorListeners.forEach((cb) => cb(err))
+    })
+
+    return {
+      setConfig: (input: { geminiApiKey?: string; geminiModel?: string }): Promise<AppConfig> =>
+        ipcRenderer.invoke(IPC.AI_SET_CONFIG, input),
+      testConnection: (input?: { apiKey?: string; model?: string }): Promise<AiTestResult> =>
+        ipcRenderer.invoke(IPC.AI_TEST_CONNECTION, input),
+      startStream: (req: AiStreamRequest): Promise<{ ok: boolean; error?: string }> =>
+        ipcRenderer.invoke(IPC.AI_STREAM_START, req),
+      abortStream: (requestId: string): Promise<void> =>
+        ipcRenderer.invoke(IPC.AI_STREAM_ABORT, requestId),
+      onStreamChunk: (cb: (chunk: AiStreamChunk) => void): (() => void) => {
+        chunkListeners.add(cb)
+        return () => chunkListeners.delete(cb)
+      },
+      onStreamDone: (cb: (done: AiStreamDone) => void): (() => void) => {
+        doneListeners.add(cb)
+        return () => doneListeners.delete(cb)
+      },
+      onStreamError: (cb: (err: AiStreamError) => void): (() => void) => {
+        errorListeners.add(cb)
+        return () => errorListeners.delete(cb)
+      }
+    }
+  })(),
   window: {
     minimize: (): void => ipcRenderer.send(IPC.WINDOW_MINIMIZE),
     maximize: (): void => ipcRenderer.send(IPC.WINDOW_MAXIMIZE),
@@ -129,6 +172,11 @@ const api = {
       ipcRenderer.invoke(IPC.WEBPANE_APPLY_HIGHLIGHTS, { highlights }),
     focusHighlight: (highlightId: string): Promise<void> =>
       ipcRenderer.invoke(IPC.WEBPANE_FOCUS_HIGHLIGHT, highlightId),
+    // Reads document.body.innerText out of the live WebContentsView — see
+    // main/webpane.ts's getPageText(). Used by lib/useBookmarkText.ts to
+    // ground the sidebar chat in the actual rendered page rather than only
+    // whatever Karakeep's crawler captured at save time.
+    getPageText: (): Promise<string> => ipcRenderer.invoke(IPC.WEBPANE_GET_PAGE_TEXT),
     setBounds: (bounds: WebPaneBounds): Promise<void> => ipcRenderer.invoke(IPC.WEBPANE_SET_BOUNDS, bounds),
     show: (): Promise<void> => ipcRenderer.invoke(IPC.WEBPANE_SHOW),
     hide: (): Promise<void> => ipcRenderer.invoke(IPC.WEBPANE_HIDE),
@@ -174,6 +222,11 @@ const api = {
     // ready/act handshake. Lets the smoke run exercise the real user path
     // (select text -> create highlight) instead of a stubbed one.
     smokeBookmarkId: process.env['KK_SMOKE_BOOKMARK'] || null,
+    // Verification-only escape hatch: exercise the Ask AI HUD (selection ->
+    // Ask AI -> mode tabs -> dismiss) without ever reaching the swatch/note
+    // click that creates a highlight, so this can run against a bookmark
+    // that isn't the one write-testing is scoped to.
+    smokeAiOnly: process.env['KK_SMOKE_AI_ONLY'] === '1',
     notifyPdfReady: (): void => ipcRenderer.send('dev:smoke-pdf-ready'),
     notifyPdfHighlighted: (id: string): void => ipcRenderer.send('dev:smoke-pdf-highlighted', id),
     onPdfHighlight: (cb: () => void): void => {

@@ -247,11 +247,81 @@ export interface AppConfig {
   baseUrl: string
   customHeaders?: Record<string, string>
   hasApiKey: boolean
+  hasGeminiApiKey?: boolean
+  geminiModel?: string
+  /** True when the stored Gemini key is unencrypted on disk (safeStorage unavailable on this machine). See store.ts. */
+  geminiKeyUnencrypted?: boolean
 }
 
 export interface AuthResult {
   ok: boolean
   user?: User
+  error?: string
+}
+
+// ─────────────────────────── AI Assistant (Gemini) ───────────────────────────
+// The three in-situ modes match the product spec (Explain / Dejargonify /
+// Define) verbatim; `micro-formula` ("Math") is a fourth mode kept because it
+// is genuinely useful for the arxiv/paper use case, even though the spec only
+// names three. `micro-explain` used to *define* a term — it now explains a
+// selection in the document's own argument, and the old defining behaviour
+// moved to the new `micro-define`, so neither label lies about what it does.
+export type AiMode =
+  | 'micro-explain'
+  | 'micro-dejargon'
+  | 'micro-define'
+  | 'micro-formula'
+  | 'meso-page'
+  | 'macro-chat'
+  | 'custom'
+
+export interface AiChatMessage {
+  role: 'user' | 'model'
+  text: string
+}
+
+/**
+ * `docKind` drives the noun the prompt builder uses ("paper" / "article" /
+ * "note") so the system prompt stops hardcoding "this paper" for a blog post
+ * or a saved note. The rest of these are the "website/source info" the
+ * product spec asks be injected alongside the selection: where preload/
+ * webpane.ts can read them straight off the live DOM (location.href,
+ * document.title, og:site_name / author meta tags), the PDF and detail
+ * panes source them from the bookmark's own `content` fields.
+ */
+export interface AiStreamRequest {
+  requestId: string
+  mode: AiMode
+  selectionText?: string
+  surroundingContext?: string
+  pageText?: string
+  docTitle?: string
+  prompt?: string
+  history?: AiChatMessage[]
+  sourceUrl?: string
+  siteName?: string
+  author?: string
+  docKind?: 'pdf' | 'article' | 'note'
+}
+
+export interface AiStreamChunk {
+  requestId: string
+  delta: string
+}
+
+export interface AiStreamDone {
+  requestId: string
+  fullText: string
+}
+
+export interface AiStreamError {
+  requestId: string
+  error: string
+}
+
+export interface AiTestResult {
+  ok: boolean
+  model?: string
   error?: string
 }
 
@@ -283,3 +353,4 @@ export interface PendingHighlight {
   startOffset: number
   endOffset: number
 }
+

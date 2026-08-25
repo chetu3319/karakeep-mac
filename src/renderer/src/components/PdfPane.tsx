@@ -36,8 +36,10 @@ import {
   highlightPopoverStylesheet,
   placePopover
 } from '../../../shared/highlightUi'
-import type { Highlight } from '../../../shared/types'
+import type { AiMode, Highlight } from '../../../shared/types'
 import { useCreateHighlight, useDeleteHighlight, useUpdateHighlight } from '../lib/queries'
+import SelectionAiHUD from './SelectionAiHUD'
+import PageAiDrawer from './PageAiDrawer'
 import {
   buildPageIndex,
   resolveAnchor,
@@ -90,6 +92,7 @@ interface PlacedHighlight {
 export interface PdfPaneProps {
   assetId: string
   fileName: string
+  title?: string
   bookmarkId: string
   highlights: Highlight[]
   /** Highlight to scroll to, set when one is clicked in the Preview tab. */
@@ -97,14 +100,25 @@ export interface PdfPaneProps {
   onFocusHandled?: () => void
   /** Reports which highlights could be located, for the Preview tab's list. */
   onAnchorStatus?: (anchored: string[], missing: string[]) => void
+  /** Source/author metadata for the AI context injection — see shared/types.ts AiStreamRequest. */
+  sourceUrl?: string
+  author?: string
 }
 
 export default function PdfPane(props: PdfPaneProps): React.JSX.Element {
-  const { assetId, fileName } = props
+  const { assetId, fileName, title } = props
   const [buffer, setBuffer] = useState<ArrayBuffer | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const { engine, isLoading: engineLoading, error: engineError } = usePdfiumEngine({
-    wasmUrl: pdfiumWasmUrl,
+    // Absolute, deliberately. The worker engine runs from a blob: URL, and a
+    // blob: URL has an opaque path — nothing relative resolves against it, so
+    // the worker's fetch of the wasm silently never completes and the document
+    // sits at status 'loading' forever with no error anywhere. A production
+    // build happens to escape this (Vite emits `new URL(..., import.meta.url)`,
+    // already absolute); `electron-vite dev` serves the bare root-relative
+    // `/@fs/...` path, which is how PDFs load in the packaged app and render as
+    // a blank pane in dev.
+    wasmUrl: new URL(pdfiumWasmUrl, window.location.href).href,
     worker: true,
     // Default is a CDN fetch per script; a bookmark manager has no business
     // phoning a CDN to render a file the user already stored.
@@ -189,11 +203,15 @@ function PdfMessage({
  */
 function PdfSurface({
   assetId,
+  fileName,
+  title,
   bookmarkId,
   highlights,
   focusHighlightId,
   onFocusHandled,
   onAnchorStatus,
+  sourceUrl,
+  author,
   engine
 }: PdfPaneProps & { engine: PdfEngine }): React.JSX.Element {
   const documentId = assetId
@@ -351,6 +369,100 @@ function PdfSurface({
 
   const [noteDraftFor, setNoteDraftFor] = useState<string | null>(null)
 
+  // ── AI in-situ and page-level assistant state ───────────────────────────
+  interface AiSelectionState {
+    anchorRect: Rect
+    pageIndex: number
+    selectionText: string
+    surroundingContext: string
+    pageText: string
+    startOffset: number
+    endOffset: number
+    initialMode: AiMode
+  }
+
+  const [aiSelectionState, setAiSelectionState] = useState<AiSelectionState | null>(null)
+  const [aiDrawerOpen, setAiDrawerOpen] = useState(false)
+  const [currentPageText, setCurrentPageText] = useState('')
+
+  // The drawer used to fetch the page text once, at the moment it was
+  // opened, and never again — so scrolling from page 1 to page 7 left the
+  // header still claiming "page 7" (scopeLabel reads scrollState.currentPage
+  // live) while the model underneath was still grounded in page 1's text.
+  // Debounced on a timer rather than firing per scroll-page-changed event:
+  // a fast scroll through several pages should only cost one re-fetch, at
+  // wherever the reader actually lands.
+  useEffect(() => {
+    if (!aiDrawerOpen || !doc || !index) return
+    const page = Math.max(0, scrollState.currentPage - 1)
+    const timer = setTimeout(() => {
+      void pageText(page).then((t) => setCurrentPageText(t))
+    }, 400)
+    return () => clearTimeout(timer)
+  }, [aiDrawerOpen, doc, index, scrollState.currentPage, pageText])
+
+  const askAiFromSelection = useCallback(
+    async (rect: Rect, pageIndex: number, mode: AiMode = 'micro-explain') => {
+      if (!selection || !index || !doc) return
+      const scope = selection.forDocument(documentId)
+      const range = scope.getState().selection
+      if (!range) return
+
+      const a = toGlobal(index, range.start.page, range.start.index)
+      const b = toGlobal(index, range.end.page, range.end.index)
+      const start = Math.min(a, b)
+      const end = Math.max(a, b) + 1
+
+      const text = (await textForSpans(engine, doc, spansForRange(index, start, end))).trim()
+      if (!text) return
+
+      const ctxStart = Math.max(0, start - 200)
+      const ctxEnd = Math.min(index.total, end + 200)
+      const surrounding = (await textForSpans(engine, doc, spansForRange(index, ctxStart, ctxEnd))).trim()
+      const pageContent = await pageText(pageIndex)
+
+      scope.clear()
+      setAiSelectionState({
+        anchorRect: rect,
+        pageIndex,
+        selectionText: text,
+        surroundingContext: surrounding,
+        pageText: pageContent,
+        startOffset: start,
+        endOffset: end,
+        initialMode: mode
+      })
+    },
+    [selection, index, doc, documentId, engine, pageText]
+  )
+
+  const handleSaveAiAsHighlight = async (note: string): Promise<void> => {
+    if (!aiSelectionState) return
+    const created = await createHighlight.mutateAsync({
+      bookmarkId,
+      startOffset: aiSelectionState.startOffset,
+      endOffset: aiSelectionState.endOffset,
+      color: DEFAULT_HIGHLIGHT_COLOR,
+      text: aiSelectionState.selectionText,
+      note
+    })
+    setAiSelectionState(null)
+    setActiveId(created.id)
+  }
+
+  const aiHudAnchor = useCallback((): DOMRect | null => {
+    if (!aiSelectionState) return null
+    const pageEl = document.querySelector(`[data-pdf-page="${aiSelectionState.pageIndex}"]`)
+    if (!pageEl) return null
+    const box = pageEl.getBoundingClientRect()
+    return new DOMRect(
+      box.left + aiSelectionState.anchorRect.origin.x,
+      box.top + aiSelectionState.anchorRect.origin.y,
+      aiSelectionState.anchorRect.size.width,
+      aiSelectionState.anchorRect.size.height
+    )
+  }, [aiSelectionState])
+
   // Dev smoke only: announce readiness, and on request drive the exact path a
   // user drives — select text in the page, then create a highlight from it.
   const smokeBound = useRef(false)
@@ -477,6 +589,83 @@ function PdfSurface({
           window.kk.dev.notifyPdfHighlighted('')
           return
         }
+        // Ask AI, driven the same way a user would: a real click on the
+        // toolbar's "Ask AI" button, on the selection the drag above made.
+        // This is the flow-preserving in-situ HUD (SelectionAiHUD.tsx) — the
+        // surface that a `pointer-events: none` host with no opt-in on the
+        // panel makes entirely unclickable, and that the click-through then
+        // dismisses via the outside-click handler. Both would show up here:
+        // a HUD that never reflects a mode change, or one that vanishes.
+        const askAiBtn = document.querySelector<HTMLElement>('[data-kk-ai]')
+        if (!askAiBtn) {
+          console.error('[smoke-pdf] selection toolbar has no Ask AI button')
+        } else {
+          const askAiBox = askAiBtn.getBoundingClientRect()
+          await window.kk.dev.realClickOnPdf({
+            x: askAiBox.left + askAiBox.width / 2,
+            y: askAiBox.top + askAiBox.height / 2
+          })
+          await new Promise((r2) => setTimeout(r2, 400))
+          const hud = document.querySelector<HTMLElement>('[data-kk-ai-hud]')
+          if (!hud) {
+            console.error('[smoke-pdf] AI HUD did not open after clicking Ask AI')
+          } else {
+            const cs = getComputedStyle(hud)
+            console.log(`[smoke-pdf] AI HUD opened; computed pointer-events=${cs.pointerEvents}`)
+            if (cs.pointerEvents === 'none') {
+              console.error('[smoke-pdf] AI HUD panel is not hit-testable (pointer-events: none) — every control in it is dead')
+            }
+            const dejargon = hud.querySelector<HTMLElement>('[data-kk-ai-mode="micro-dejargon"]')
+            if (!dejargon) {
+              console.error('[smoke-pdf] AI HUD has no Dejargonify tab to click')
+            } else {
+              const db = dejargon.getBoundingClientRect()
+              await window.kk.dev.realClickOnPdf({ x: db.left + db.width / 2, y: db.top + db.height / 2 })
+              await new Promise((r2) => setTimeout(r2, 400))
+              const stillThere = document.querySelector<HTMLElement>('[data-kk-ai-hud]')
+              if (!stillThere) {
+                console.error('[smoke-pdf] AI HUD vanished after clicking a mode tab — the click-through/dismiss bug')
+              } else {
+                const active = stillThere.querySelector<HTMLElement>('[data-kk-ai-mode="micro-dejargon"]')
+                const isActive = active?.className.includes('bg-emerald-100')
+                if (isActive) console.log('[smoke-pdf] AI HUD stayed open and the Dejargonify tab became active — click landed')
+                else console.error('[smoke-pdf] AI HUD stayed open but the Dejargonify tab never became active — click did not land')
+              }
+            }
+          }
+          // Dismiss the HUD the way a user would (Escape) and confirm it
+          // actually closes, then restore the selection for the swatch flow
+          // below — the HUD's askAiFromSelection cleared it when it opened.
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+          await new Promise((r2) => setTimeout(r2, 250))
+          if (document.querySelector('[data-kk-ai-hud]')) {
+            console.error('[smoke-pdf] AI HUD did not dismiss on Escape')
+          } else {
+            console.log('[smoke-pdf] AI HUD dismissed on Escape')
+          }
+          // KK_SMOKE_AI_ONLY stops here, before the swatch click below ever
+          // runs — that click creates a highlight, and this mode exists to
+          // verify the AI HUD against a bookmark that write-testing isn't
+          // scoped to.
+          if (window.kk.dev.smokeAiOnly) {
+            console.log('[smoke-pdf] KK_SMOKE_AI_ONLY=1 — stopping before highlight creation')
+            window.kk.dev.notifyPdfHighlighted('')
+            return
+          }
+          dispatch('pointerdown', drag.x1, drag.y1, 1)
+          for (let i = 1; i <= steps; i++) {
+            dispatch(
+              'pointermove',
+              drag.x1 + ((drag.x2 - drag.x1) * i) / steps,
+              drag.y1 + ((drag.y2 - drag.y1) * i) / steps,
+              1
+            )
+            await new Promise((r2) => setTimeout(r2, 10))
+          }
+          dispatch('pointerup', drag.x2, drag.y2, 0)
+          await new Promise((r2) => setTimeout(r2, 200))
+        }
+
         // Click the toolbar the way a user does. Calling createFromSelection()
         // directly here is what let a completely unclickable toolbar pass:
         // the press has to travel through the same listeners the page binds.
@@ -624,6 +813,7 @@ function PdfSurface({
           await deleteHighlight.mutateAsync({ id, bookmarkId })
         }}
         onCreate={createFromSelection}
+        onAskAi={askAiFromSelection}
       />
     ),
     [
@@ -636,7 +826,8 @@ function PdfSurface({
       updateHighlight,
       deleteHighlight,
       bookmarkId,
-      createFromSelection
+      createFromSelection,
+      askAiFromSelection
     ]
   )
 
@@ -696,28 +887,80 @@ function PdfSurface({
           Fit
         </button>
 
+        <span className="mx-1 h-4 w-px bg-neutral-200 dark:bg-neutral-800" />
+
+        <button
+          type="button"
+          onClick={() => {
+            // The effect above handles fetching the page text whenever the
+            // drawer is open and the current page changes, including the
+            // moment it's first opened — nothing more to do here.
+            setAiDrawerOpen((prev) => !prev)
+          }}
+          className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium transition-colors ${
+            aiDrawerOpen
+              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+              : 'text-neutral-600 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800'
+          }`}
+          title="Toggle Page AI Co-Pilot"
+        >
+          <span>✨</span>
+          <span>AI Co-Pilot</span>
+        </button>
+
         <div className="ml-auto text-neutral-400">
           {indexing
             ? `Indexing text ${indexing.done}/${indexing.total}`
             : highlightCount > 0
               ? `${highlightCount} highlight${highlightCount === 1 ? '' : 's'}`
-              : 'Select text to highlight'}
+              : 'Select text to highlight or Ask AI'}
         </div>
       </div>
 
-      <div className="min-h-0 flex-1">
-        <Viewport
-          documentId={documentId}
-          className="h-full w-full overflow-auto bg-neutral-100 dark:bg-neutral-950"
-        >
-          {/* The interaction manager only sees pointer events that come
-              through its providers — without them the selection plugin never
-              gets a pointer-down and text cannot be selected at all. */}
-          <GlobalPointerProvider documentId={documentId}>
-            <Scroller documentId={documentId} renderPage={renderPage} />
-          </GlobalPointerProvider>
-        </Viewport>
+      <div className="flex h-full min-h-0 flex-1 overflow-hidden">
+        <div className="h-full min-h-0 flex-1">
+          <Viewport
+            documentId={documentId}
+            className="h-full w-full overflow-auto bg-neutral-100 dark:bg-neutral-950"
+          >
+            {/* The interaction manager only sees pointer events that come
+                through its providers — without them the selection plugin never
+                gets a pointer-down and text cannot be selected at all. */}
+            <GlobalPointerProvider documentId={documentId}>
+              <Scroller documentId={documentId} renderPage={renderPage} />
+            </GlobalPointerProvider>
+          </Viewport>
+        </div>
+
+        {aiDrawerOpen && (
+          <PageAiDrawer
+            open={aiDrawerOpen}
+            onClose={() => setAiDrawerOpen(false)}
+            scopeLabel={`page ${scrollState.currentPage} of ${totalPages || '—'}`}
+            pageText={currentPageText}
+            docTitle={title || fileName}
+            sourceUrl={sourceUrl}
+            author={author}
+            docKind="pdf"
+          />
+        )}
       </div>
+
+      {aiSelectionState && (
+        <SelectionAiHUD
+          anchor={aiHudAnchor}
+          selectionText={aiSelectionState.selectionText}
+          surroundingContext={aiSelectionState.surroundingContext}
+          pageText={aiSelectionState.pageText}
+          docTitle={title || fileName}
+          initialMode={aiSelectionState.initialMode}
+          onDismiss={() => setAiSelectionState(null)}
+          sourceUrl={sourceUrl}
+          author={author}
+          docKind="pdf"
+          onSaveAsHighlight={handleSaveAiAsHighlight}
+        />
+      )}
     </>
   )
 }
@@ -738,6 +981,7 @@ interface PdfPageProps {
   onRecolor: (id: string, color: string) => Promise<void>
   onDelete: (id: string) => Promise<void>
   onCreate: (color: string, withNote: boolean) => Promise<string | null>
+  onAskAi: (rect: Rect, pageIndex: number, mode?: AiMode) => void
 }
 
 function PdfPage({
@@ -755,7 +999,8 @@ function PdfPage({
   onSaveNote,
   onRecolor,
   onDelete,
-  onCreate
+  onCreate,
+  onAskAi
 }: PdfPageProps): React.JSX.Element {
   const geo = geometry.get(pageIndex)
 
@@ -866,7 +1111,14 @@ function PdfPage({
         pageIndex={pageIndex}
         scale={scale}
         selectionMenu={(menu: SelectionSelectionMenuProps) =>
-          menu.selected ? <SelectionMenu rect={menu.rect} pageIndex={pageIndex} onCreate={onCreate} /> : null
+          menu.selected ? (
+            <SelectionMenu
+              rect={menu.rect}
+              pageIndex={pageIndex}
+              onCreate={onCreate}
+              onAskAi={(mode) => onAskAi(menu.rect, pageIndex, mode)}
+            />
+          ) : null
         }
       />
 
@@ -1079,15 +1331,17 @@ function SwatchRow({
   )
 }
 
-/** Colour swatches + "Note", shown against a live text selection. */
+/** Colour swatches + "Note" + "Ask AI", shown against a live text selection. */
 function SelectionMenu({
   rect,
   pageIndex,
-  onCreate
+  onCreate,
+  onAskAi
 }: {
   rect: Rect
   pageIndex: number
   onCreate: (color: string, withNote: boolean) => Promise<string | null>
+  onAskAi?: (mode?: AiMode) => void
 }): React.JSX.Element {
   const [busy, setBusy] = useState(false)
 
@@ -1124,6 +1378,14 @@ function SelectionMenu({
         disabled={busy}
         onClick={() => void run(DEFAULT_HIGHLIGHT_COLOR, true)}
         data-kk-note=""
+      />
+      <div className="kh-sep" />
+      <PopButton
+        label="Ask AI"
+        icon="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"
+        disabled={busy}
+        onClick={() => onAskAi?.('micro-explain')}
+        data-kk-ai=""
       />
     </FloatingPopover>
   )

@@ -38,6 +38,7 @@ export const ICON_NOTE = 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0
 export const ICON_COPY = 'M9 9h10v10H9zM5 15H4V4h11v1'
 export const ICON_TRASH = 'M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14'
 export const ICON_CHECK = 'M5 13l4 4L19 7'
+export const ICON_AI = 'M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83'
 
 /**
  * Styles for the popover.

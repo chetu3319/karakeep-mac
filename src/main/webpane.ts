@@ -152,6 +152,25 @@ export class WebPaneManager {
     this.view.webContents.send(WEBPANE_IPC.FOCUS, highlightId)
   }
 
+  /**
+   * Reads the live page's rendered text straight out of the WebContentsView
+   * via `executeJavaScript`, rather than through the highlight preload's own
+   * IPC channel — the sidebar chat wants this on demand from the renderer,
+   * not pushed proactively, and `document.body.innerText` is cheap enough to
+   * fetch synchronously-from-the-caller's-perspective each time it's asked.
+   * Returns '' for anything that can't answer (no view, destroyed, JS threw)
+   * so a slow/broken page degrades the chat's grounding rather than crashing it.
+   */
+  async getPageText(): Promise<string> {
+    if (!this.view || this.view.webContents.isDestroyed()) return ''
+    try {
+      const text = await this.view.webContents.executeJavaScript('document.body ? document.body.innerText : ""')
+      return typeof text === 'string' ? text : ''
+    } catch {
+      return ''
+    }
+  }
+
   setBounds(bounds: WebPaneBounds): void {
     if (!this.view) return
     if (this.win.isDestroyed() || this.view.webContents.isDestroyed()) return

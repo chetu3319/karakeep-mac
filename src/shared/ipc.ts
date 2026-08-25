@@ -63,6 +63,15 @@ export const IPC = {
   MENU_FOCUS_SEARCH_EVENT: 'menu:focus-search',
   MENU_OPEN_SETTINGS_EVENT: 'menu:open-settings',
 
+  // AI streaming (Gemini)
+  AI_STREAM_START: 'ai:stream-start',
+  AI_STREAM_ABORT: 'ai:stream-abort',
+  AI_STREAM_CHUNK_EVENT: 'ai:stream-chunk', // main -> renderer push
+  AI_STREAM_DONE_EVENT: 'ai:stream-done',   // main -> renderer push
+  AI_STREAM_ERROR_EVENT: 'ai:stream-error', // main -> renderer push
+  AI_TEST_CONNECTION: 'ai:test-connection',
+  AI_SET_CONFIG: 'ai:set-config',
+
   // Web pane (WebContentsView)
   WEBPANE_NAVIGATE: 'webpane:navigate',
   WEBPANE_SET_BOUNDS: 'webpane:set-bounds',
@@ -77,6 +86,11 @@ export const IPC = {
   WEBPANE_IS_ATTACHED: 'webpane:is-attached', // dev/smoke diagnostic — confirms actual detach, not just visual hide
   WEBPANE_APPLY_HIGHLIGHTS: 'webpane:apply-highlights', // re-push highlights without re-navigating
   WEBPANE_FOCUS_HIGHLIGHT: 'webpane:focus-highlight', // scroll a highlight into view in the live page
+  // Lets the sidebar chat ground itself in the live page's actual rendered
+  // text (see lib/useBookmarkText.ts) instead of only the crawled snapshot
+  // Karakeep stored at save time, which for a link bookmark can be stale or
+  // paywalled-thin.
+  WEBPANE_GET_PAGE_TEXT: 'webpane:get-page-text',
   WEBPANE_STATE_EVENT: 'webpane:state', // main -> renderer push
   WEBPANE_HIGHLIGHTS_CHANGED_EVENT: 'webpane:highlights-changed', // main -> renderer push
   WEBPANE_HIGHLIGHT_STATUS_EVENT: 'webpane:highlight-status' // main -> renderer push: which highlights anchored
