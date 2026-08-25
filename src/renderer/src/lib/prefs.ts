@@ -124,3 +124,23 @@ export function useTheme(): [ThemePref, (next: ThemePref) => void] {
 
   return [pref, setPref]
 }
+
+/**
+ * Whether the app is currently rendering dark, regardless of *why* — an
+ * explicit preference or the OS under 'system'. Reads the class the way
+ * Tailwind does rather than the preference, so a component only needs to
+ * know the outcome; the MutationObserver is what keeps it live when
+ * `applyTheme` flips the class from somewhere else in the tree.
+ */
+export function useIsDark(): boolean {
+  const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'))
+
+  useEffect(() => {
+    const root = document.documentElement
+    const obs = new MutationObserver(() => setDark(root.classList.contains('dark')))
+    obs.observe(root, { attributes: true, attributeFilter: ['class'] })
+    return () => obs.disconnect()
+  }, [])
+
+  return dark
+}

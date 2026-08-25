@@ -38,6 +38,7 @@ import {
 } from '../../../shared/highlightUi'
 import type { AiMode, Highlight } from '../../../shared/types'
 import { useCreateHighlight, useDeleteHighlight, useUpdateHighlight } from '../lib/queries'
+import { useIsDark, usePref } from '../lib/prefs'
 import SelectionAiHUD from './SelectionAiHUD'
 import PageAiDrawer from './PageAiDrawer'
 import {
@@ -81,6 +82,27 @@ function useHighlightPopoverStyles(): void {
     document.head.appendChild(el)
   }, [])
 }
+
+/**
+ * Night mode inverts the rendered page bitmap in CSS. There is no way to ask
+ * PDFium for a dark render — the page is a picture of ink on paper — so the
+ * picture is what gets flipped.
+ *
+ * `invert(0.92)` rather than a full inversion: a full one maps paper to pure
+ * #000 and ink to pure #fff, which is the highest-contrast, most tiring
+ * combination there is. Backing off lands paper near #141414 and ink near
+ * #ebebeb — the same softened pairing the rest of the app's dark theme uses.
+ *
+ * `hue-rotate(180deg)` puts colour back where it belongs: inversion alone
+ * takes a blue diagram to orange, and rotating the wheel a half turn returns
+ * the hue while leaving the lightness flip intact. Photographs still come out
+ * looking like negatives — that is inherent to the technique, and the reason
+ * the toggle exists rather than being always-on in dark mode.
+ */
+const NIGHT_FILTER = 'invert(0.92) hue-rotate(180deg)'
+
+/** 'auto' follows the app theme; the toggle writes an explicit on/off. */
+type NightPref = 'auto' | 'on' | 'off'
 
 /** A highlight that has been located in this document. */
 interface PlacedHighlight {
@@ -383,6 +405,14 @@ function PdfSurface({
 
   const [aiSelectionState, setAiSelectionState] = useState<AiSelectionState | null>(null)
   const [aiDrawerOpen, setAiDrawerOpen] = useState(false)
+
+  // Night mode is a reading preference, not a theme: someone may want a dark
+  // app around a paper-white PDF (colour-accurate figures) or a dark PDF in a
+  // light app. 'auto' keeps the common case free — it follows the theme until
+  // the toggle is touched, and the touch is what makes it explicit.
+  const [nightPref, setNightPref] = usePref<NightPref>('pdfNight', 'auto')
+  const isDark = useIsDark()
+  const night = nightPref === 'auto' ? isDark : nightPref === 'on'
   const [currentPageText, setCurrentPageText] = useState('')
 
   // The drawer used to fetch the page text once, at the moment it was
@@ -791,6 +821,7 @@ function PdfSurface({
         activeId={activeId}
         flashId={flashId}
         noteDraftFor={noteDraftFor}
+        night={night}
         onActivate={(id) => {
           setActiveId(id)
           setNoteDraftFor(null)
@@ -823,6 +854,7 @@ function PdfSurface({
       activeId,
       flashId,
       noteDraftFor,
+      night,
       updateHighlight,
       deleteHighlight,
       bookmarkId,
@@ -887,6 +919,21 @@ function PdfSurface({
           Fit
         </button>
 
+        <button
+          type="button"
+          onClick={() => setNightPref(night ? 'off' : 'on')}
+          className={`rounded px-1.5 py-0.5 transition-colors ${
+            night
+              ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300'
+              : 'text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800'
+          }`}
+          title={night ? 'Night mode on — click for the original page' : 'Night mode (invert page for dark reading)'}
+          aria-pressed={night}
+          aria-label="Toggle night mode"
+        >
+          {night ? '☾' : '☀'}
+        </button>
+
         <span className="mx-1 h-4 w-px bg-neutral-200 dark:bg-neutral-800" />
 
         <button
@@ -921,7 +968,9 @@ function PdfSurface({
         <div className="h-full min-h-0 flex-1">
           <Viewport
             documentId={documentId}
-            className="h-full w-full overflow-auto bg-neutral-100 dark:bg-neutral-950"
+            className={`h-full w-full overflow-auto ${
+              night ? 'bg-neutral-950' : 'bg-neutral-100 dark:bg-neutral-950'
+            }`}
           >
             {/* The interaction manager only sees pointer events that come
                 through its providers — without them the selection plugin never
@@ -974,6 +1023,8 @@ interface PdfPageProps {
   activeId: string | null
   flashId: string | null
   noteDraftFor: string | null
+  /** Inverts the page bitmap and re-blends highlights for dark reading. */
+  night: boolean
   onActivate: (id: string) => void
   onDismiss: () => void
   onEditNote: (id: string) => void
@@ -993,6 +1044,7 @@ function PdfPage({
   activeId,
   flashId,
   noteDraftFor,
+  night,
   onActivate,
   onDismiss,
   onEditNote,
@@ -1074,7 +1126,7 @@ function PdfPage({
         documentId={documentId}
         pageIndex={pageIndex}
         draggable={false}
-        style={{ position: 'absolute' }}
+        style={{ position: 'absolute', filter: night ? NIGHT_FILTER : undefined }}
       />
 
       {/* Stored highlights, under the text layer so selection still works. */}
@@ -1098,8 +1150,19 @@ function PdfPage({
               width: rect.size.width * scale,
               height: rect.size.height * scale,
               backgroundColor: hexForColor(highlight.color),
-              opacity: activeId === highlight.id ? 0.55 : 0.32,
-              mixBlendMode: 'multiply',
+              // The marks sit *outside* the filtered image, so they blend
+              // against pixels that are already inverted. Multiply darkens,
+              // which on a night-mode page means a highlight would erase the
+              // text it is meant to mark; screen is its complement and tints
+              // the same colour upwards instead.
+              opacity: night
+                ? activeId === highlight.id
+                  ? 0.34
+                  : 0.2
+                : activeId === highlight.id
+                  ? 0.55
+                  : 0.32,
+              mixBlendMode: night ? 'screen' : 'multiply',
               borderBottom: highlight.note ? `2px solid ${hexForColor(highlight.color)}` : undefined
             }}
           />
