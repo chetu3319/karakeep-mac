@@ -592,7 +592,7 @@ async function runPdfSmokeMode(win: BrowserWindow): Promise<void> {
     // Capture what the app was actually showing when it stalled — otherwise a
     // timeout tells you nothing about where it got stuck.
     void shot('pdf-timeout.png').finally(() => app.quit())
-  }, 60000)
+  }, process.env['KK_SMOKE_BOOKMARK_2'] ? 240000 : 60000)
 
   // Highlights that were already on the bookmark before this run. Without
   // this the cleanup check compares against zero and reports the user's own
@@ -612,6 +612,63 @@ async function runPdfSmokeMode(win: BrowserWindow): Promise<void> {
 
   await pdfReady
   await shot('pdf-01-rendered.png')
+
+  // ── PDF → PDF switch ────────────────────────────────────────────────
+  // Set KK_SMOKE_BOOKMARK_2=<id of another PDF bookmark> to exercise the
+  // path that reported a black window: open one document, then select a
+  // different one. A React render that throws unmounts the whole tree, so
+  // "the root still has content" is the check that actually distinguishes
+  // a working switch from a blank window — a screenshot of a black window
+  // and of a dark-themed app can look similar at a glance.
+  const second = process.env['KK_SMOKE_BOOKMARK_2']
+  if (second) {
+    const selected = new Promise<string>((resolve) =>
+      ipcMain.once('dev:smoke-bookmark-selected', (_e, id: string) => resolve(id))
+    )
+    console.log('[smoke-pdf] switching to second PDF:', second)
+    win.webContents.send('dev:smoke-select-bookmark', second)
+    await selected
+    await new Promise((r) => setTimeout(r, 6000))
+    await shot('pdf-03-switched.png')
+
+    const health = (await win.webContents.executeJavaScript(`(() => {
+      const root = document.getElementById('root')
+      const text = root ? root.innerText : ''
+      return {
+        rootChildren: root ? root.childElementCount : -1,
+        textLength: text.length,
+        // The error boundary's copy, if it caught something.
+        boundary: text.includes('Something went wrong') ? text.slice(0, 400) : null,
+        canvases: document.querySelectorAll('canvas, [data-pdf-page]').length
+      }
+    })()`)) as { rootChildren: number; textLength: number; boundary: string | null; canvases: number }
+
+    console.log('[smoke-pdf] after switch:', JSON.stringify(health))
+    if (health.rootChildren <= 0 || health.textLength === 0) {
+      console.error('[smoke-pdf] FAIL: the React tree is empty after switching PDFs — this is the black window')
+    } else if (health.boundary) {
+      console.error('[smoke-pdf] FAIL: the reader threw and the error boundary caught it:', health.boundary)
+    } else if (health.canvases === 0) {
+      console.error('[smoke-pdf] FAIL: no PDF pages mounted after the switch')
+    } else {
+      console.log('[smoke-pdf] ok: second PDF rendered, tree intact')
+    }
+  }
+
+
+  // A switch run is read-only on purpose: it is checking a UI path, and
+  // creating and deleting a highlight on someone's real bookmark to do
+  // that is not a cost this run needs to pay.
+  if (second) {
+    clearTimeout(safety)
+    if (process.env['KK_SMOKE_HOLD'] === '1') {
+      console.log('[smoke-pdf] KK_SMOKE_HOLD=1 — leaving window open')
+      return
+    }
+    await new Promise((r) => setTimeout(r, 400))
+    app.quit()
+    return
+  }
 
   win.webContents.send('dev:smoke-pdf-highlight')
   const createdId = await highlighted

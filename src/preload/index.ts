@@ -222,6 +222,12 @@ const api = {
     // ready/act handshake. Lets the smoke run exercise the real user path
     // (select text -> create highlight) instead of a stubbed one.
     smokeBookmarkId: process.env['KK_SMOKE_BOOKMARK'] || null,
+    // Second document for the PDF-switch run: main asks the renderer to
+    // select it once the first one has rendered.
+    onSmokeSelectBookmark: (cb: (id: string) => void): void => {
+      ipcRenderer.on('dev:smoke-select-bookmark', (_e, id: string) => cb(id))
+    },
+    notifyBookmarkSelected: (id: string): void => ipcRenderer.send('dev:smoke-bookmark-selected', id),
     // Verification-only escape hatch: exercise the Ask AI HUD (selection ->
     // Ask AI -> mode tabs -> dismiss) without ever reaching the swatch/note
     // click that creates a highlight, so this can run against a bookmark

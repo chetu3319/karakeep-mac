@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
+import ErrorBoundary from './components/ErrorBoundary'
 import { applyTheme, readPref, type ThemePref } from './lib/prefs'
 import './styles/index.css'
 
@@ -22,7 +23,12 @@ const queryClient = new QueryClient({
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <App />
+      {/* Last resort. The reader has its own boundary; this one is so a
+          throw anywhere else shows what happened instead of a black
+          window. */}
+      <ErrorBoundary label="Karakeep">
+        <App />
+      </ErrorBoundary>
     </QueryClientProvider>
   </React.StrictMode>
 )

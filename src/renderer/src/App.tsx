@@ -4,6 +4,7 @@ import Sidebar from './components/Sidebar'
 import BookmarkList from './components/BookmarkList'
 import HighlightsList from './components/HighlightsList'
 import DetailPane from './components/DetailPane'
+import ErrorBoundary from './components/ErrorBoundary'
 import AddBookmarkDialog from './components/AddBookmarkDialog'
 import SettingsDialog from './components/SettingsDialog'
 import ConfirmDialog from './components/ConfirmDialog'
@@ -461,6 +462,24 @@ function Library({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [smokeStarted, bookmarks.length, selectedBookmark])
 
+  // Dev-only: the PDF-switch smoke run asks for a specific second
+  // bookmark once the first has rendered. Fetched by id rather than looked
+  // up in `bookmarks` — the smoke list holds only the first page, and the
+  // document being switched to is usually not on it.
+  useEffect(() => {
+    if (!window.kk.dev.isSmoke) return
+    window.kk.dev.onSmokeSelectBookmark((id) => {
+      void window.kk.bookmarks
+        .get(id)
+        .then((b) => {
+          onSelectBookmark(b)
+          window.kk.dev.notifyBookmarkSelected(id)
+        })
+        .catch((err) => console.error('[smoke] could not load bookmark', id, err))
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const listsRef = useRef(lists)
   listsRef.current = lists
 
@@ -556,14 +575,20 @@ function Library({
       <div className="flex min-w-0 flex-1 flex-col">
         {sidebarCollapsed && listCollapsed && titlebar}
         <div className="min-h-0 flex-1">
-          <DetailPane
-            bookmark={selectedBookmark}
-            onDeleted={onBookmarkDeleted}
-            focusHighlightId={focusHighlightId}
-            onFocusHighlightHandled={onFocusHighlightHandled}
-            listCollapsed={listCollapsed}
-            onExpandList={onToggleList}
-          />
+          {/* Scoped to the reader deliberately: if the PDF or web pane
+              throws, the library, sidebar and toolbars stay usable and you
+              can simply pick something else. Without a boundary React
+              unmounts the whole tree and the window goes black. */}
+          <ErrorBoundary label="the reader" resetKey={selectedBookmark?.id ?? null}>
+            <DetailPane
+              bookmark={selectedBookmark}
+              onDeleted={onBookmarkDeleted}
+              focusHighlightId={focusHighlightId}
+              onFocusHighlightHandled={onFocusHighlightHandled}
+              listCollapsed={listCollapsed}
+              onExpandList={onToggleList}
+            />
+          </ErrorBoundary>
         </div>
       </div>
     </div>

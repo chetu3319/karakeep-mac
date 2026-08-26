@@ -139,7 +139,23 @@ export interface PdfPaneProps {
 
 export default function PdfPane(props: PdfPaneProps): React.JSX.Element {
   const { assetId, fileName, title } = props
-  const [buffer, setBuffer] = useState<ArrayBuffer | null>(null)
+  /**
+   * The bytes *and* the document they belong to, as one value.
+   *
+   * They were two pieces of state, and switching from one PDF to another
+   * put them out of step for a render: `assetId` was already the new
+   * document while `buffer` still held the old one's bytes. That pair was
+   * enough to stand up a whole EmbedPDF registry — the new document's id
+   * over the previous document's content — which was then torn down a
+   * render later when the fetch effect nulled the buffer. Registry teardown
+   * is async and closes documents on the shared pdfium engine by id, so
+   * that doomed registry could close document B on the engine *after* the
+   * real one had opened it, leaving a live viewer pointed at a document the
+   * engine no longer had. Kept together, a mismatch is simply "still
+   * loading" and no such registry is ever built.
+   */
+  const [loaded, setLoaded] = useState<{ assetId: string; bytes: ArrayBuffer } | null>(null)
+  const buffer = loaded?.assetId === assetId ? loaded.bytes : null
   const [loadError, setLoadError] = useState<string | null>(null)
   const { engine, isLoading: engineLoading, error: engineError } = usePdfiumEngine({
     // Absolute, deliberately. The worker engine runs from a blob: URL, and a
@@ -159,12 +175,11 @@ export default function PdfPane(props: PdfPaneProps): React.JSX.Element {
 
   useEffect(() => {
     let cancelled = false
-    setBuffer(null)
     setLoadError(null)
     window.kk.assets
       .getBytes(assetId)
       .then((bytes) => {
-        if (!cancelled) setBuffer(bytes)
+        if (!cancelled) setLoaded({ assetId, bytes })
       })
       .catch((err: Error) => {
         if (!cancelled) setLoadError(err.message || 'Could not download this PDF')
@@ -204,7 +219,12 @@ export default function PdfPane(props: PdfPaneProps): React.JSX.Element {
 
   return (
     <div className="flex h-full flex-col bg-neutral-100 dark:bg-neutral-950">
-      <EmbedPDF engine={engine as PdfEngine} plugins={plugins}>
+      {/* Keyed, so a different document gets a new provider and a new
+          surface rather than re-configuring the running one in place. The
+          panes below hold per-document state — the text index, located
+          highlights, page geometry — and none of it survives a swap
+          meaningfully. */}
+      <EmbedPDF key={assetId} engine={engine as PdfEngine} plugins={plugins}>
         <PdfSurface {...props} engine={engine as PdfEngine} />
       </EmbedPDF>
     </div>

@@ -572,7 +572,13 @@ export default function DetailPane({
 
           {pdfAssetId && (
             <div className={tab === 'pdf' ? 'h-full' : 'hidden'}>
+              {/* Keyed by document: a PDF pane carries a document's text
+                  index, its located highlights and its page geometry, and
+                  none of that is meaningful for the next document. Reusing
+                  the instance meant a window where the new document's id
+                  was paired with the old one's state. */}
               <PdfPane
+                key={pdfAssetId}
                 assetId={pdfAssetId}
                 fileName={pdfFileName}
                 title={display?.title || bookmark.title || pdfFileName}
