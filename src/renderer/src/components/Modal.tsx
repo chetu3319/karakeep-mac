@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { suppressWebPane } from '../lib/webPaneVisibility'
 
 /**
  * The shell every dialog in the app sits in.
@@ -20,6 +21,12 @@ import React, { useEffect, useRef, useState } from 'react'
  *   backdrop.
  * - **Focus is restored.** Whatever was focused when the dialog opened gets
  *   it back on close, so keyboard users land where they started.
+ * - **The live page gets out of the way.** The Web tab is a native view
+ *   layered over the renderer, so it paints above any overlay no matter
+ *   what z-index says. Settings and Add bookmark were opening *behind* it.
+ *   Every dialog sits in this shell, so hiding it from here covers all of
+ *   them — and the counter in lib/webPaneVisibility keeps stacked dialogs
+ *   (a confirm on top of Settings) from un-hiding it too early.
  *
  * Deliberately no dependency: there is no focus-trap library installed and
  * a dialog is not worth adding one for.
@@ -48,6 +55,8 @@ export default function Modal({
   // dialog rather than the control that opened it — and restoring focus
   // to that on close would be a no-op.
   const [opener] = useState<HTMLElement | null>(() => document.activeElement as HTMLElement | null)
+
+  useEffect(() => suppressWebPane(), [])
 
   useEffect(() => {
     // Only take focus if nothing inside has claimed it. A dialog whose
