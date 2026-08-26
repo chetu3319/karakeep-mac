@@ -16,6 +16,7 @@ import PdfPane from './PdfPane'
 import TagEditor from './TagEditor'
 import WebPane from './WebPane'
 import PageAiDrawer from './PageAiDrawer'
+import SidePanel from './SidePanel'
 
 type Tab = 'preview' | 'pdf' | 'web'
 
@@ -63,8 +64,32 @@ export default function DetailPane({
   // actually be *looked at* — took the list you were navigating from off
   // screen. As a rail it stays put across tabs. Persisted, because whether
   // you work with highlights open is a habit, not a per-bookmark decision.
-  const [railOpen, setRailOpen] = usePref('highlightRailOpen', false)
-  const [webAiDrawerOpen, setWebAiDrawerOpen] = useState(false)
+  const [railOpen, setRailOpenPref] = usePref('highlightRailOpen', false)
+  const [aiDrawerOpen, setAiDrawerOpen] = useState(false)
+
+  // One side pane at a time. Both dock to the same right-hand edge, and
+  // opening the second used to stack them, leaving the page itself a
+  // narrow column between two rails. Whichever you ask for wins; the
+  // other stands down.
+  const openRail = useCallback(
+    (next: boolean) => {
+      setRailOpenPref(next)
+      if (next) setAiDrawerOpen(false)
+    },
+    [setRailOpenPref]
+  )
+  const openAiDrawer = useCallback(
+    (next: boolean) => {
+      setAiDrawerOpen(next)
+      if (next) setRailOpenPref(false)
+    },
+    [setRailOpenPref]
+  )
+
+  // What the PDF pane is currently showing, so the one shared Co-Pilot
+  // drawer below can be grounded in the page on screen rather than in the
+  // whole document. Reported upward by PdfPane while the drawer is open.
+  const [pdfAiContext, setPdfAiContext] = useState<{ scopeLabel: string; pageText: string } | null>(null)
 
   // Navigation state for the live pane. It lives here rather than in
   // WebPane because the back/forward/reload buttons moved into this
@@ -164,6 +189,7 @@ export default function DetailPane({
     // an update; leaving it would light up Back for a page this bookmark
     // has never been on.
     setWebState(EMPTY_WEB_STATE)
+    setPdfAiContext(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookmark?.id])
 
@@ -180,7 +206,7 @@ export default function DetailPane({
     if (!externalFocusHighlightId || !bookmark) return
     setFocusHighlightId(externalFocusHighlightId)
     setTab(pdfAssetId ? 'pdf' : 'web')
-    setRailOpen(true)
+    openRail(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [externalFocusHighlightId, bookmark?.id, pdfAssetId])
 
@@ -340,39 +366,48 @@ export default function DetailPane({
             </>
           )}
 
-          {highlights.length > 0 && (
-            <button
-              type="button"
-              onClick={() => setRailOpen(!railOpen)}
-              aria-pressed={railOpen}
-              title={railOpen ? 'Hide highlights' : 'Show highlights'}
-              className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs ${
-                railOpen
-                  ? 'bg-neutral-200/70 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200'
-                  : 'text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800'
-              }`}
-            >
-              <Icon name="highlight" size={14} />
-              <span className="tabular-nums">{highlights.length}</span>
-            </button>
-          )}
+          {/* Highlights and the Co-Pilot are the same two controls on every
+              tab. They used to be conditional — the rail button appeared
+              only once a bookmark already had highlights, and the Co-Pilot
+              was hidden on PDFs because the PDF pane carried its own copy
+              in a second toolbar. Both read as "this app can't do that
+              here". They are always present now, and the PDF pane's
+              copy is gone: its bar keeps only what is genuinely
+              PDF-specific (paging, zoom, night mode). */}
+          <button
+            type="button"
+            data-testid="detail-highlights"
+            onClick={() => openRail(!railOpen)}
+            aria-pressed={railOpen}
+            title={railOpen ? 'Hide highlights' : 'Show highlights'}
+            className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs ${
+              railOpen
+                ? 'bg-neutral-200/70 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200'
+                : 'text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800'
+            }`}
+          >
+            <Icon name="highlight" size={14} />
+            <span className="tabular-nums">{highlights.length}</span>
+          </button>
 
-          {tab !== 'pdf' && (
-            <button
-              type="button"
-              onClick={() => setWebAiDrawerOpen((prev) => !prev)}
-              aria-pressed={webAiDrawerOpen}
-              title={webAiDrawerOpen ? 'Close AI Co-Pilot' : 'Open AI Co-Pilot'}
-              className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition ${
-                webAiDrawerOpen
-                  ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
-                  : 'text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800'
-              }`}
-            >
-              <span className="text-emerald-500">✨</span>
-              <span>AI Co-Pilot</span>
-            </button>
-          )}
+          <button
+            type="button"
+            data-testid="detail-ai-copilot"
+            onClick={() => openAiDrawer(!aiDrawerOpen)}
+            aria-pressed={aiDrawerOpen}
+            title={aiDrawerOpen ? 'Close AI Co-Pilot' : 'Open AI Co-Pilot'}
+            className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition ${
+              aiDrawerOpen
+                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                : 'text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800'
+            }`}
+          >
+            {/* The one emoji in a bar of line icons read as a sticker
+                stuck on the toolbar. Same icon set as everything beside
+                it, tinted rather than illustrated. */}
+            <Icon name="sparkles" size={14} />
+            <span>AI Co-Pilot</span>
+          </button>
           <button
             type="button"
             data-testid="detail-favourite"
@@ -548,6 +583,8 @@ export default function DetailPane({
                 onAnchorStatus={handleAnchorStatus}
                 sourceUrl={content?.sourceUrl || content?.url || undefined}
                 author={content?.author || content?.publisher || undefined}
+                aiDrawerOpen={aiDrawerOpen}
+                onAiContextChange={setPdfAiContext}
               />
             </div>
           )}
@@ -575,30 +612,44 @@ export default function DetailPane({
           </div>
         </div>
 
-        {railOpen && highlights.length > 0 && (
+        {railOpen && (
           <HighlightRail
             highlights={highlights}
             anchored={anchored}
             activeId={focusHighlightId}
             inPdf={!!pdfAssetId}
             onOpen={openHighlight}
-            onClose={() => setRailOpen(false)}
+            onClose={() => openRail(false)}
           />
         )}
 
-        {webAiDrawerOpen && tab !== 'pdf' && (
+        {/* One drawer for every kind of bookmark, docked to the same edge
+            as the highlight rail. Only what it's grounded in differs: the
+            PDF pane reports the page you're on, everything else uses the
+            bookmark's own text. */}
+        {aiDrawerOpen && (
           <PageAiDrawer
-            open={webAiDrawerOpen}
-            onClose={() => setWebAiDrawerOpen(false)}
+            open={aiDrawerOpen}
+            onClose={() => setAiDrawerOpen(false)}
             scopeLabel={
-              display?.kind === 'text' ? 'this note' : display?.kind === 'link' ? 'this article' : 'this page'
+              tab === 'pdf'
+                ? pdfAiContext?.scopeLabel || 'this PDF'
+                : display?.kind === 'text'
+                  ? 'this note'
+                  : display?.kind === 'link'
+                    ? 'this article'
+                    : 'this page'
             }
-            pageText={bookmarkText.data?.text || bookmark.title || ''}
+            pageText={
+              tab === 'pdf'
+                ? pdfAiContext?.pageText || ''
+                : bookmarkText.data?.text || bookmark.title || ''
+            }
             docTitle={title}
             sourceUrl={content?.url || content?.sourceUrl || undefined}
             siteName={content?.publisher || undefined}
             author={content?.author || undefined}
-            docKind={display?.kind === 'text' ? 'note' : 'article'}
+            docKind={tab === 'pdf' ? 'pdf' : display?.kind === 'text' ? 'note' : 'article'}
           />
         )}
       </div>
@@ -641,61 +692,64 @@ function HighlightRail({
   onClose: () => void
 }): React.JSX.Element {
   return (
-    <aside className="flex w-72 flex-shrink-0 flex-col border-l border-neutral-200 bg-neutral-50/50 dark:border-neutral-800 dark:bg-neutral-900/30">
-      <div className="flex items-center gap-1.5 border-b border-neutral-200 px-3 py-2 dark:border-neutral-800">
-        <span className="flex-1 text-xs font-semibold uppercase tracking-wide text-neutral-400">
-          Highlights <span className="tabular-nums text-neutral-500">{highlights.length}</span>
-        </span>
-        <button
-          onClick={onClose}
-          aria-label="Hide highlights"
-          title="Hide highlights"
-          className="grid h-6 w-6 place-items-center rounded text-neutral-400 hover:bg-neutral-200/70 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
-        >
-          <Icon name="close" size={13} />
-        </button>
-      </div>
-      <ul className="min-h-0 flex-1 overflow-y-auto p-1.5">
-        {highlights.map((h) => {
-          const missing = anchored !== null && !anchored.has(h.id)
-          return (
-            <li key={h.id}>
-              <button
-                type="button"
-                onClick={() => onOpen(h)}
-                title={inPdf ? 'Show in the PDF' : 'Show on the live page'}
-                className={`flex w-full gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors ${
-                  h.id === activeId
-                    ? 'bg-emerald-600/10'
-                    : 'hover:bg-neutral-200/60 dark:hover:bg-neutral-800/70'
-                }`}
-              >
-                <span
-                  aria-hidden
-                  className="mt-0.5 w-1 shrink-0 self-stretch rounded-full"
-                  style={{ backgroundColor: colorFor(h.color) }}
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="line-clamp-4 text-xs leading-snug text-neutral-700 dark:text-neutral-200">
-                    {h.text}
+    <SidePanel
+      title="Highlights"
+      count={highlights.length}
+      subtitle={inPdf ? 'In this PDF' : 'On this page'}
+      onClose={onClose}
+      closeLabel="Hide highlights"
+    >
+      {highlights.length === 0 ? (
+        /* The rail is reachable from the toolbar now even when there is
+           nothing in it, so it has to say what it's for rather than open
+           as a blank column. */
+        <p className="px-3 py-4 text-xs leading-relaxed text-neutral-400">
+          No highlights yet. Select text {inPdf ? 'in the PDF' : 'on the page'} and pick a colour to save
+          one here.
+        </p>
+      ) : (
+        <ul className="min-h-0 flex-1 overflow-y-auto p-1.5">
+          {highlights.map((h) => {
+            const missing = anchored !== null && !anchored.has(h.id)
+            return (
+              <li key={h.id}>
+                <button
+                  type="button"
+                  onClick={() => onOpen(h)}
+                  title={inPdf ? 'Show in the PDF' : 'Show on the live page'}
+                  className={`flex w-full gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                    h.id === activeId
+                      ? 'bg-emerald-600/10'
+                      : 'hover:bg-neutral-200/60 dark:hover:bg-neutral-800/70'
+                  }`}
+                >
+                  <span
+                    aria-hidden
+                    className="mt-0.5 w-1 shrink-0 self-stretch rounded-full"
+                    style={{ backgroundColor: colorFor(h.color) }}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="line-clamp-4 text-xs leading-snug text-neutral-700 dark:text-neutral-200">
+                      {h.text}
+                    </span>
+                    {h.note && (
+                      <span className="mt-1 block text-[11px] leading-snug text-neutral-500 dark:text-neutral-400">
+                        {h.note}
+                      </span>
+                    )}
+                    {missing && (
+                      <span className="mt-1 block text-[11px] text-neutral-400">
+                        {inPdf ? 'Not found in this PDF' : 'Not found on the current page'}
+                      </span>
+                    )}
                   </span>
-                  {h.note && (
-                    <span className="mt-1 block text-[11px] leading-snug text-neutral-500 dark:text-neutral-400">
-                      {h.note}
-                    </span>
-                  )}
-                  {missing && (
-                    <span className="mt-1 block text-[11px] text-neutral-400">
-                      {inPdf ? 'Not found in this PDF' : 'Not found on the current page'}
-                    </span>
-                  )}
-                </span>
-              </button>
-            </li>
-          )
-        })}
-      </ul>
-    </aside>
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </SidePanel>
   )
 }
 

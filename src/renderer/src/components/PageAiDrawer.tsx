@@ -12,6 +12,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import type { AiChatMessage } from '../../../shared/types'
 import { useAiStream } from '../lib/useAiStream'
 import { renderMarkdown } from '../lib/miniMarkdown'
+import SidePanel from './SidePanel'
 
 export interface PageAiDrawerProps {
   open: boolean
@@ -113,47 +114,29 @@ export default function PageAiDrawer({
   }
 
   return (
-    <div className="flex h-full w-80 flex-col border-l border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-900">
-      {/* Header */}
-      <div className="flex items-center justify-between border-b border-neutral-200 px-4 py-3 dark:border-neutral-800">
-        <div>
-          <div className="flex items-center gap-1.5">
-            <span className="flex h-2 w-2 rounded-full bg-emerald-500" />
-            <h3 className="text-xs font-semibold text-neutral-900 dark:text-neutral-100">
-              Page AI Co-Pilot
-            </h3>
-          </div>
-          <p className="mt-0.5 text-[11px] text-neutral-500">Grounded in {scopeLabel}</p>
-        </div>
-        <div className="flex items-center gap-1">
-          {messages.length > 0 && (
-            <button
-              type="button"
-              onClick={clearChat}
-              className="rounded p-1 text-[11px] text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
-              title="Clear chat"
-            >
-              Clear
-            </button>
-          )}
+    <SidePanel
+      title="AI Co-Pilot"
+      subtitle={`Grounded in ${scopeLabel}`}
+      onClose={onClose}
+      closeLabel="Close AI panel"
+      actions={
+        messages.length > 0 ? (
           <button
             type="button"
-            onClick={onClose}
-            className="rounded p-1 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
-            aria-label="Close AI panel"
+            onClick={clearChat}
+            className="rounded px-1.5 py-0.5 text-[11px] text-neutral-400 hover:bg-neutral-200/70 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+            title="Clear chat"
           >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-4 w-4">
-              <path d="M18 6L6 18M6 6l12 12" />
-            </svg>
+            Clear
           </button>
-        </div>
-      </div>
-
+        ) : undefined
+      }
+    >
       {/* Ephemeral-chat notice — quiet, so it doesn't compete with the
           quick-action chips, but present so nobody is surprised the
           conversation is gone after closing the drawer. See the
           TODO(ai-chat-persistence) at the top of this file. */}
-      <p className="border-b border-neutral-100 px-4 py-1.5 text-[10px] text-neutral-400 dark:border-neutral-800/60">
+      <p className="border-b border-neutral-100 px-3 py-1.5 text-[10px] text-neutral-400 dark:border-neutral-800/60">
         Chats aren't saved yet — closing this panel clears them.
       </p>
 
@@ -188,7 +171,7 @@ export default function PageAiDrawer({
       )}
 
       {/* Chat Messages */}
-      <div className="flex-1 space-y-3 overflow-y-auto p-3 text-xs leading-relaxed">
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 text-xs leading-relaxed">
         {messages.map((m, i) => (
           <div
             key={i}
@@ -252,7 +235,7 @@ export default function PageAiDrawer({
             onChange={(e) => setInput(e.target.value)}
             placeholder={`Ask about ${scopeLabel}…`}
             disabled={streaming}
-            className="flex-1 rounded-lg border border-neutral-300 bg-neutral-50 px-3 py-1.5 text-xs outline-none focus:border-emerald-500 dark:border-neutral-700 dark:bg-neutral-800"
+            className="min-w-0 flex-1 rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-xs outline-none focus:border-emerald-500 dark:border-neutral-700 dark:bg-neutral-800"
           />
           {streaming ? (
             <button
@@ -273,6 +256,6 @@ export default function PageAiDrawer({
           )}
         </form>
       </div>
-    </div>
+    </SidePanel>
   )
 }

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react'
 import type { Highlight, WebPaneState } from '../../../shared/types'
+import { onWebPaneShown, setWebPaneWanted } from '../lib/webPaneVisibility'
 
 /**
  * The live page, and nothing else.
@@ -71,16 +72,12 @@ export default function WebPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, focusHighlightId, state.isLoading])
 
-  // Show/hide the native view as the tab becomes active/inactive.
+  // Show/hide the native view as the tab becomes active/inactive — through
+  // the coordinator, because a dialog on screen also gets a say (it would
+  // otherwise be painted underneath the live page). See lib/webPaneVisibility.
   useEffect(() => {
-    if (active) {
-      void window.kk.webpane.show()
-    } else {
-      void window.kk.webpane.hide()
-    }
-    return () => {
-      void window.kk.webpane.hide()
-    }
+    setWebPaneWanted(active)
+    return () => setWebPaneWanted(false)
   }, [active])
 
   // Keep native view bounds in sync with the container's on-screen rect.
@@ -105,8 +102,13 @@ export default function WebPane({
     ro.observe(el)
     window.addEventListener('resize', report)
     window.addEventListener('scroll', report, true)
+    // A pane that was hidden for a dialog comes back to a layout that may
+    // have moved on without it, and a hidden element's ResizeObserver never
+    // fired for those changes.
+    const offShown = onWebPaneShown(report)
     return () => {
       ro.disconnect()
+      offShown()
       window.removeEventListener('resize', report)
       window.removeEventListener('scroll', report, true)
     }

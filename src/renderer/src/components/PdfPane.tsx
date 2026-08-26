@@ -40,7 +40,6 @@ import type { AiMode, Highlight } from '../../../shared/types'
 import { useCreateHighlight, useDeleteHighlight, useUpdateHighlight } from '../lib/queries'
 import { useIsDark, usePref } from '../lib/prefs'
 import SelectionAiHUD from './SelectionAiHUD'
-import PageAiDrawer from './PageAiDrawer'
 import {
   buildPageIndex,
   resolveAnchor,
@@ -125,6 +124,17 @@ export interface PdfPaneProps {
   /** Source/author metadata for the AI context injection — see shared/types.ts AiStreamRequest. */
   sourceUrl?: string
   author?: string
+  /**
+   * The Co-Pilot is one control in the detail pane's utility bar, and the
+   * drawer itself is rendered *there* for every kind of bookmark — docked
+   * to the window's edge rather than inside this pane, so it doesn't start
+   * below the PDF's own toolbar while the web version starts above it.
+   * This pane's only job is to keep the chat grounded in the page that is
+   * actually on screen: while the drawer is open it reports the current
+   * page's text and label upward.
+   */
+  aiDrawerOpen?: boolean
+  onAiContextChange?: (context: { scopeLabel: string; pageText: string }) => void
 }
 
 export default function PdfPane(props: PdfPaneProps): React.JSX.Element {
@@ -234,6 +244,8 @@ function PdfSurface({
   onAnchorStatus,
   sourceUrl,
   author,
+  aiDrawerOpen = false,
+  onAiContextChange,
   engine
 }: PdfPaneProps & { engine: PdfEngine }): React.JSX.Element {
   const documentId = assetId
@@ -404,7 +416,6 @@ function PdfSurface({
   }
 
   const [aiSelectionState, setAiSelectionState] = useState<AiSelectionState | null>(null)
-  const [aiDrawerOpen, setAiDrawerOpen] = useState(false)
 
   // Night mode is a reading preference, not a theme: someone may want a dark
   // app around a paper-white PDF (colour-accurate figures) or a dark PDF in a
@@ -430,6 +441,17 @@ function PdfSurface({
     }, 400)
     return () => clearTimeout(timer)
   }, [aiDrawerOpen, doc, index, scrollState.currentPage, pageText])
+
+  // Hand that context to whoever is rendering the drawer. Kept as its own
+  // effect so the label updates the moment the page changes, without
+  // waiting on the text fetch above.
+  useEffect(() => {
+    if (!aiDrawerOpen) return
+    onAiContextChange?.({
+      scopeLabel: `page ${scrollState.currentPage} of ${totalPages || '—'}`,
+      pageText: currentPageText
+    })
+  }, [aiDrawerOpen, currentPageText, scrollState.currentPage, totalPages, onAiContextChange])
 
   const askAiFromSelection = useCallback(
     async (rect: Rect, pageIndex: number, mode: AiMode = 'micro-explain') => {
@@ -934,26 +956,10 @@ function PdfSurface({
           {night ? '☾' : '☀'}
         </button>
 
-        <span className="mx-1 h-4 w-px bg-neutral-200 dark:bg-neutral-800" />
-
-        <button
-          type="button"
-          onClick={() => {
-            // The effect above handles fetching the page text whenever the
-            // drawer is open and the current page changes, including the
-            // moment it's first opened — nothing more to do here.
-            setAiDrawerOpen((prev) => !prev)
-          }}
-          className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium transition-colors ${
-            aiDrawerOpen
-              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
-              : 'text-neutral-600 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800'
-          }`}
-          title="Toggle Page AI Co-Pilot"
-        >
-          <span>✨</span>
-          <span>AI Co-Pilot</span>
-        </button>
+        {/* No Co-Pilot button here. It lives in the detail pane's utility
+            bar alongside highlights, favourite and archive, so the same
+            controls are in the same place whether you're reading a PDF or
+            a live page. This bar is only for what's specific to a PDF. */}
 
         <div className="ml-auto text-neutral-400">
           {indexing
@@ -964,8 +970,18 @@ function PdfSurface({
         </div>
       </div>
 
-      <div className="flex h-full min-h-0 flex-1 overflow-hidden">
-        <div className="h-full min-h-0 flex-1">
+      {/* `min-w-0` on both, and it is load-bearing. A flex item defaults to
+          `min-width: auto`, which is the *content's* min-content width — and
+          a laid-out PDF page is a fixed pixel width, so this column simply
+          refused to shrink when a side pane opened. The page kept its width
+          and slid under the pane (clipped by `overflow-hidden`), which also
+          meant the viewport element never resized, so the zoom plugin's
+          resize observer never fired and FitWidth never re-fitted.
+          No `h-full` on the row either: it sits under the toolbar in a
+          column, so a full-height row overflows the pane by the toolbar's
+          height — `flex-1` is the height that's actually left. */}
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+        <div className="h-full min-h-0 min-w-0 flex-1">
           <Viewport
             documentId={documentId}
             className={`h-full w-full overflow-auto ${
@@ -981,18 +997,6 @@ function PdfSurface({
           </Viewport>
         </div>
 
-        {aiDrawerOpen && (
-          <PageAiDrawer
-            open={aiDrawerOpen}
-            onClose={() => setAiDrawerOpen(false)}
-            scopeLabel={`page ${scrollState.currentPage} of ${totalPages || '—'}`}
-            pageText={currentPageText}
-            docTitle={title || fileName}
-            sourceUrl={sourceUrl}
-            author={author}
-            docKind="pdf"
-          />
-        )}
       </div>
 
       {aiSelectionState && (
