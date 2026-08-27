@@ -14,8 +14,16 @@
  * that owns them.
  */
 
+/**
+ * The colours Karakeep will actually store. The server validates this field
+ * against z.enum(["yellow", "red", "green", "blue"]) and 400s on anything
+ * else, so this union is the client-side mirror of that enum: offering a
+ * swatch outside it is a type error here rather than a failed write later.
+ */
+export type HighlightColorName = 'yellow' | 'red' | 'green' | 'blue'
+
 export interface HighlightColor {
-  name: string
+  name: HighlightColorName
   hex: string
 }
 
@@ -23,14 +31,26 @@ export const HIGHLIGHT_COLORS: HighlightColor[] = [
   { name: 'yellow', hex: '#f5c518' },
   { name: 'green', hex: '#10b981' },
   { name: 'blue', hex: '#3b82f6' },
-  { name: 'purple', hex: '#a855f7' },
   { name: 'red', hex: '#ef4444' }
 ]
 
-export const DEFAULT_HIGHLIGHT_COLOR = 'yellow'
+export const DEFAULT_HIGHLIGHT_COLOR: HighlightColorName = 'yellow'
 
 export function hexForColor(color?: string | null): string {
   return HIGHLIGHT_COLORS.find((c) => c.name === color)?.hex ?? HIGHLIGHT_COLORS[0].hex
+}
+
+/**
+ * Coerces a colour of unknown provenance to one the server accepts.
+ *
+ * Colours reach the write path from places the type system does not cover —
+ * an IPC payload from the preload script, a highlight stored before the
+ * palette changed. Losing the whole highlight to a 400 is a far worse outcome
+ * than storing it in the default colour, so anything unrecognised becomes the
+ * default instead of travelling to the API and failing there.
+ */
+export function normalizeHighlightColor(color?: string | null): HighlightColorName {
+  return HIGHLIGHT_COLORS.find((c) => c.name === color)?.name ?? DEFAULT_HIGHLIGHT_COLOR
 }
 
 /** Lucide-ish single-path icons, drawn by both panes at 24x24. */

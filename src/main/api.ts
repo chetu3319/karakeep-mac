@@ -28,6 +28,7 @@ import {
   type UploadedAsset,
   type User
 } from '../shared/types'
+import { normalizeHighlightColor } from '../shared/highlightUi'
 
 const DEFAULT_TIMEOUT_MS = 15000
 // Uploads carry whole files, so they get a longer leash than a JSON call —
@@ -257,15 +258,21 @@ export class KarakeepApiClient {
   }): Promise<Highlight> {
     // The server's schema wants `note` present, not merely optional — a
     // POST without it comes back 400 with a ZodError on that field.
+    // Colour is normalized here rather than at each call site: both panes
+    // reach the API through this client, so this is the one place every
+    // highlight write passes through.
     const res = await this.request<unknown>('/highlights', {
       method: 'POST',
-      body: { ...data, note: data.note ?? '' }
+      body: { ...data, color: normalizeHighlightColor(data.color), note: data.note ?? '' }
     })
     return res as Highlight
   }
 
   async updateHighlight(id: string, data: { color?: string; note?: string }): Promise<Highlight> {
-    const res = await this.request<unknown>(`/highlights/${id}`, { method: 'PATCH', body: data })
+    // A PATCH omitting `color` must stay a note-only edit, so only normalize
+    // when a colour is actually being set.
+    const body = data.color === undefined ? data : { ...data, color: normalizeHighlightColor(data.color) }
+    const res = await this.request<unknown>(`/highlights/${id}`, { method: 'PATCH', body })
     return res as Highlight
   }
 
