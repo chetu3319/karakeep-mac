@@ -1,4 +1,5 @@
 import type { BookmarkListFilter } from '../../../shared/types'
+import { HIGHLIGHT_COLORS } from '../../../shared/highlightUi'
 
 /**
  * What the sidebar is currently pointed at. Lived as three separate
@@ -95,7 +96,13 @@ export function parseSelection(raw: unknown): Selection {
     case 'highlights':
       return {
         type: 'highlights',
-        colors: Array.isArray(value.colors) ? value.colors.filter((c): c is string => typeof c === 'string') : []
+        // Drop colours the palette no longer carries. A filter persisted by an
+        // older build could name one (purple, before the server's enum was
+        // mirrored here), and keeping it would leave the user on a filter that
+        // matches nothing with no swatch lit to explain why.
+        colors: Array.isArray(value.colors)
+          ? value.colors.filter((c): c is string => typeof c === 'string' && HIGHLIGHT_COLORS.some((k) => k.name === c))
+          : []
       }
     default:
       return { type: 'all' }

@@ -26,6 +26,7 @@ import {
   ICON_NOTE,
   ICON_TRASH,
   highlightPopoverStylesheet,
+  normalizeHighlightColor,
   placePopover
 } from '../shared/highlightUi'
 import { IPC } from '../shared/ipc'
@@ -596,7 +597,7 @@ function karakeepInit(): void {
       endOffset
     }
     pageHighlights.push(hl)
-    lastUsedColor = color
+    lastUsedColor = normalizeHighlightColor(color)
     marks.forEach((m) => bindMark(m, hl))
 
     sendHost('kk:highlight-created', hl)
@@ -609,7 +610,7 @@ function karakeepInit(): void {
   function setHighlightColor(hl: StoredHighlight, color: string): void {
     if (hl.color === color) return
     hl.color = color
-    lastUsedColor = color
+    lastUsedColor = normalizeHighlightColor(color)
     for (const el of marksFor(hl.id)) el.dataset.khColor = color
     sendHost('kk:highlight-updated', hl)
   }
