@@ -17,3 +17,4 @@ BOUNDARIES.md
 
 # Verbatim third-party sources, kept locally for reading. Not ours to redistribute.
 reference/
+.env

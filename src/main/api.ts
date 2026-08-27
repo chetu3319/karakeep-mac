@@ -3,6 +3,7 @@
  * Ported from reference/karakeep-extension-api.js to TypeScript.
  * The API key never leaves the main process.
  */
+import { net } from 'electron'
 import {
   BookmarkSchema,
   BookmarksPageSchema,
@@ -75,7 +76,12 @@ export class KarakeepApiClient {
     const timeoutId = setTimeout(() => controller.abort(), options.timeout || DEFAULT_TIMEOUT_MS)
 
     try {
-      const response = await fetch(url, {
+      // Use Electron's net.fetch (Chromium network stack) rather than Node's
+      // global fetch (undici). Only net.fetch honours the system proxy and the
+      // system/corporate certificate store — the same stack the browser uses —
+      // so a config that authenticates in the browser also works here. undici
+      // ignores both and fails with an opaque "fetch failed".
+      const response = await net.fetch(url, {
         method: options.method || 'GET',
         headers,
         body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
@@ -96,6 +102,11 @@ export class KarakeepApiClient {
       if (e instanceof Error && e.name === 'AbortError') {
         throw new ApiError('Request timed out. Check your server address and network connection.')
       }
+      // undici/Chromium wrap the real network error in `cause`; surface it so
+      // the console shows the actual reason (ECONNREFUSED, cert error, proxy,
+      // DNS) instead of a bare "fetch failed".
+      const cause = e instanceof Error ? (e as Error & { cause?: unknown }).cause : undefined
+      console.error('[api] request failed', { url, method: options.method || 'GET', message: e instanceof Error ? e.message : String(e), cause })
       throw e
     } finally {
       clearTimeout(timeoutId)
@@ -117,7 +128,7 @@ export class KarakeepApiClient {
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), timeout || UPLOAD_TIMEOUT_MS)
     try {
-      const response = await fetch(`${baseUrl.replace(/\/$/, '')}/api/v1${endpoint}`, {
+      const response = await net.fetch(`${baseUrl.replace(/\/$/, '')}/api/v1${endpoint}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${apiKey}`, ...(customHeaders || {}) },
         body: form,
@@ -378,7 +389,7 @@ export class KarakeepApiClient {
     const { baseUrl, apiKey, customHeaders } = this.config
     if (!baseUrl || !apiKey) throw new ApiError('Not configured')
     const url = `${baseUrl.replace(/\/$/, '')}/api/assets/${assetId}`
-    const response = await fetch(url, {
+    const response = await net.fetch(url, {
       headers: { Authorization: `Bearer ${apiKey}`, ...(customHeaders || {}) }
     })
     if (!response.ok) throw new ApiError(`Asset error ${response.status}`, response.status)
@@ -397,7 +408,7 @@ export class KarakeepApiClient {
     const { baseUrl, apiKey, customHeaders } = this.config
     if (!baseUrl || !apiKey) throw new ApiError('Not configured')
     const url = `${baseUrl.replace(/\/$/, '')}/api/assets/${assetId}`
-    const response = await fetch(url, {
+    const response = await net.fetch(url, {
       headers: { Authorization: `Bearer ${apiKey}`, ...(customHeaders || {}) }
     })
     if (!response.ok) throw new ApiError(`Asset error ${response.status}`, response.status)

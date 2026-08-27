@@ -25,6 +25,14 @@ import type {
 const isDev = !app.isPackaged
 const projectRoot = join(__dirname, '../..')
 
+// On macOS, Node.js fetch uses its own CA bundle and ignores the system
+// Keychain. Corporate SSL-inspection proxies (e.g. Zscaler, Palo Alto)
+// re-sign TLS traffic with a corporate CA that IT installs into the system
+// Keychain — trusted by browsers but not by Electron. This flag makes
+// Electron use the OS certificate store for TLS verification, matching
+// browser behaviour.
+app.commandLine.appendSwitch('use-system-default-certificates')
+
 /**
  * In a packaged build the icon comes from the app bundle, but `npm run
  * dev` runs inside the stock Electron binary and inherits its default
@@ -165,13 +173,20 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.AUTH_TEST, async (): Promise<AuthResult> => {
     try {
+      const resolved = store.getResolvedConfig()
+      // Log the target (never the key) so a failed dev-build auth shows
+      // exactly which base URL was hit.
+      console.log('[auth] testing', { baseUrl: resolved?.baseUrl, hasApiKey: !!resolved?.apiKey })
       const client = apiClient ?? makeClientFromStore()
       if (!client) return { ok: false, error: 'Not configured' }
       const user = await client.getMe()
       apiClient = client
       return { ok: true, user }
     } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      const message = e instanceof Error ? e.message : String(e)
+      const cause = e instanceof Error ? (e as Error & { cause?: unknown }).cause : undefined
+      console.error('[auth] test failed', { message, cause })
+      return { ok: false, error: message }
     }
   })
 
