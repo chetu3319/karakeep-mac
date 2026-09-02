@@ -1,3 +1,4 @@
+import { net } from 'electron'
 import { getResolvedAiConfig, setAiConfig } from './store'
 import type { AiStreamRequest, AiTestResult } from '../shared/types'
 
@@ -75,7 +76,10 @@ export class GeminiAiService {
       // crash reports, and dev-tools network panels, none of which should
       // ever see a live credential.
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`
-      const res = await fetch(url, {
+      // net.fetch, not global fetch — see the note in api.ts. A corporate
+      // SSL-inspection proxy breaks Gemini exactly the way it breaks the
+      // Karakeep API, so both have to ride the Chromium stack.
+      const res = await net.fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
         body: JSON.stringify({
@@ -124,7 +128,7 @@ export class GeminiAiService {
 
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`
 
-      const res = await fetch(url, {
+      const res = await net.fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
         signal: controller.signal,

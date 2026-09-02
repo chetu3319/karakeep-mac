@@ -25,12 +25,12 @@ import type {
 const isDev = !app.isPackaged
 const projectRoot = join(__dirname, '../..')
 
-// On macOS, Node.js fetch uses its own CA bundle and ignores the system
-// Keychain. Corporate SSL-inspection proxies (e.g. Zscaler, Palo Alto)
-// re-sign TLS traffic with a corporate CA that IT installs into the system
-// Keychain — trusted by browsers but not by Electron. This flag makes
-// Electron use the OS certificate store for TLS verification, matching
-// browser behaviour.
+// Corporate SSL-inspection proxies (e.g. Zscaler, Palo Alto) re-sign TLS
+// traffic with a corporate CA that IT installs into the system Keychain.
+// Requests now go through Chromium (see the net.fetch note in api.ts), which
+// already consults the platform trust store for admin- and user-added roots
+// on macOS — this switch makes that dependence explicit rather than resting
+// on a Chrome Root Store default that has changed before.
 app.commandLine.appendSwitch('use-system-default-certificates')
 
 /**
@@ -184,8 +184,7 @@ function registerIpc(): void {
       return { ok: true, user }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
-      const cause = e instanceof Error ? (e as Error & { cause?: unknown }).cause : undefined
-      console.error('[auth] test failed', { message, cause })
+      console.error('[auth] test failed', { message })
       return { ok: false, error: message }
     }
   })
