@@ -103,11 +103,21 @@ export class KarakeepApiClient {
       if (e instanceof Error && e.name === 'AbortError') {
         throw new ApiError('Request timed out. Check your server address and network connection.')
       }
-      // undici/Chromium wrap the real network error in `cause`; surface it so
-      // the console shows the actual reason (ECONNREFUSED, cert error, proxy,
-      // DNS) instead of a bare "fetch failed".
-      const cause = e instanceof Error ? (e as Error & { cause?: unknown }).cause : undefined
-      console.error('[api] request failed', { url, method: options.method || 'GET', message: e instanceof Error ? e.message : String(e), cause })
+      // Only transport failures are worth a console line. An ApiError here is
+      // the server answering with a non-2xx — ordinary control flow the caller
+      // already handles, and logging it would print the URL (with bookmark and
+      // asset ids) on every routine 401/404.
+      //
+      // Chromium puts the real reason in `message` (`net::ERR_CERT_DATE_INVALID`,
+      // `net::ERR_NAME_NOT_RESOLVED`, ...) rather than in `cause` the way undici
+      // did, so the message alone is now the diagnosis.
+      if (!(e instanceof ApiError)) {
+        console.error('[api] request failed', {
+          url,
+          method: options.method || 'GET',
+          message: e instanceof Error ? e.message : String(e)
+        })
+      }
       throw e
     } finally {
       clearTimeout(timeoutId)
