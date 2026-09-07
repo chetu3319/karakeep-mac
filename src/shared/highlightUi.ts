@@ -61,6 +61,15 @@ export const ICON_CHECK = 'M5 13l4 4L19 7'
 export const ICON_AI = 'M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83'
 
 /**
+ * How long a "Copy" button shows its copied confirmation (check icon +
+ * "Copied" label) before the popover closes. Long enough to register as
+ * feedback, short enough not to feel like the popover is stuck open. Shared
+ * so the Web pane's DOM button and the PDF pane's React button land on the
+ * same timing rather than drifting apart like the old per-pane styles did.
+ */
+export const COPY_CONFIRM_MS = 1200
+
+/**
  * Styles for the popover.
  *
  * In the Web pane this is injected into a *closed shadow root* whose host

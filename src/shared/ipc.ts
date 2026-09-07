@@ -48,6 +48,13 @@ export const IPC = {
   STORE_GET_LIST_ORDER: 'store:get-list-order',
   STORE_SET_LIST_ORDER: 'store:set-list-order',
 
+  // Clipboard. The Web pane's `navigator.clipboard.writeText` runs inside the
+  // *bookmarked page's* document, not Karakeep's own — it can be undefined
+  // outright on a non-secure-context (plain http) page, or silently rejected
+  // when the page isn't focused. Electron's `clipboard` module in the main
+  // process has neither restriction, so it's the fallback path for "Copy".
+  CLIPBOARD_WRITE_TEXT: 'clipboard:write-text',
+
   // Window chrome
   WINDOW_MINIMIZE: 'window:minimize',
   WINDOW_MAXIMIZE: 'window:maximize',

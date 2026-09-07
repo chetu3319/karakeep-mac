@@ -26,6 +26,7 @@ import type { PdfDocumentObject, PdfEngine, PdfPageGeometry, Rect } from '@embed
 import pdfiumWasmUrl from '@embedpdf/pdfium/pdfium.wasm?url'
 
 import {
+  COPY_CONFIRM_MS,
   DEFAULT_HIGHLIGHT_COLOR,
   HIGHLIGHT_COLORS as COLORS,
   ICON_CHECK,
@@ -400,6 +401,65 @@ function PdfSurface({
     },
     [selection, index, doc, documentId, engine, bookmarkId, createHighlight]
   )
+
+  // ── Copying the current selection ───────────────────────────────────────
+  // Mirrors createFromSelection's text extraction (toGlobal + spansForRange +
+  // textForSpans) rather than the simpler `scope.getSelectedText()` used by
+  // the dev smoke test, so a copied highlight and a copy-from-selection agree
+  // byte-for-byte on what the selection's text actually is.
+  const copyFromSelection = useCallback(async (): Promise<void> => {
+    if (!selection || !index || !doc) return
+    const scope = selection.forDocument(documentId)
+    const range = scope.getState().selection
+    if (!range) return
+
+    const a = toGlobal(index, range.start.page, range.start.index)
+    const b = toGlobal(index, range.end.page, range.end.index)
+    const start = Math.min(a, b)
+    const end = Math.max(a, b) + 1
+
+    const text = (await textForSpans(engine, doc, spansForRange(index, start, end))).trim()
+    if (!text) return
+
+    try {
+      // The renderer's own document is Karakeep's — always a secure
+      // context — so this isn't expected to fail the way it can in the Web
+      // pane's arbitrary-page preload. Still shouldn't crash the reader if
+      // it does.
+      await navigator.clipboard.writeText(text)
+    } catch {
+      // Nothing more to fall back to here; the button simply won't confirm.
+    }
+
+    // Leave the live selection (and therefore the selection menu) in place
+    // for the "Copied" confirmation beat — clearing it immediately would
+    // unmount the menu before the confirmation ever painted, since its
+    // visibility is driven by whether a selection exists.
+    setTimeout(() => scope.clear(), COPY_CONFIRM_MS)
+  }, [selection, index, doc, documentId, engine])
+
+  // The page renders as an <img> and the text layer is embedpdf's own
+  // selection engine, not a real browser Selection — so the OS's own
+  // Cmd/Ctrl+C shortcut has no DOM selection to act on and is otherwise a
+  // silent no-op, even with a highlight-toolbar-worthy selection visibly
+  // drawn on screen. Wire the shortcut to the same copy path the toolbar
+  // button uses.
+  useEffect(() => {
+    if (!selection || !documentId) return
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'c') return
+      // A real DOM selection — text selected inside a note, the AI drawer,
+      // or anywhere else with actual selectable text — already has native
+      // copy support; don't steal the shortcut from it.
+      if (document.getSelection()?.toString()) return
+      const scope = selection.forDocument(documentId)
+      if (!scope.getState().selection) return
+      e.preventDefault()
+      void copyFromSelection()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [selection, documentId, copyFromSelection])
 
   const [noteDraftFor, setNoteDraftFor] = useState<string | null>(null)
 
@@ -867,6 +927,7 @@ function PdfSurface({
         }}
         onCreate={createFromSelection}
         onAskAi={askAiFromSelection}
+        onCopy={copyFromSelection}
       />
     ),
     [
@@ -881,7 +942,8 @@ function PdfSurface({
       deleteHighlight,
       bookmarkId,
       createFromSelection,
-      askAiFromSelection
+      askAiFromSelection,
+      copyFromSelection
     ]
   )
 
@@ -1037,6 +1099,7 @@ interface PdfPageProps {
   onDelete: (id: string) => Promise<void>
   onCreate: (color: string, withNote: boolean) => Promise<string | null>
   onAskAi: (rect: Rect, pageIndex: number, mode?: AiMode) => void
+  onCopy: () => void
 }
 
 function PdfPage({
@@ -1056,7 +1119,8 @@ function PdfPage({
   onRecolor,
   onDelete,
   onCreate,
-  onAskAi
+  onAskAi,
+  onCopy
 }: PdfPageProps): React.JSX.Element {
   const geo = geometry.get(pageIndex)
 
@@ -1184,6 +1248,7 @@ function PdfPage({
               pageIndex={pageIndex}
               onCreate={onCreate}
               onAskAi={(mode) => onAskAi(menu.rect, pageIndex, mode)}
+              onCopy={onCopy}
             />
           ) : null
         }
@@ -1398,19 +1463,25 @@ function SwatchRow({
   )
 }
 
-/** Colour swatches + "Note" + "Ask AI", shown against a live text selection. */
+/** Colour swatches + "Note" + "Copy" + "Ask AI", shown against a live text selection. */
 function SelectionMenu({
   rect,
   pageIndex,
   onCreate,
-  onAskAi
+  onAskAi,
+  onCopy
 }: {
   rect: Rect
   pageIndex: number
   onCreate: (color: string, withNote: boolean) => Promise<string | null>
   onAskAi?: (mode?: AiMode) => void
+  onCopy?: () => void
 }): React.JSX.Element {
   const [busy, setBusy] = useState(false)
+  // The actual selection (and therefore this menu) stays alive for
+  // COPY_CONFIRM_MS after a copy — see copyFromSelection in PdfPane — purely
+  // so this local flag has time to render before the menu unmounts.
+  const [copied, setCopied] = useState(false)
 
   // `rect` is page-relative and already scaled; the popover is placed in
   // viewport coordinates, so it needs the page's own position added.
@@ -1445,6 +1516,18 @@ function SelectionMenu({
         disabled={busy}
         onClick={() => void run(DEFAULT_HIGHLIGHT_COLOR, true)}
         data-kk-note=""
+      />
+      {/* Copy sits right next to Note, mirroring where it lands on an
+          existing highlight's popover (HighlightPopover below). */}
+      <PopButton
+        label={copied ? 'Copied' : 'Copy'}
+        icon={copied ? ICON_CHECK : ICON_COPY}
+        disabled={busy || copied}
+        onClick={() => {
+          setCopied(true)
+          onCopy?.()
+        }}
+        data-kk-copy=""
       />
       <div className="kh-sep" />
       <PopButton
