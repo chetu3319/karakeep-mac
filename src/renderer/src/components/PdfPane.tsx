@@ -407,11 +407,13 @@ function PdfSurface({
   // textForSpans) rather than the simpler `scope.getSelectedText()` used by
   // the dev smoke test, so a copied highlight and a copy-from-selection agree
   // byte-for-byte on what the selection's text actually is.
-  const copyFromSelection = useCallback(async (): Promise<void> => {
-    if (!selection || !index || !doc) return
+  // Returns whether the copy actually happened, so the button only shows
+  // "Copied" when there was something to confirm.
+  const copyFromSelection = useCallback(async (): Promise<boolean> => {
+    if (!selection || !index || !doc) return false
     const scope = selection.forDocument(documentId)
     const range = scope.getState().selection
-    if (!range) return
+    if (!range) return false
 
     const a = toGlobal(index, range.start.page, range.start.index)
     const b = toGlobal(index, range.end.page, range.end.index)
@@ -419,7 +421,7 @@ function PdfSurface({
     const end = Math.max(a, b) + 1
 
     const text = (await textForSpans(engine, doc, spansForRange(index, start, end))).trim()
-    if (!text) return
+    if (!text) return false
 
     try {
       // The renderer's own document is Karakeep's — always a secure
@@ -429,13 +431,15 @@ function PdfSurface({
       await navigator.clipboard.writeText(text)
     } catch {
       // Nothing more to fall back to here; the button simply won't confirm.
+      return false
     }
 
-    // Leave the live selection (and therefore the selection menu) in place
-    // for the "Copied" confirmation beat — clearing it immediately would
-    // unmount the menu before the confirmation ever painted, since its
-    // visibility is driven by whether a selection exists.
-    setTimeout(() => scope.clear(), COPY_CONFIRM_MS)
+    // The selection itself is left untouched — copying shouldn't cost the
+    // user their selection, any more than it does anywhere else text gets
+    // copied. The menu's "Copied" state (SelectionMenu, below) reverts on
+    // its own timer; the selection stays live until the user dismisses the
+    // menu (click away / Escape) or replaces it with a new one.
+    return true
   }, [selection, index, doc, documentId, engine])
 
   // The page renders as an <img> and the text layer is embedpdf's own
@@ -1099,7 +1103,7 @@ interface PdfPageProps {
   onDelete: (id: string) => Promise<void>
   onCreate: (color: string, withNote: boolean) => Promise<string | null>
   onAskAi: (rect: Rect, pageIndex: number, mode?: AiMode) => void
-  onCopy: () => void
+  onCopy: () => Promise<boolean>
 }
 
 function PdfPage({
@@ -1400,6 +1404,11 @@ function PopButton({
   iconOnly,
   primary,
   disabled,
+  // The set of labels this button ever shows (e.g. ['Copy', 'Copied']).
+  // When given, all of them are stacked so the button's width is pinned to
+  // the widest one from the start — see the .kh-btn-label-stack rule in
+  // highlightUi.ts for why that's what stops the popover from jumping.
+  reserveLabels,
   ...rest
 }: {
   label: string
@@ -1409,6 +1418,7 @@ function PopButton({
   iconOnly?: boolean
   primary?: boolean
   disabled?: boolean
+  reserveLabels?: string[]
 } & React.HTMLAttributes<HTMLButtonElement>): React.JSX.Element {
   return (
     <button
@@ -1422,7 +1432,18 @@ function PopButton({
       {...rest}
     >
       {icon && <Icon path={icon} />}
-      {!iconOnly && <span>{label}</span>}
+      {!iconOnly &&
+        (reserveLabels ? (
+          <span className="kh-btn-label-stack">
+            {reserveLabels.map((l) => (
+              <span key={l} data-shown={l === label ? '1' : undefined}>
+                {l}
+              </span>
+            ))}
+          </span>
+        ) : (
+          <span>{label}</span>
+        ))}
     </button>
   )
 }
@@ -1475,13 +1496,24 @@ function SelectionMenu({
   pageIndex: number
   onCreate: (color: string, withNote: boolean) => Promise<string | null>
   onAskAi?: (mode?: AiMode) => void
-  onCopy?: () => void
+  onCopy?: () => Promise<boolean>
 }): React.JSX.Element {
   const [busy, setBusy] = useState(false)
-  // The actual selection (and therefore this menu) stays alive for
-  // COPY_CONFIRM_MS after a copy — see copyFromSelection in PdfPane — purely
-  // so this local flag has time to render before the menu unmounts.
+  // Copying no longer clears the selection or closes the menu (see
+  // copyFromSelection above) — the selection is left alone, exactly as it
+  // would be after any other copy. This flag only drives the button's own
+  // "Copied" label, and reverts itself after COPY_CONFIRM_MS below so the
+  // button is clickable again without the user having to reopen the menu.
   const [copied, setCopied] = useState(false)
+
+  // Revert "Copied" back to "Copy" after COPY_CONFIRM_MS. The cleanup here
+  // matters: if the popover unmounts mid-confirmation (the user dismissed it
+  // before the timer fired), there is no `copied` state left to set.
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(false), COPY_CONFIRM_MS)
+    return () => clearTimeout(timer)
+  }, [copied])
 
   // `rect` is page-relative and already scaled; the popover is placed in
   // viewport coordinates, so it needs the page's own position added.
@@ -1521,11 +1553,17 @@ function SelectionMenu({
           existing highlight's popover (HighlightPopover below). */}
       <PopButton
         label={copied ? 'Copied' : 'Copy'}
+        reserveLabels={['Copy', 'Copied']}
         icon={copied ? ICON_CHECK : ICON_COPY}
         disabled={busy || copied}
         onClick={() => {
-          setCopied(true)
-          onCopy?.()
+          void (async () => {
+            // Only confirm if the copy actually happened — otherwise the
+            // button would be stuck showing "Copied" for a copy that never
+            // reached the clipboard (e.g. an empty selection).
+            const ok = (await onCopy?.()) ?? false
+            if (ok) setCopied(true)
+          })()
         }}
         data-kk-copy=""
       />

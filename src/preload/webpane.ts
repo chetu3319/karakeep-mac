@@ -759,7 +759,16 @@ function karakeepInit(): void {
     iconPath: string,
     onClick: () => void,
     danger = false,
-    iconOnly = false
+    iconOnly = false,
+    // The full set of labels this button will ever show (e.g.
+    // ['Copy', 'Copied']). When given, every label is rendered up front in
+    // a stacked span (see .kh-btn-label-stack in highlightUi.ts) so the
+    // button's width is pinned to the widest of them from the start —
+    // swapping the active one with setBtnLabel() below never resizes the
+    // button, which is what stops the popover from jumping sideways
+    // (placePopover re-centres the whole popover on the anchor every time
+    // it's placed, so any child that grows drags the popover with it).
+    reserveLabels?: string[]
   ): HTMLElement {
     const b = document.createElement('button')
     b.className = iconOnly ? 'kh-btn kh-icon-only' : 'kh-btn'
@@ -768,6 +777,16 @@ function karakeepInit(): void {
     if (iconOnly) {
       b.title = label
       b.setAttribute('aria-label', label)
+    } else if (reserveLabels) {
+      const stack = document.createElement('span')
+      stack.className = 'kh-btn-label-stack'
+      for (const l of reserveLabels) {
+        const span = document.createElement('span')
+        span.textContent = l
+        if (l === label) span.dataset.shown = '1'
+        stack.appendChild(span)
+      }
+      b.appendChild(stack)
     } else {
       const span = document.createElement('span')
       span.textContent = label
@@ -779,6 +798,22 @@ function karakeepInit(): void {
       onClick()
     })
     return b
+  }
+
+  /** Swaps which label is visible in a button built with `reserveLabels`. */
+  function setBtnLabel(b: HTMLElement, label: string): void {
+    const stack = b.querySelector('.kh-btn-label-stack')
+    if (!stack) return
+    for (const span of Array.from(stack.children)) {
+      const el = span as HTMLElement
+      if (el.textContent === label) el.dataset.shown = '1'
+      else delete el.dataset.shown
+    }
+  }
+
+  /** Swaps a button's leading icon (e.g. the copy icon for a checkmark). */
+  function setBtnIcon(b: HTMLElement, iconPath: string): void {
+    b.querySelector('svg')?.replaceWith(icon(iconPath))
   }
 
   function makeSwatchRow(active: string | null, onPick: (color: string) => void): HTMLElement {
@@ -873,22 +908,38 @@ function karakeepInit(): void {
     // Copy sits right next to Note, same as it does on an existing
     // highlight's popover — copying is the other thing you'd want to do
     // with a selection before committing to a colour or a note.
-    const copyBtn = makeButton('Copy', ICON_COPY, () => {
-      const text = range.toString()
-      void copyToClipboard(text).catch(() => undefined)
-      // Swap in a check + "Copied" so the click has visible feedback before
-      // the popover disappears, instead of the selection just vanishing.
-      copyBtn.replaceChildren(icon(ICON_CHECK), Object.assign(document.createElement('span'), { textContent: 'Copied' }))
-      ;(copyBtn as HTMLButtonElement).disabled = true
-      setTimeout(() => {
-        // Guard against a different popover having opened in the meantime
-        // (e.g. the user made a new selection while "Copied" was showing) —
-        // this timer must only ever close the popover it belongs to.
-        if (popover?.el !== el) return
-        closePopover()
-        window.getSelection()?.removeAllRanges()
-      }, COPY_CONFIRM_MS)
-    })
+    const copyBtn = makeButton(
+      'Copy',
+      ICON_COPY,
+      () => {
+        const text = range.toString()
+        // Nothing was actually copied — don't show a confirmation for a
+        // copy that never happened, and don't leave the button stuck on
+        // "Copied" forever since nothing will ever flip it back.
+        if (!text) return
+        void copyToClipboard(text).catch(() => undefined)
+        // Swap in a check + "Copied" for visible feedback. The selection
+        // and the popover are left alone: copying shouldn't cost the user
+        // their selection any more than it would anywhere else text gets
+        // copied, and closing here used to do exactly that.
+        setBtnIcon(copyBtn, ICON_CHECK)
+        setBtnLabel(copyBtn, 'Copied')
+        ;(copyBtn as HTMLButtonElement).disabled = true
+        setTimeout(() => {
+          // Guard against this popover having been replaced or closed in
+          // the meantime (e.g. the user dismissed it, or a new selection
+          // opened a different popover reusing this same closure) — this
+          // timer must only ever touch the button it belongs to.
+          if (popover?.el !== el) return
+          setBtnIcon(copyBtn, ICON_COPY)
+          setBtnLabel(copyBtn, 'Copy')
+          ;(copyBtn as HTMLButtonElement).disabled = false
+        }, COPY_CONFIRM_MS)
+      },
+      false,
+      false,
+      ['Copy', 'Copied']
+    )
     el.appendChild(copyBtn)
 
     const sep2 = document.createElement('div')
