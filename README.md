@@ -80,6 +80,22 @@ signing and notarization would need a paid Apple Developer account.
 Other scripts: `npm run typecheck`, `npm run build`, `npm run icon` (regenerates
 the app icon), `npm run smoke` (drives the app headlessly and screenshots it).
 
+## Cutting a release
+
+Releases are built and published by GitHub Actions
+(`.github/workflows/release.yml`), not by hand.
+
+1. Bump `version` in `package.json` and commit it to `main`.
+2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`. The tag must match
+   the `package.json` version or the workflow fails.
+3. Watch the run under the repo's Actions tab. It publishes a Release with the
+   `.dmg`, the `.zip` and `SHA256SUMS.txt`, plus an install preamble and
+   auto-generated notes.
+4. Edit the release notes afterwards if you want a hand-written summary.
+
+The workflow can also be run manually from the Actions tab; that only uploads
+the build as a workflow artifact and creates no release.
+
 ## Stack
 
 Electron 32 · electron-vite · React 18 · TypeScript (strict) · Tailwind ·
