@@ -19,9 +19,11 @@
 import { ipcRenderer } from 'electron'
 
 import {
+  COPY_CONFIRM_MS,
   DEFAULT_HIGHLIGHT_COLOR,
   HIGHLIGHT_COLORS,
   ICON_AI,
+  ICON_CHECK,
   ICON_COPY,
   ICON_NOTE,
   ICON_TRASH,
@@ -714,6 +716,29 @@ function karakeepInit(): void {
     placePopover(popover.el, rect)
   }
 
+  /**
+   * Copies text to the system clipboard from inside an arbitrary bookmarked
+   * page's document — not Karakeep's own. `navigator.clipboard` is only
+   * defined in a secure context, so it's simply `undefined` on a plain http
+   * page; even where it exists, a write can be silently rejected if this
+   * webContents isn't the focused one at click time. Both failure modes are
+   * invisible to the user (the button just does nothing), which is exactly
+   * the bug this exists to avoid — so the primary attempt always falls back
+   * to an IPC round-trip into Electron's own `clipboard` module in the main
+   * process, which is restricted by neither.
+   */
+  async function copyToClipboard(text: string): Promise<void> {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text)
+        return
+      }
+    } catch {
+      // Fall through to the IPC fallback below.
+    }
+    await ipcRenderer.invoke(IPC.CLIPBOARD_WRITE_TEXT, text)
+  }
+
   function icon(path: string): SVGSVGElement {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
     svg.setAttribute('viewBox', '0 0 24 24')
@@ -734,7 +759,16 @@ function karakeepInit(): void {
     iconPath: string,
     onClick: () => void,
     danger = false,
-    iconOnly = false
+    iconOnly = false,
+    // The full set of labels this button will ever show (e.g.
+    // ['Copy', 'Copied']). When given, every label is rendered up front in
+    // a stacked span (see .kh-btn-label-stack in highlightUi.ts) so the
+    // button's width is pinned to the widest of them from the start —
+    // swapping the active one with setBtnLabel() below never resizes the
+    // button, which is what stops the popover from jumping sideways
+    // (placePopover re-centres the whole popover on the anchor every time
+    // it's placed, so any child that grows drags the popover with it).
+    reserveLabels?: string[]
   ): HTMLElement {
     const b = document.createElement('button')
     b.className = iconOnly ? 'kh-btn kh-icon-only' : 'kh-btn'
@@ -743,6 +777,16 @@ function karakeepInit(): void {
     if (iconOnly) {
       b.title = label
       b.setAttribute('aria-label', label)
+    } else if (reserveLabels) {
+      const stack = document.createElement('span')
+      stack.className = 'kh-btn-label-stack'
+      for (const l of reserveLabels) {
+        const span = document.createElement('span')
+        span.textContent = l
+        if (l === label) span.dataset.shown = '1'
+        stack.appendChild(span)
+      }
+      b.appendChild(stack)
     } else {
       const span = document.createElement('span')
       span.textContent = label
@@ -754,6 +798,22 @@ function karakeepInit(): void {
       onClick()
     })
     return b
+  }
+
+  /** Swaps which label is visible in a button built with `reserveLabels`. */
+  function setBtnLabel(b: HTMLElement, label: string): void {
+    const stack = b.querySelector('.kh-btn-label-stack')
+    if (!stack) return
+    for (const span of Array.from(stack.children)) {
+      const el = span as HTMLElement
+      if (el.textContent === label) el.dataset.shown = '1'
+      else delete el.dataset.shown
+    }
+  }
+
+  /** Swaps a button's leading icon (e.g. the copy icon for a checkmark). */
+  function setBtnIcon(b: HTMLElement, iconPath: string): void {
+    b.querySelector('svg')?.replaceWith(icon(iconPath))
   }
 
   function makeSwatchRow(active: string | null, onPick: (color: string) => void): HTMLElement {
@@ -844,6 +904,43 @@ function karakeepInit(): void {
         createHighlight(clone, lastUsedColor, true)
       })
     )
+
+    // Copy sits right next to Note, same as it does on an existing
+    // highlight's popover — copying is the other thing you'd want to do
+    // with a selection before committing to a colour or a note.
+    const copyBtn = makeButton(
+      'Copy',
+      ICON_COPY,
+      () => {
+        const text = range.toString()
+        // Nothing was actually copied — don't show a confirmation for a
+        // copy that never happened, and don't leave the button stuck on
+        // "Copied" forever since nothing will ever flip it back.
+        if (!text) return
+        void copyToClipboard(text).catch(() => undefined)
+        // Swap in a check + "Copied" for visible feedback. The selection
+        // and the popover are left alone: copying shouldn't cost the user
+        // their selection any more than it would anywhere else text gets
+        // copied, and closing here used to do exactly that.
+        setBtnIcon(copyBtn, ICON_CHECK)
+        setBtnLabel(copyBtn, 'Copied')
+        ;(copyBtn as HTMLButtonElement).disabled = true
+        setTimeout(() => {
+          // Guard against this popover having been replaced or closed in
+          // the meantime (e.g. the user dismissed it, or a new selection
+          // opened a different popover reusing this same closure) — this
+          // timer must only ever touch the button it belongs to.
+          if (popover?.el !== el) return
+          setBtnIcon(copyBtn, ICON_COPY)
+          setBtnLabel(copyBtn, 'Copy')
+          ;(copyBtn as HTMLButtonElement).disabled = false
+        }, COPY_CONFIRM_MS)
+      },
+      false,
+      false,
+      ['Copy', 'Copied']
+    )
+    el.appendChild(copyBtn)
 
     const sep2 = document.createElement('div')
     sep2.className = 'kh-sep'

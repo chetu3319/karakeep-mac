@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, screen, shell, Menu } from 'electron'
+import { app, BrowserWindow, clipboard, ipcMain, screen, shell, Menu } from 'electron'
 import { join } from 'node:path'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { KarakeepApiClient } from './api'
@@ -259,6 +259,10 @@ function registerIpc(): void {
   ipcMain.handle(IPC.STORE_GET_LIST_ORDER, () => store.getListOrder())
   ipcMain.handle(IPC.STORE_SET_LIST_ORDER, (_e, order: ListOrder) => {
     store.setListOrder(order)
+  })
+
+  ipcMain.handle(IPC.CLIPBOARD_WRITE_TEXT, (_e, text: string) => {
+    clipboard.writeText(text)
   })
 
   // ─────────────────────────── Gemini AI handlers ───────────────────────────

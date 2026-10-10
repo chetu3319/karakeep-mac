@@ -26,6 +26,7 @@ import type { PdfDocumentObject, PdfEngine, PdfPageGeometry, Rect } from '@embed
 import pdfiumWasmUrl from '@embedpdf/pdfium/pdfium.wasm?url'
 
 import {
+  COPY_CONFIRM_MS,
   DEFAULT_HIGHLIGHT_COLOR,
   HIGHLIGHT_COLORS as COLORS,
   ICON_CHECK,
@@ -400,6 +401,69 @@ function PdfSurface({
     },
     [selection, index, doc, documentId, engine, bookmarkId, createHighlight]
   )
+
+  // ── Copying the current selection ───────────────────────────────────────
+  // Mirrors createFromSelection's text extraction (toGlobal + spansForRange +
+  // textForSpans) rather than the simpler `scope.getSelectedText()` used by
+  // the dev smoke test, so a copied highlight and a copy-from-selection agree
+  // byte-for-byte on what the selection's text actually is.
+  // Returns whether the copy actually happened, so the button only shows
+  // "Copied" when there was something to confirm.
+  const copyFromSelection = useCallback(async (): Promise<boolean> => {
+    if (!selection || !index || !doc) return false
+    const scope = selection.forDocument(documentId)
+    const range = scope.getState().selection
+    if (!range) return false
+
+    const a = toGlobal(index, range.start.page, range.start.index)
+    const b = toGlobal(index, range.end.page, range.end.index)
+    const start = Math.min(a, b)
+    const end = Math.max(a, b) + 1
+
+    const text = (await textForSpans(engine, doc, spansForRange(index, start, end))).trim()
+    if (!text) return false
+
+    try {
+      // The renderer's own document is Karakeep's — always a secure
+      // context — so this isn't expected to fail the way it can in the Web
+      // pane's arbitrary-page preload. Still shouldn't crash the reader if
+      // it does.
+      await navigator.clipboard.writeText(text)
+    } catch {
+      // Nothing more to fall back to here; the button simply won't confirm.
+      return false
+    }
+
+    // The selection itself is left untouched — copying shouldn't cost the
+    // user their selection, any more than it does anywhere else text gets
+    // copied. The menu's "Copied" state (SelectionMenu, below) reverts on
+    // its own timer; the selection stays live until the user dismisses the
+    // menu (click away / Escape) or replaces it with a new one.
+    return true
+  }, [selection, index, doc, documentId, engine])
+
+  // The page renders as an <img> and the text layer is embedpdf's own
+  // selection engine, not a real browser Selection — so the OS's own
+  // Cmd/Ctrl+C shortcut has no DOM selection to act on and is otherwise a
+  // silent no-op, even with a highlight-toolbar-worthy selection visibly
+  // drawn on screen. Wire the shortcut to the same copy path the toolbar
+  // button uses.
+  useEffect(() => {
+    if (!selection || !documentId) return
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'c') return
+      // A real DOM selection — text selected inside a note, the AI drawer,
+      // or anywhere else with actual selectable text — already has native
+      // copy support; don't steal the shortcut from it.
+      if (document.getSelection()?.toString()) return
+      const scope = selection.forDocument(documentId)
+      if (!scope.getState().selection) return
+      e.preventDefault()
+      void copyFromSelection()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [selection, documentId, copyFromSelection])
 
   const [noteDraftFor, setNoteDraftFor] = useState<string | null>(null)
 
@@ -867,6 +931,7 @@ function PdfSurface({
         }}
         onCreate={createFromSelection}
         onAskAi={askAiFromSelection}
+        onCopy={copyFromSelection}
       />
     ),
     [
@@ -881,7 +946,8 @@ function PdfSurface({
       deleteHighlight,
       bookmarkId,
       createFromSelection,
-      askAiFromSelection
+      askAiFromSelection,
+      copyFromSelection
     ]
   )
 
@@ -1037,6 +1103,7 @@ interface PdfPageProps {
   onDelete: (id: string) => Promise<void>
   onCreate: (color: string, withNote: boolean) => Promise<string | null>
   onAskAi: (rect: Rect, pageIndex: number, mode?: AiMode) => void
+  onCopy: () => Promise<boolean>
 }
 
 function PdfPage({
@@ -1056,7 +1123,8 @@ function PdfPage({
   onRecolor,
   onDelete,
   onCreate,
-  onAskAi
+  onAskAi,
+  onCopy
 }: PdfPageProps): React.JSX.Element {
   const geo = geometry.get(pageIndex)
 
@@ -1184,6 +1252,7 @@ function PdfPage({
               pageIndex={pageIndex}
               onCreate={onCreate}
               onAskAi={(mode) => onAskAi(menu.rect, pageIndex, mode)}
+              onCopy={onCopy}
             />
           ) : null
         }
@@ -1335,6 +1404,11 @@ function PopButton({
   iconOnly,
   primary,
   disabled,
+  // The set of labels this button ever shows (e.g. ['Copy', 'Copied']).
+  // When given, all of them are stacked so the button's width is pinned to
+  // the widest one from the start — see the .kh-btn-label-stack rule in
+  // highlightUi.ts for why that's what stops the popover from jumping.
+  reserveLabels,
   ...rest
 }: {
   label: string
@@ -1344,6 +1418,7 @@ function PopButton({
   iconOnly?: boolean
   primary?: boolean
   disabled?: boolean
+  reserveLabels?: string[]
 } & React.HTMLAttributes<HTMLButtonElement>): React.JSX.Element {
   return (
     <button
@@ -1357,7 +1432,18 @@ function PopButton({
       {...rest}
     >
       {icon && <Icon path={icon} />}
-      {!iconOnly && <span>{label}</span>}
+      {!iconOnly &&
+        (reserveLabels ? (
+          <span className="kh-btn-label-stack">
+            {reserveLabels.map((l) => (
+              <span key={l} data-shown={l === label ? '1' : undefined}>
+                {l}
+              </span>
+            ))}
+          </span>
+        ) : (
+          <span>{label}</span>
+        ))}
     </button>
   )
 }
@@ -1398,19 +1484,36 @@ function SwatchRow({
   )
 }
 
-/** Colour swatches + "Note" + "Ask AI", shown against a live text selection. */
+/** Colour swatches + "Note" + "Copy" + "Ask AI", shown against a live text selection. */
 function SelectionMenu({
   rect,
   pageIndex,
   onCreate,
-  onAskAi
+  onAskAi,
+  onCopy
 }: {
   rect: Rect
   pageIndex: number
   onCreate: (color: string, withNote: boolean) => Promise<string | null>
   onAskAi?: (mode?: AiMode) => void
+  onCopy?: () => Promise<boolean>
 }): React.JSX.Element {
   const [busy, setBusy] = useState(false)
+  // Copying no longer clears the selection or closes the menu (see
+  // copyFromSelection above) — the selection is left alone, exactly as it
+  // would be after any other copy. This flag only drives the button's own
+  // "Copied" label, and reverts itself after COPY_CONFIRM_MS below so the
+  // button is clickable again without the user having to reopen the menu.
+  const [copied, setCopied] = useState(false)
+
+  // Revert "Copied" back to "Copy" after COPY_CONFIRM_MS. The cleanup here
+  // matters: if the popover unmounts mid-confirmation (the user dismissed it
+  // before the timer fired), there is no `copied` state left to set.
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(false), COPY_CONFIRM_MS)
+    return () => clearTimeout(timer)
+  }, [copied])
 
   // `rect` is page-relative and already scaled; the popover is placed in
   // viewport coordinates, so it needs the page's own position added.
@@ -1445,6 +1548,24 @@ function SelectionMenu({
         disabled={busy}
         onClick={() => void run(DEFAULT_HIGHLIGHT_COLOR, true)}
         data-kk-note=""
+      />
+      {/* Copy sits right next to Note, mirroring where it lands on an
+          existing highlight's popover (HighlightPopover below). */}
+      <PopButton
+        label={copied ? 'Copied' : 'Copy'}
+        reserveLabels={['Copy', 'Copied']}
+        icon={copied ? ICON_CHECK : ICON_COPY}
+        disabled={busy || copied}
+        onClick={() => {
+          void (async () => {
+            // Only confirm if the copy actually happened — otherwise the
+            // button would be stuck showing "Copied" for a copy that never
+            // reached the clipboard (e.g. an empty selection).
+            const ok = (await onCopy?.()) ?? false
+            if (ok) setCopied(true)
+          })()
+        }}
+        data-kk-copy=""
       />
       <div className="kh-sep" />
       <PopButton

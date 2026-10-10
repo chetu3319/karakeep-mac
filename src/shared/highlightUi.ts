@@ -61,6 +61,17 @@ export const ICON_CHECK = 'M5 13l4 4L19 7'
 export const ICON_AI = 'M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83'
 
 /**
+ * How long a "Copy" button shows its copied confirmation (check icon +
+ * "Copied" label) before it reverts back to "Copy" so it can be clicked
+ * again. The selection and the popover are *not* torn down when this fires —
+ * copying text shouldn't cost the user their selection any more than it does
+ * anywhere else — so this only ever touches the button's own label. Shared
+ * so the Web pane's DOM button and the PDF pane's React button land on the
+ * same timing rather than drifting apart like the old per-pane styles did.
+ */
+export const COPY_CONFIRM_MS = 1200
+
+/**
  * Styles for the popover.
  *
  * In the Web pane this is injected into a *closed shadow root* whose host
@@ -184,6 +195,19 @@ export function highlightPopoverStylesheet(): string {
     .kh-btn[disabled] { cursor: default; opacity: 0.5; }
     .kh-btn[disabled]:hover { background: none; }
     .kh-btn svg { width: 14px; height: 14px; display: block; flex: 0 0 auto; }
+
+    /* Reserves room for the widest of a button's alternate labels (e.g.
+       "Copy" / "Copied") so swapping between them never changes the
+       button's own width. Both labels are stacked in the same grid cell —
+       grid sizes the cell to the larger of the two — and only the active
+       one is visible; the invisible one still occupies layout space, which
+       is exactly what pins the width. Without this, a widening button
+       widens the whole popover (see placePopover, which re-centres the
+       popover on the anchor every render), producing a visible sideways
+       jump right when the confirmation is meant to be reassuring. */
+    .kh-btn-label-stack { display: inline-grid; }
+    .kh-btn-label-stack > span { grid-area: 1 / 1; visibility: hidden; }
+    .kh-btn-label-stack > span[data-shown="1"] { visibility: visible; }
 
     .kh-quote {
       font-size: 12px; line-height: 1.45; color: rgba(242,242,247,0.72);

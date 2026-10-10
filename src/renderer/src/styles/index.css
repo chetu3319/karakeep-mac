@@ -1,3 +1,12 @@
+/* KaTeX's own stylesheet (math rendering in the AI Co-Pilot sidebar — see
+ * lib/miniMarkdown.tsx). Imported here rather than as a JS import in
+ * main.tsx so Vite treats it like the rest of this file: bundled through
+ * PostCSS and emitted as a single hashed asset in out/renderer/assets,
+ * including the @font-face rules that resolve to the local woff2 files in
+ * node_modules/katex/dist/fonts (never a CDN — this is an offline app with a
+ * CSP that only allows 'self' for style/font sources). */
+@import 'katex/dist/katex.min.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
