@@ -1314,9 +1314,16 @@ function PdfPage({
         documentId={documentId}
         pageIndex={pageIndex}
         scale={scale}
-        highlightColor="#FFE066"
+        highlightColor={night ? '#8A7300' : '#FFE066'}
         activeHighlightColor="#FF8A00"
         className="absolute inset-0"
+        // The layer hard-codes `multiply` on every rect, which on a night-mode
+        // (inverted, near-black) page darkens the colour to nothing. A blend
+        // mode on the wrapper makes it an isolated group: the rects multiply
+        // against a transparent backdrop (so keep their own colour), and the
+        // group as a whole is then screened onto the page — the same trick the
+        // stored highlights use, here without the per-rect control.
+        style={night ? { mixBlendMode: 'screen' } : undefined}
       />
 
       <SelectionLayer
