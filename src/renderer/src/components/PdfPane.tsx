@@ -9,6 +9,7 @@ import {
   PagePointerProvider
 } from '@embedpdf/plugin-interaction-manager/react'
 import { RenderLayer, RenderPluginPackage } from '@embedpdf/plugin-render/react'
+import { SearchLayer, SearchPluginPackage, useSearch } from '@embedpdf/plugin-search/react'
 import { Scroller, ScrollPluginPackage, useScroll, type PageLayout } from '@embedpdf/plugin-scroll/react'
 import {
   SelectionLayer,
@@ -41,6 +42,8 @@ import type { AiMode, Highlight } from '../../../shared/types'
 import { useCreateHighlight, useDeleteHighlight, useUpdateHighlight } from '../lib/queries'
 import { useIsDark, usePref } from '../lib/prefs'
 import SelectionAiHUD from './SelectionAiHUD'
+import FindBar, { type FindResult } from './FindBar'
+import type { FindStep } from '../lib/findStep'
 import {
   buildPageIndex,
   resolveAnchor,
@@ -136,6 +139,11 @@ export interface PdfPaneProps {
    */
   aiDrawerOpen?: boolean
   onAiContextChange?: (context: { scopeLabel: string; pageText: string }) => void
+  /** Find bar state is owned by the detail pane, which routes the menu's ⌘F/⌘G to it. */
+  findOpen: boolean
+  findFocusSignal: number
+  findStep: FindStep | null
+  onFindClose: () => void
 }
 
 export default function PdfPane(props: PdfPaneProps): React.JSX.Element {
@@ -190,6 +198,7 @@ export default function PdfPane(props: PdfPaneProps): React.JSX.Element {
             { package: RenderPluginPackage, config: {} },
             { package: InteractionManagerPluginPackage, config: {} },
             { package: SelectionPluginPackage, config: {} },
+            { package: SearchPluginPackage, config: {} },
             { package: ZoomPluginPackage, config: { defaultZoomLevel: ZoomMode.FitWidth } }
           ] as PluginBatchRegistrations)
         : [],
@@ -247,6 +256,10 @@ function PdfSurface({
   author,
   aiDrawerOpen = false,
   onAiContextChange,
+  findOpen,
+  findFocusSignal,
+  findStep,
+  onFindClose,
   engine
 }: PdfPaneProps & { engine: PdfEngine }): React.JSX.Element {
   const documentId = assetId
@@ -259,6 +272,48 @@ function PdfSurface({
   // the document has known it since it opened.
   const totalPages = doc?.pageCount ?? scrollState.totalPages
   const { provides: zoom, state: zoomState } = useZoom(documentId)
+
+  // ── Find in document ──────────────────────────────────────────────────
+  // The search plugin finds and keeps the results; it does not scroll, so
+  // the active match is brought into view here, the same way a highlight
+  // picked in the rail is.
+  const { state: searchState, provides: search } = useSearch(documentId)
+  useEffect(() => {
+    if (!findOpen || !search) return
+    search.startSearch()
+    return () => {
+      // Stopping also hides the highlight layer, and empties the query so a
+      // reopened bar doesn't resume on stale matches.
+      void search.searchAllPages('')
+      search.stopSearch()
+    }
+  }, [findOpen, search])
+
+  useEffect(() => {
+    if (!findOpen || !findStep || !search) return
+    if (findStep.forward) search.nextResult()
+    else search.previousResult()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findStep])
+
+  const activeMatch = searchState.results[searchState.activeResultIndex]
+  useEffect(() => {
+    if (!findOpen || !activeMatch || !scroll) return
+    const rect = activeMatch.rects[0]
+    scroll.scrollToPage({
+      pageNumber: activeMatch.pageIndex + 1,
+      pageCoordinates: rect ? { x: rect.origin.x, y: rect.origin.y } : undefined,
+      behavior: 'smooth',
+      alignY: 30
+    })
+    // Keyed on the match, not on `scroll`'s identity, which changes on layout.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findOpen, activeMatch])
+
+  const findResult: FindResult | null =
+    findOpen && searchState.query && !searchState.loading
+      ? { current: searchState.total > 0 ? searchState.activeResultIndex + 1 : 0, total: searchState.total }
+      : null
 
   const createHighlight = useCreateHighlight()
   const updateHighlight = useUpdateHighlight()
@@ -1046,6 +1101,17 @@ function PdfSurface({
           No `h-full` on the row either: it sits under the toolbar in a
           column, so a full-height row overflows the pane by the toolbar's
           height — `flex-1` is the height that's actually left. */}
+      {findOpen && (
+        <FindBar
+          result={findResult}
+          focusSignal={findFocusSignal}
+          onQuery={(q) => void search?.searchAllPages(q)}
+          onNext={() => search?.nextResult()}
+          onPrevious={() => search?.previousResult()}
+          onClose={onFindClose}
+        />
+      )}
+
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
         <div className="h-full min-h-0 min-w-0 flex-1">
           <Viewport
@@ -1240,6 +1306,18 @@ function PdfPage({
           />
         ))}
       </div>
+
+      {/* Find matches: all in a pale yellow, the current one in orange so it
+          reads as "you are here". Under the text layer, like the stored
+          highlights, so selecting text still works over a match. */}
+      <SearchLayer
+        documentId={documentId}
+        pageIndex={pageIndex}
+        scale={scale}
+        highlightColor="#FFE066"
+        activeHighlightColor="#FF8A00"
+        className="absolute inset-0"
+      />
 
       <SelectionLayer
         documentId={documentId}

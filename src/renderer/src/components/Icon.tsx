@@ -18,6 +18,7 @@ import React from 'react'
 export type IconName =
   | 'chevron-left'
   | 'chevron-right'
+  | 'chevron-up'
   | 'chevron-down'
   | 'sidebar'
   | 'plus'
@@ -51,6 +52,7 @@ export type IconName =
 const PATHS: Record<IconName, string> = {
   'chevron-left': 'M15 18l-6-6 6-6',
   'chevron-right': 'M9 18l6-6-6-6',
+  'chevron-up': 'M6 15l6-6 6 6',
   'chevron-down': 'M6 9l6 6 6-6',
   sidebar: 'M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM9 3v18',
   plus: 'M12 5v14M5 12h14',

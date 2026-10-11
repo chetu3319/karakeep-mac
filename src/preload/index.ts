@@ -24,6 +24,7 @@ import type {
   UpdateTagInput,
   UploadedAsset,
   WebPaneBounds,
+  WebPaneFindResult,
   WebPaneState
 } from '../shared/types'
 
@@ -159,6 +160,21 @@ const api = {
       ipcRenderer.on(IPC.MENU_FOCUS_SEARCH_EVENT, listener)
       return () => ipcRenderer.removeListener(IPC.MENU_FOCUS_SEARCH_EVENT, listener)
     },
+    onFind: (cb: () => void): (() => void) => {
+      const listener = (): void => cb()
+      ipcRenderer.on(IPC.MENU_FIND_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.MENU_FIND_EVENT, listener)
+    },
+    onFindNext: (cb: () => void): (() => void) => {
+      const listener = (): void => cb()
+      ipcRenderer.on(IPC.MENU_FIND_NEXT_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.MENU_FIND_NEXT_EVENT, listener)
+    },
+    onFindPrevious: (cb: () => void): (() => void) => {
+      const listener = (): void => cb()
+      ipcRenderer.on(IPC.MENU_FIND_PREVIOUS_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.MENU_FIND_PREVIOUS_EVENT, listener)
+    },
     onOpenSettings: (cb: () => void): (() => void) => {
       const listener = (): void => cb()
       ipcRenderer.on(IPC.MENU_OPEN_SETTINGS_EVENT, listener)
@@ -186,6 +202,16 @@ const api = {
     reload: (): Promise<void> => ipcRenderer.invoke(IPC.WEBPANE_RELOAD),
     stop: (): Promise<void> => ipcRenderer.invoke(IPC.WEBPANE_STOP),
     openExternal: (url: string): Promise<void> => ipcRenderer.invoke(IPC.WEBPANE_OPEN_EXTERNAL, url),
+    // `newSession` starts a fresh search (the query changed); without it the
+    // call steps to the next/previous match of the one already running.
+    find: (text: string, opts: { forward: boolean; newSession: boolean }): Promise<void> =>
+      ipcRenderer.invoke(IPC.WEBPANE_FIND, { text, ...opts }),
+    stopFind: (): Promise<void> => ipcRenderer.invoke(IPC.WEBPANE_STOP_FIND),
+    onFound: (cb: (result: WebPaneFindResult) => void): (() => void) => {
+      const listener = (_e: unknown, result: WebPaneFindResult): void => cb(result)
+      ipcRenderer.on(IPC.WEBPANE_FOUND_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.WEBPANE_FOUND_EVENT, listener)
+    },
     onState: (cb: (state: WebPaneState) => void): (() => void) => {
       const listener = (_e: unknown, state: WebPaneState): void => cb(state)
       ipcRenderer.on(IPC.WEBPANE_STATE_EVENT, listener)

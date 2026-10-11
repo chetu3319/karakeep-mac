@@ -1,5 +1,7 @@
-import React, { useEffect, useRef } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type { Highlight, WebPaneState } from '../../../shared/types'
+import FindBar, { type FindResult } from './FindBar'
+import type { FindStep } from '../lib/findStep'
 import { onWebPaneShown, setWebPaneWanted } from '../lib/webPaneVisibility'
 
 /**
@@ -23,7 +25,11 @@ export default function WebPane({
   highlights,
   state,
   focusHighlightId,
-  onFocusHandled
+  onFocusHandled,
+  findOpen,
+  findFocusSignal,
+  findStep,
+  onFindClose
 }: {
   active: boolean
   url: string
@@ -33,8 +39,60 @@ export default function WebPane({
   /** Highlight to scroll to once the page is loaded (set by the highlight rail). */
   focusHighlightId?: string | null
   onFocusHandled?: () => void
+  findOpen: boolean
+  findFocusSignal: number
+  /** ⌘G / ⇧⌘G from the menu, as a new object per press. */
+  findStep: FindStep | null
+  onFindClose: () => void
 }): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
+
+  // ── Find in page ──────────────────────────────────────────────────────
+  // The bar is a strip above the container, so opening it shrinks the
+  // container and the bounds effect below moves the native view down — the
+  // view never has to be drawn "under" anything.
+  const [findResult, setFindResult] = useState<FindResult | null>(null)
+  const query = useRef('')
+
+  useEffect(() => {
+    if (!findOpen) return
+    const off = window.kk.webpane.onFound((r) => {
+      // Chromium reports ordinal 0 on interim updates before it has chosen a
+      // match; showing "0 of 12" for a frame reads as a glitch.
+      setFindResult({ current: r.activeMatchOrdinal, total: r.matches })
+    })
+    return () => {
+      off()
+      query.current = ''
+      setFindResult(null)
+      void window.kk.webpane.stopFind()
+    }
+  }, [findOpen])
+
+  const runQuery = useCallback((q: string) => {
+    query.current = q
+    if (!q) {
+      setFindResult(null)
+      void window.kk.webpane.stopFind()
+      return
+    }
+    void window.kk.webpane.find(q, { forward: true, newSession: true })
+  }, [])
+  const step = useCallback((forward: boolean) => {
+    if (query.current) void window.kk.webpane.find(query.current, { forward, newSession: false })
+  }, [])
+
+  useEffect(() => {
+    if (findOpen && findStep) step(findStep.forward)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findStep])
+
+  // A navigation inside the page (link click) drops the old matches in main;
+  // search the new document for the same text if the bar is still up.
+  useEffect(() => {
+    if (findOpen && query.current && !state.isLoading) runQuery(query.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.url, state.isLoading])
 
   // Navigate whenever the active bookmark/url changes.
   useEffect(() => {
@@ -120,6 +178,16 @@ export default function WebPane({
         <div className="border-b border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400">
           Failed to load: {state.error}
         </div>
+      )}
+      {findOpen && (
+        <FindBar
+          result={findResult}
+          focusSignal={findFocusSignal}
+          onQuery={runQuery}
+          onNext={() => step(true)}
+          onPrevious={() => step(false)}
+          onClose={onFindClose}
+        />
       )}
       <div ref={containerRef} className="min-h-0 flex-1" data-testid="webpane-container" />
     </div>
