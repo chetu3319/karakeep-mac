@@ -7,6 +7,7 @@ import * as store from './store'
 import { loadDotEnvLocal } from './env'
 import { buildAppMenu } from './menu'
 import { WebPaneManager } from './webpane'
+import { lockPageZoom } from './zoomLock'
 import { IPC } from '../shared/ipc'
 import type {
   AiStreamRequest,
@@ -119,6 +120,8 @@ function createWindow(): BrowserWindow {
       nodeIntegration: false
     }
   })
+
+  lockPageZoom(win.webContents)
 
   if (saved?.maximized) win.maximize()
 
