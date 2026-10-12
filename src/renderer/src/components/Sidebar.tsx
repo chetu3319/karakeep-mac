@@ -36,9 +36,6 @@ interface SidebarProps {
   onAddBookmark: () => void
   onOpenSettings: () => void
   onSignOut: () => void
-  listCollapsed: boolean
-  onToggleSidebar: () => void
-  onToggleList: () => void
 }
 
 // The three feed-backed views, in the order they appear above the list
@@ -76,10 +73,7 @@ export default function Sidebar({
   user,
   onAddBookmark,
   onOpenSettings,
-  onSignOut,
-  listCollapsed,
-  onToggleSidebar,
-  onToggleList
+  onSignOut
 }: SidebarProps): React.JSX.Element {
   const listsQuery = useLists()
   const tagsQuery = useTags()
@@ -387,15 +381,8 @@ export default function Sidebar({
   return (
     <aside className="flex h-full flex-col border-r border-neutral-200 bg-neutral-50/60 dark:border-neutral-800 dark:bg-neutral-900/40">
       {/* The sidebar is the leftmost pane whenever it is showing, so it
-          holds the window's title row — and therefore both pane toggles,
-          at the same coordinates App renders them at when the sidebar is
-          hidden. See TitlebarRow. */}
-      <TitlebarRow
-        sidebarCollapsed={false}
-        listCollapsed={listCollapsed}
-        onToggleSidebar={onToggleSidebar}
-        onToggleList={onToggleList}
-      />
+          holds the traffic-light spacer. See TitlebarRow. */}
+      <TitlebarRow />
 
       <div className="titlebar-no-drag px-2 pb-2">
         <button
