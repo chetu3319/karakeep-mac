@@ -108,10 +108,11 @@ export default function App(): React.JSX.Element {
   const priorPanesRef = useRef<{ sidebar: boolean; list: boolean } | null>(null)
   const inFocusMode = sidebarCollapsed && listCollapsed
 
-  // Edge case considered: bookmark list collapsed with nothing selected
-  // leaves the DetailPane on its empty state. That is NOT a stranded
-  // state — both pane toggles are on screen at a fixed position in every
-  // combination (see TitlebarRow), plus ⌃⌘S / ⌃⌘L / ⌃⌘F.
+  // Edge case considered: panes collapsed with nothing selected (e.g. the
+  // open bookmark was deleted while reading) leaves the DetailPane on its
+  // empty state. The expand/collapse button lives in the reader's bar, which
+  // that state doesn't have, so the empty state carries its own way back
+  // (see DetailPane) in addition to ⌃⌘S / ⌃⌘L / ⌃⌘F.
 
   const toggleSidebar = useCallback(() => setSidebarCollapsed((c) => !c), [setSidebarCollapsed])
   const toggleList = useCallback(() => setListCollapsed((c) => !c), [setListCollapsed])
@@ -291,8 +292,8 @@ export default function App(): React.JSX.Element {
             onSignOut={() => setConfirmSignOut(true)}
             sidebarCollapsed={sidebarCollapsed}
             listCollapsed={listCollapsed}
-            onToggleSidebar={toggleSidebar}
             onToggleList={toggleList}
+            onToggleFocusMode={toggleFocusMode}
             sidebarWidth={sidebarWidth}
             listWidth={listWidth}
             onSidebarWidth={setSidebarWidth}
@@ -393,8 +394,8 @@ function Library({
   onSignOut,
   sidebarCollapsed,
   listCollapsed,
-  onToggleSidebar,
   onToggleList,
+  onToggleFocusMode,
   sidebarWidth,
   listWidth,
   onSidebarWidth,
@@ -414,8 +415,8 @@ function Library({
   onSignOut: () => void
   sidebarCollapsed: boolean
   listCollapsed: boolean
-  onToggleSidebar: () => void
   onToggleList: () => void
+  onToggleFocusMode: () => void
   sidebarWidth: number
   listWidth: number
   onSidebarWidth: (n: number) => void
@@ -475,19 +476,6 @@ function Library({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // The title area belongs to whichever column is leftmost; with the
-  // sidebar showing, that is the sidebar and it renders this itself. Same
-  // component, same inset, so the toggles land on the same pixels either
-  // way and hiding a pane never moves the control that brings it back.
-  const titlebar = (
-    <TitlebarRow
-      sidebarCollapsed={sidebarCollapsed}
-      listCollapsed={listCollapsed}
-      onToggleSidebar={onToggleSidebar}
-      onToggleList={onToggleList}
-    />
-  )
-
   return (
     <div className="flex h-full">
       {/* Collapsed panes are unmounted entirely (not just hidden) so a
@@ -505,9 +493,6 @@ function Library({
               onAddBookmark={onAddBookmark}
               onOpenSettings={onOpenSettings}
               onSignOut={onSignOut}
-              listCollapsed={listCollapsed}
-              onToggleSidebar={onToggleSidebar}
-              onToggleList={onToggleList}
             />
           </div>
           <Resizer
@@ -524,7 +509,7 @@ function Library({
       {!listCollapsed && (
         <>
           <div className="flex min-w-0 flex-shrink-0 flex-col" style={{ width: listWidth }}>
-            {sidebarCollapsed && titlebar}
+            {sidebarCollapsed && <TitlebarRow />}
             <div className="min-h-0 flex-1">
               {selection.type === 'highlights' ? (
                 <HighlightsList
@@ -554,7 +539,6 @@ function Library({
       )}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        {sidebarCollapsed && listCollapsed && titlebar}
         <div className="min-h-0 flex-1">
           <DetailPane
             bookmark={selectedBookmark}
@@ -563,6 +547,8 @@ function Library({
             onFocusHighlightHandled={onFocusHighlightHandled}
             listCollapsed={listCollapsed}
             onExpandList={onToggleList}
+            inFocusMode={sidebarCollapsed && listCollapsed}
+            onToggleFocusMode={onToggleFocusMode}
           />
         </div>
       </div>

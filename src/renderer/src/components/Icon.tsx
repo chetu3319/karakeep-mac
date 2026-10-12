@@ -46,6 +46,8 @@ export type IconName =
   | 'list'
   | 'copy'
   | 'check'
+  | 'expand'
+  | 'collapse'
 
 // Single- or multi-path outlines on a 24x24 grid, stroked (not filled)
 // unless the name ends in `-filled`.
@@ -80,7 +82,11 @@ const PATHS: Record<IconName, string> = {
   rows: 'M3 5h18M3 12h18M3 19h18',
   list: 'M4 6h16M4 12h16M4 18h16',
   copy: 'M9 9a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2zM5 15H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1',
-  check: 'M4 12.5l5 5L20 6.5'
+  check: 'M4 12.5l5 5L20 6.5',
+  // Corner arrows pointing out of / into the middle: the reader grows to
+  // fill the window, or settles back among its panes.
+  expand: 'M14 4h6v6M20 4l-7 7M10 20H4v-6M4 20l7-7',
+  collapse: 'M20 10h-6V4M14 10l7-7M4 14h6v6M10 14l-7 7'
 }
 
 export default function Icon({

@@ -19,6 +19,7 @@ import TagEditor from './TagEditor'
 import WebPane from './WebPane'
 import PageAiDrawer from './PageAiDrawer'
 import SidePanel from './SidePanel'
+import { TRAFFIC_LIGHT_INSET } from './TitlebarRow'
 
 type Tab = 'preview' | 'pdf' | 'web'
 
@@ -37,7 +38,9 @@ export default function DetailPane({
   focusHighlightId: externalFocusHighlightId,
   onFocusHighlightHandled,
   listCollapsed,
-  onExpandList
+  onExpandList,
+  inFocusMode,
+  onToggleFocusMode
 }: {
   bookmark: Bookmark | null
   onDeleted: (id: string) => void
@@ -46,6 +49,9 @@ export default function DetailPane({
   onFocusHighlightHandled?: () => void
   listCollapsed: boolean
   onExpandList: () => void
+  /** Both side panes are collapsed, so the reader fills the window. */
+  inFocusMode: boolean
+  onToggleFocusMode: () => void
 }): React.JSX.Element {
   const [tab, setTab] = useState<Tab>('preview')
   // The row object the list handed us is a snapshot from whenever that feed
@@ -293,7 +299,10 @@ export default function DetailPane({
 
   if (!bookmark) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center">
+      <div className="relative flex h-full flex-col items-center justify-center gap-3 px-8 text-center">
+        {/* With the panes collapsed this is the leftmost surface, so it
+            holds the window's drag strip and traffic-light room. */}
+        {inFocusMode && <div className="titlebar-drag absolute inset-x-0 top-0 h-[52px]" />}
         <Icon name="library" size={32} className="text-neutral-300 dark:text-neutral-700" />
         <div>
           <p className="text-sm font-medium text-neutral-600 dark:text-neutral-400">Nothing selected</p>
@@ -303,12 +312,15 @@ export default function DetailPane({
               : 'Pick a bookmark on the left, or use ↑ and ↓ to move through the list.'}
           </p>
         </div>
+        {/* The expand/collapse button lives in the reader's bar, which this
+            state doesn't have — so in focus mode with nothing to read the
+            way back must be offered here, or the user is stranded. */}
         {listCollapsed && (
           <button
-            onClick={onExpandList}
+            onClick={inFocusMode ? onToggleFocusMode : onExpandList}
             className="rounded-lg border border-neutral-300 px-3 py-1.5 text-xs font-medium text-neutral-600 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
           >
-            Show bookmark list
+            {inFocusMode ? 'Show sidebar and list' : 'Show bookmark list'}
           </button>
         )}
       </div>
@@ -326,21 +338,22 @@ export default function DetailPane({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-1 border-b border-neutral-200 px-3 pt-2 dark:border-neutral-800">
-        {/*
-          No pane-expand control here. This toolbar is for actions on the
-          bookmark; "show the bookmark list" is window chrome, and it lives
-          in the window's title row (Sidebar's header, or TitlebarSlot when
-          the sidebar is hidden). Putting a copy here as well is what
-          produced two identical chevrons fifty pixels apart with both
-          panes collapsed.
-        */}
+      {/* In focus mode this bar is the window's top-left edge: it reserves
+          room for the macOS traffic lights and doubles as the drag region
+          (buttons opt out with titlebar-no-drag). Otherwise it sits beside
+          other panes and needs neither. */}
+      <div
+        className={`flex items-center gap-1 border-b border-neutral-200 px-3 pt-2 dark:border-neutral-800 ${
+          inFocusMode ? 'titlebar-drag' : ''
+        }`}
+        style={inFocusMode ? { paddingLeft: TRAFFIC_LIGHT_INSET } : undefined}
+      >
         {tabs.map((t) => (
           <button
             key={t}
             data-testid={`tab-${t}`}
             onClick={() => setTab(t)}
-            className={`rounded-t-md px-3 py-1.5 text-sm capitalize transition-colors ${
+            className={`titlebar-no-drag rounded-t-md px-3 py-1.5 text-sm capitalize transition-colors ${
               tab === t
                 ? 'border-b-2 border-emerald-600 font-medium text-emerald-700 dark:text-emerald-400'
                 : 'text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200'
@@ -350,7 +363,7 @@ export default function DetailPane({
           </button>
         ))}
 
-        <div className="ml-auto flex items-center gap-0.5 pb-1.5">
+        <div className="titlebar-no-drag ml-auto flex items-center gap-0.5 pb-1.5">
           {/* Live-page navigation, only while the live page is showing.
               These were the useful half of the toolbar that used to sit
               under the tab row alongside the read-only address field. */}
@@ -486,6 +499,23 @@ export default function DetailPane({
             className="grid h-7 w-7 place-items-center rounded-md text-neutral-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-400"
           >
             <Icon name="trash" />
+          </button>
+          <span className="mx-1 h-4 w-px bg-neutral-200 dark:bg-neutral-800" aria-hidden />
+          {/* One control for the whole layout, in the reader's own bar (the
+              native web view is drawn over the content area, so it can't
+              live there). It toggles Focus Mode — which already remembers
+              and restores the prior panes — instead of two pane buttons the
+              user had to juggle. The ⌃⌘F menu item stays as the keyboard path. */}
+          <button
+            type="button"
+            data-testid="detail-expand"
+            onClick={onToggleFocusMode}
+            aria-pressed={inFocusMode}
+            aria-label={inFocusMode ? 'Show sidebar and list' : 'Expand reader'}
+            title={inFocusMode ? 'Show sidebar and list (⌃⌘F)' : 'Expand reader — hide sidebar and list (⌃⌘F)'}
+            className="grid h-7 w-7 place-items-center rounded-md text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800"
+          >
+            <Icon name={inFocusMode ? 'collapse' : 'expand'} />
           </button>
         </div>
       </div>
