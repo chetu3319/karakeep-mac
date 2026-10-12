@@ -199,7 +199,13 @@ export default function PdfPane(props: PdfPaneProps): React.JSX.Element {
             { package: InteractionManagerPluginPackage, config: {} },
             { package: SelectionPluginPackage, config: {} },
             { package: SearchPluginPackage, config: {} },
-            { package: ZoomPluginPackage, config: { defaultZoomLevel: ZoomMode.FitWidth } }
+            { package: ZoomPluginPackage, config: {
+                // The plugin's own ceiling is 60x, which a pinch reaches in a
+                // couple of strokes and which only shows a few glyphs.
+                defaultZoomLevel: ZoomMode.FitWidth,
+                maxZoom: 6
+              }
+            }
           ] as PluginBatchRegistrations)
         : [],
     [buffer, assetId, fileName]
@@ -272,6 +278,49 @@ function PdfSurface({
   // the document has known it since it opened.
   const totalPages = doc?.pageCount ?? scrollState.totalPages
   const { provides: zoom, state: zoomState } = useZoom(documentId)
+
+  // ── Trackpad pinch ────────────────────────────────────────────────────
+  // Chromium reports a trackpad pinch as `wheel` events with `ctrlKey` set
+  // and the pinch amount in `deltaY`; a plain two-finger scroll has no
+  // `ctrlKey` and is left alone. The plugin's own `requestZoomBy` rounds the
+  // result to 0.01, which swallows the small per-event deltas of a pinch, so
+  // this asks for an absolute level instead (the plugin still clamps it to
+  // its min/max and keeps the point under `center` fixed while scrolling).
+  const pinchHostRef = useRef<HTMLDivElement>(null)
+  const zoomRef = useRef(zoom)
+  zoomRef.current = zoom
+  useEffect(() => {
+    const host = pinchHostRef.current
+    if (!host) return
+    let factor = 1
+    let center = { vx: 0, vy: 0 }
+    let frame = 0
+    // Several wheel events land per frame; relaying out the pages for each
+    // one is what makes pinch janky, so they are folded into one request.
+    const apply = (): void => {
+      frame = 0
+      const z = zoomRef.current
+      if (!z) return
+      const level = z.getState().currentZoomLevel * factor
+      factor = 1
+      z.requestZoom(level, center)
+    }
+    const onWheel = (e: WheelEvent): void => {
+      if (!e.ctrlKey) return
+      // Without this Chromium would page-zoom the whole app window.
+      e.preventDefault()
+      const rect = host.getBoundingClientRect()
+      center = { vx: e.clientX - rect.left, vy: e.clientY - rect.top }
+      factor *= Math.exp(-e.deltaY * 0.01)
+      if (!frame) frame = requestAnimationFrame(apply)
+    }
+    // Non-passive, or `preventDefault` is ignored.
+    host.addEventListener('wheel', onWheel, { passive: false })
+    return () => {
+      host.removeEventListener('wheel', onWheel)
+      if (frame) cancelAnimationFrame(frame)
+    }
+  }, [])
 
   // ── Find in document ──────────────────────────────────────────────────
   // The search plugin finds and keeps the results; it does not scroll, so
@@ -1113,7 +1162,7 @@ function PdfSurface({
       )}
 
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-        <div className="h-full min-h-0 min-w-0 flex-1">
+        <div ref={pinchHostRef} className="h-full min-h-0 min-w-0 flex-1">
           <Viewport
             documentId={documentId}
             className={`h-full w-full overflow-auto ${

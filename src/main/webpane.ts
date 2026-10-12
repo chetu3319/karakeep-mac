@@ -46,6 +46,13 @@ export class WebPaneManager {
       return { action: 'deny' }
     })
 
+    // Trackpad pinch magnifies the page like Safari does, without reflowing
+    // it, and pinching back out returns to 100%. This is visual zoom only: it
+    // is separate from the page zoom level, and is off by default (1..1).
+    // Applied again on `dom-ready` below in case a navigation resets it.
+    const enablePinchZoom = (): void => void wc.setVisualZoomLevelLimits(1, 3)
+    enablePinchZoom()
+
     const pushState = (extra?: Partial<WebPaneState>): void => {
       if (this.win.isDestroyed() || this.win.webContents.isDestroyed()) return
       const state: WebPaneState = {
@@ -91,6 +98,7 @@ export class WebPaneManager {
       pushState({ error: `${errorDescription} (${errorCode})`, isLoading: false })
     })
     wc.on('dom-ready', () => {
+      enablePinchZoom()
       // Give the page a moment to settle, then push down any highlights
       // we owe it for the bookmark currently loaded in this view.
       if (this.pendingHighlights.length) {
