@@ -8,6 +8,7 @@ import { BrowserWindow, WebContentsView, ipcMain, shell } from 'electron'
 import { join } from 'node:path'
 import { IPC, WEBPANE_IPC } from '../shared/ipc'
 import type { WebPaneBounds, WebPaneFindResult, WebPaneState } from '../shared/types'
+import { lockPageZoom } from './zoomLock'
 
 const WEBPANE_PRELOAD = join(__dirname, '../preload/webpane.mjs')
 
@@ -41,6 +42,7 @@ export class WebPaneManager {
     this.view = view
 
     const wc = view.webContents
+    lockPageZoom(wc)
     wc.setWindowOpenHandler(({ url }) => {
       shell.openExternal(url)
       return { action: 'deny' }

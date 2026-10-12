@@ -97,10 +97,8 @@ export function buildAppMenu(getTargetWindow: () => BrowserWindow | null): Menu 
         { role: 'forceReload' as const },
         { role: 'toggleDevTools' as const },
         { type: 'separator' as const },
-        { role: 'resetZoom' as const },
-        { role: 'zoomIn' as const },
-        { role: 'zoomOut' as const },
-        { type: 'separator' as const },
+        // No resetZoom/zoomIn/zoomOut: page zoom breaks the side-panel
+        // layout (see zoomLock.ts). The PDF reader has its own zoom controls.
         {
           label: 'Hide/Show Sidebar',
           accelerator: 'Ctrl+Cmd+S',
