@@ -62,11 +62,30 @@ export function buildAppMenu(getTargetWindow: () => BrowserWindow | null): Menu 
         { role: 'selectAll' as const },
         { type: 'separator' as const },
         {
-          // The bookmark list's search box. ⌘F is where every user's hand
-          // already goes; before this the box could only be reached with
-          // the mouse.
-          label: 'Find in Library',
+          // Menu accelerators fire even while the native web view has focus,
+          // which a renderer keydown handler would never see — so the find
+          // shortcuts have to live here. The menu just reports the keystroke;
+          // the renderer knows whether a document is open and decides
+          // between "find in it" and "focus the library search".
+          label: 'Find…',
           accelerator: 'CmdOrCtrl+F',
+          click: (): void => sendToRenderer(IPC.MENU_FIND_EVENT)
+        },
+        {
+          label: 'Find Next',
+          accelerator: 'CmdOrCtrl+G',
+          click: (): void => sendToRenderer(IPC.MENU_FIND_NEXT_EVENT)
+        },
+        {
+          label: 'Find Previous',
+          accelerator: 'Shift+CmdOrCtrl+G',
+          click: (): void => sendToRenderer(IPC.MENU_FIND_PREVIOUS_EVENT)
+        },
+        {
+          // The bookmark list's search box, which ⌘F used to own. Still
+          // what ⌘F does when no document is open.
+          label: 'Find in Library',
+          accelerator: 'Shift+CmdOrCtrl+F',
           click: (): void => sendToRenderer(IPC.MENU_FOCUS_SEARCH_EVENT)
         }
       ]

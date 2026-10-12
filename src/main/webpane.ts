@@ -7,7 +7,7 @@
 import { BrowserWindow, WebContentsView, ipcMain, shell } from 'electron'
 import { join } from 'node:path'
 import { IPC, WEBPANE_IPC } from '../shared/ipc'
-import type { WebPaneBounds, WebPaneState } from '../shared/types'
+import type { WebPaneBounds, WebPaneFindResult, WebPaneState } from '../shared/types'
 
 const WEBPANE_PRELOAD = join(__dirname, '../preload/webpane.mjs')
 
@@ -69,6 +69,21 @@ export class WebPaneManager {
       // re-running the preload, so re-push what we owe this bookmark.
       if (this.pendingHighlights.length) wc.send(WEBPANE_IPC.APPLY, this.pendingHighlights)
     })
+    wc.on('found-in-page', (_e, result) => {
+      if (this.win.isDestroyed() || this.win.webContents.isDestroyed()) return
+      const found: WebPaneFindResult = {
+        activeMatchOrdinal: result.activeMatchOrdinal,
+        matches: result.matches,
+        finalUpdate: result.finalUpdate
+      }
+      this.win.webContents.send(IPC.WEBPANE_FOUND_EVENT, found)
+    })
+    // A real navigation replaces the document the highlights belonged to.
+    // The renderer re-runs the query against the new page if the bar is
+    // still open; this just makes sure nothing stale stays painted.
+    wc.on('did-start-navigation', (details) => {
+      if (details.isMainFrame && !details.isSameDocument) this.stopFind()
+    })
     wc.on('page-title-updated', () => pushState())
     wc.on('did-fail-load', (_e, errorCode, errorDescription, _validatedURL, isMainFrame) => {
       if (!isMainFrame) return
@@ -118,6 +133,7 @@ export class WebPaneManager {
     const view = this.ensureView()
     this.currentBookmarkId = bookmarkId
     this.pendingHighlights = highlights
+    this.stopFind()
     view.webContents.loadURL(url).catch((err) => {
       console.error('[webpane] loadURL failed', err instanceof Error ? err.message : err)
     })
@@ -169,6 +185,22 @@ export class WebPaneManager {
     } catch {
       return ''
     }
+  }
+
+  /**
+   * Find-in-page. Electron's `findNext` flag is named backwards from what a
+   * caller expects: `true` begins a *new* session (the query changed),
+   * `false` continues the running one to its next/previous match. Callers
+   * here say `newSession` and this maps it.
+   */
+  find(text: string, forward: boolean, newSession: boolean): void {
+    if (!this.view || this.view.webContents.isDestroyed() || !text) return
+    this.view.webContents.findInPage(text, { forward, findNext: newSession, matchCase: false })
+  }
+
+  stopFind(): void {
+    if (!this.view || this.view.webContents.isDestroyed()) return
+    this.view.webContents.stopFindInPage('clearSelection')
   }
 
   setBounds(bounds: WebPaneBounds): void {

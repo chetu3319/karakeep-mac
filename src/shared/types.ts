@@ -335,6 +335,15 @@ export interface WebPaneState {
   error?: string | null
 }
 
+/** Progress of a find-in-page session, as Chromium reports it. */
+export interface WebPaneFindResult {
+  /** 1-based position of the current match; 0 until Chromium has picked one. */
+  activeMatchOrdinal: number
+  matches: number
+  /** Counts arrive in several updates; only the final one is settled. */
+  finalUpdate: boolean
+}
+
 export interface WebPaneBounds {
   x: number
   y: number

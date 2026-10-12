@@ -22,6 +22,7 @@ import ContextMenu, { type ContextMenuItem } from './ContextMenu'
 import Icon from './Icon'
 import { BOOKMARK_DRAG_MIME, currentBookmarkDrag, type BookmarkDragPayload } from '../lib/dragTypes'
 import { errMessage } from '../lib/errors'
+import { FOCUS_LIBRARY_SEARCH } from '../lib/libraryFocus'
 
 function useDebounced(value: string, ms: number): string {
   const [debounced, setDebounced] = useState(value)
@@ -201,13 +202,19 @@ export default function BookmarkList({
     return () => el.removeEventListener('scroll', onScroll)
   }, [active])
 
-  // ⌘F from the Edit menu. Selecting the existing text means a second ⌘F
+  // ⇧⌘F from the Edit menu, or ⌘F when no document is open. Selecting the existing text means a second ⌘F
   // starts a new search rather than appending to the old one.
   useEffect(() => {
-    return window.kk.window.onFocusSearch(() => {
+    const focusSearch = (): void => {
       searchRef.current?.focus()
       searchRef.current?.select()
-    })
+    }
+    const off = window.kk.window.onFocusSearch(focusSearch)
+    window.addEventListener(FOCUS_LIBRARY_SEARCH, focusSearch)
+    return () => {
+      off()
+      window.removeEventListener(FOCUS_LIBRARY_SEARCH, focusSearch)
+    }
   }, [])
 
   /**

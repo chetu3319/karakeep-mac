@@ -68,6 +68,12 @@ export const IPC = {
   MENU_TOGGLE_FOCUS_MODE_EVENT: 'menu:toggle-focus-mode',
   MENU_NEW_BOOKMARK_EVENT: 'menu:new-bookmark',
   MENU_FOCUS_SEARCH_EVENT: 'menu:focus-search',
+  // ⌘F / ⌘G / ⇧⌘G. The menu only reports the keystroke; whether it means
+  // "find in the open document" or "focus the library search" depends on
+  // what the renderer is showing, so the renderer decides.
+  MENU_FIND_EVENT: 'menu:find',
+  MENU_FIND_NEXT_EVENT: 'menu:find-next',
+  MENU_FIND_PREVIOUS_EVENT: 'menu:find-previous',
   MENU_OPEN_SETTINGS_EVENT: 'menu:open-settings',
 
   // AI streaming (Gemini)
@@ -98,6 +104,9 @@ export const IPC = {
   // Karakeep stored at save time, which for a link bookmark can be stale or
   // paywalled-thin.
   WEBPANE_GET_PAGE_TEXT: 'webpane:get-page-text',
+  WEBPANE_FIND: 'webpane:find', // search the live page (starts or continues a session)
+  WEBPANE_STOP_FIND: 'webpane:stop-find', // clear matches and the selection
+  WEBPANE_FOUND_EVENT: 'webpane:found', // main -> renderer push: match count + active ordinal
   WEBPANE_STATE_EVENT: 'webpane:state', // main -> renderer push
   WEBPANE_HIGHLIGHTS_CHANGED_EVENT: 'webpane:highlights-changed', // main -> renderer push
   WEBPANE_HIGHLIGHT_STATUS_EVENT: 'webpane:highlight-status' // main -> renderer push: which highlights anchored

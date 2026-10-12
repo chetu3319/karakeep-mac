@@ -345,6 +345,10 @@ function registerIpc(): void {
   ipcMain.handle(IPC.WEBPANE_BACK, () => webPane?.back())
   ipcMain.handle(IPC.WEBPANE_FORWARD, () => webPane?.forward())
   ipcMain.handle(IPC.WEBPANE_RELOAD, () => webPane?.reload())
+  ipcMain.handle(IPC.WEBPANE_FIND, (_e, args: { text: string; forward: boolean; newSession: boolean }) =>
+    webPane?.find(args.text, args.forward, args.newSession)
+  )
+  ipcMain.handle(IPC.WEBPANE_STOP_FIND, () => webPane?.stopFind())
   ipcMain.handle(IPC.WEBPANE_STOP, () => webPane?.stop())
   ipcMain.handle(IPC.WEBPANE_OPEN_EXTERNAL, (_e, url: string) => shell.openExternal(url))
 }

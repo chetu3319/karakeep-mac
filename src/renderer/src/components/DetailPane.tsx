@@ -1,8 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { hexForColor as colorFor } from '../../../shared/highlightUi'
 import type { Bookmark, Highlight, UpdateBookmarkInput, WebPaneState } from '../../../shared/types'
 import { useBookmark, useDeleteBookmark, useHighlightsForBookmark, useUpdateBookmark } from '../lib/queries'
+import type { FindStep } from '../lib/findStep'
+import { FOCUS_LIBRARY_SEARCH } from '../lib/libraryFocus'
 import { useBookmarkText } from '../lib/useBookmarkText'
 import { displayForBookmark } from '../lib/bookmarkDisplay'
 import { usePref } from '../lib/prefs'
@@ -190,8 +192,45 @@ export default function DetailPane({
     // has never been on.
     setWebState(EMPTY_WEB_STATE)
     setPdfAiContext(null)
+    // Matches belong to the document that was on screen.
+    setFindOpen(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookmark?.id])
+
+  // ── Find in document ──────────────────────────────────────────────────
+  // ⌘F, ⌘G and ⇧⌘G arrive from the app menu (see main/menu.ts) because
+  // that is the only place a shortcut reaches us while the native web view
+  // has focus. Whether ⌘F means "find here" or "search the library" depends
+  // on whether a reader is showing, which only this component knows.
+  const readerOpen = !!bookmark && ((tab === 'pdf' && !!pdfAssetId) || (tab === 'web' && !!url))
+  const [findOpen, setFindOpen] = useState(false)
+  const [findFocusSignal, setFindFocusSignal] = useState(0)
+  const [findStep, setFindStep] = useState<FindStep | null>(null)
+  const readerOpenRef = useRef(readerOpen)
+  readerOpenRef.current = readerOpen
+
+  // Leaving the reader (another tab) ends the search too.
+  useEffect(() => {
+    if (!readerOpen) setFindOpen(false)
+  }, [readerOpen])
+
+  useEffect(() => {
+    const offFind = window.kk.window.onFind(() => {
+      if (!readerOpenRef.current) {
+        window.dispatchEvent(new Event(FOCUS_LIBRARY_SEARCH))
+        return
+      }
+      setFindOpen(true)
+      setFindFocusSignal((n) => n + 1)
+    })
+    const offNext = window.kk.window.onFindNext(() => setFindStep({ forward: true }))
+    const offPrev = window.kk.window.onFindPrevious(() => setFindStep({ forward: false }))
+    return () => {
+      offFind()
+      offNext()
+      offPrev()
+    }
+  }, [])
 
   useEffect(() => window.kk.webpane.onState((next) => setWebState(next)), [])
 
@@ -585,6 +624,10 @@ export default function DetailPane({
                 author={content?.author || content?.publisher || undefined}
                 aiDrawerOpen={aiDrawerOpen}
                 onAiContextChange={setPdfAiContext}
+                findOpen={findOpen && tab === 'pdf'}
+                findFocusSignal={findFocusSignal}
+                findStep={findStep}
+                onFindClose={() => setFindOpen(false)}
               />
             </div>
           )}
@@ -599,6 +642,10 @@ export default function DetailPane({
                 state={webState}
                 focusHighlightId={focusHighlightId}
                 onFocusHandled={clearFocus}
+                findOpen={findOpen && tab === 'web'}
+                findFocusSignal={findFocusSignal}
+                findStep={findStep}
+                onFindClose={() => setFindOpen(false)}
               />
             ) : (
               <div className="p-5 text-sm text-neutral-400">
