@@ -148,8 +148,15 @@ export default function AddBookmarkDialog({ onClose }: { onClose: () => void }):
                 // A pasted URL often carries surrounding whitespace/newlines
                 // from wherever it was copied — trim immediately so
                 // validity feedback matches what actually gets submitted.
-                const pasted = e.clipboardData.getData('text')
-                if (pasted) setUrl(pasted.trim())
+                // preventDefault is required: without it the browser's own
+                // paste inserts the text a second time after this update.
+                const pasted = e.clipboardData.getData('text').trim()
+                if (!pasted) return
+                e.preventDefault()
+                const input = e.currentTarget
+                const start = input.selectionStart ?? input.value.length
+                const end = input.selectionEnd ?? input.value.length
+                setUrl(input.value.slice(0, start) + pasted + input.value.slice(end))
               }}
               placeholder="https://example.com/article"
               className={`w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none dark:border-neutral-700 ${
