@@ -163,15 +163,10 @@ export function buildPromptPayload(req: AiStreamRequest): {
       userPrompt = `${contextSnippets.join('\n\n')}\n\nEquation / Math Notation to Decode:\n"${req.selectionText || ''}"`
       break
 
-    case 'meso-page':
-      systemInstruction +=
-        '\nTask: Answer questions specifically grounded in the active page / section text. Be accurate, cite specifics from the page, and explain figures or tables if referenced.'
-      userPrompt = `${contextSnippets.join('\n\n')}\n\nUser Question:\n${req.prompt || 'Summarize the core idea and key takeaways of this page in 3 clear bullet points.'}`
-      break
-
-    case 'macro-chat':
     case 'custom':
     default:
+      systemInstruction +=
+        `\nTask: Answer the reader's question about the selected text, grounded in this ${noun}. Answer in at most 3 sentences.`
       userPrompt = `${contextSnippets.join('\n\n')}`
       if (req.selectionText) {
         userPrompt += `\n\nSelected Text:\n"${req.selectionText}"`

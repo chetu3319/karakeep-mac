@@ -107,4 +107,15 @@ describe('buildPromptPayload micro modes', () => {
     })
     expect(systemInstruction).toContain('at most 3 sentences')
   })
+
+  it('limits Ask... (custom) to at most 3 sentences and carries the question', () => {
+    const { systemInstruction, contents } = buildPromptPayload({
+      requestId: 'r',
+      mode: 'custom',
+      selectionText: 'foo',
+      prompt: 'why?'
+    })
+    expect(systemInstruction).toContain('at most 3 sentences')
+    expect(JSON.stringify(contents)).toContain('why?')
+  })
 })

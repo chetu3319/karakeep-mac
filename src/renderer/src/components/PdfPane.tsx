@@ -33,17 +33,19 @@ import {
   ICON_CHECK,
   ICON_COPY,
   ICON_NOTE,
+  ICON_STUDY_ATTACH,
   ICON_TRASH,
   hexForColor,
   highlightPopoverStylesheet,
   placePopover
 } from '../../../shared/highlightUi'
-import type { AiMode, Highlight } from '../../../shared/types'
+import type { Highlight } from '../../../shared/types'
 import type { StudyAttachment, StudyMessage } from '../../../shared/study'
 import { createPdfDocumentReader, type PdfDocumentReader } from '../lib/pdfDocumentReader'
 import { useCreateHighlight, useDeleteHighlight, useUpdateHighlight } from '../lib/queries'
 import { useIsDark, usePref } from '../lib/prefs'
-import SelectionAiHUD from './SelectionAiHUD'
+import InlineAnswer from './InlineAnswer'
+import { buildContinueMessages, textAttachment, type InlineMode } from '../lib/inlineAnswer'
 import FindBar, { type FindResult } from './FindBar'
 import type { FindStep } from '../lib/findStep'
 import {
@@ -269,6 +271,8 @@ function PdfSurface({
   sourceUrl,
   author,
   onDocumentReader,
+  onStudyAttach,
+  onStudyContinue,
   findOpen,
   findFocusSignal,
   findStep,
@@ -592,20 +596,6 @@ function PdfSurface({
 
   const [noteDraftFor, setNoteDraftFor] = useState<string | null>(null)
 
-  // ── AI in-situ and page-level assistant state ───────────────────────────
-  interface AiSelectionState {
-    anchorRect: Rect
-    pageIndex: number
-    selectionText: string
-    surroundingContext: string
-    pageText: string
-    startOffset: number
-    endOffset: number
-    initialMode: AiMode
-  }
-
-  const [aiSelectionState, setAiSelectionState] = useState<AiSelectionState | null>(null)
-
   // Night mode is a reading preference, not a theme: someone may want a dark
   // app around a paper-white PDF (colour-accurate figures) or a dark PDF in a
   // light app. 'auto' keeps the common case free — it follows the theme until
@@ -678,12 +668,18 @@ function PdfSurface({
     }
   }, [onDocumentReader])
 
-  const askAiFromSelection = useCallback(
-    async (rect: Rect, pageIndex: number, mode: AiMode = 'micro-explain') => {
-      if (!selection || !index || !doc) return
+  // What the selection toolbar's AI actions work from. Unlike a highlight this
+  // never clears the selection: the toolbar is attached to it, so the answer
+  // has to render inside the same menu while the selection stays alive.
+  // Everything the actions need (text, context, offsets, page) is captured
+  // here once and held by the menu, so a later selection change cannot
+  // desync a save from the text the answer was about.
+  const captureSelection = useCallback(
+    async (pageIndex: number): Promise<SelectionCapture | null> => {
+      if (!selection || !index || !doc) return null
       const scope = selection.forDocument(documentId)
       const range = scope.getState().selection
-      if (!range) return
+      if (!range) return null
 
       const a = toGlobal(index, range.start.page, range.start.index)
       const b = toGlobal(index, range.end.page, range.end.index)
@@ -691,54 +687,44 @@ function PdfSurface({
       const end = Math.max(a, b) + 1
 
       const text = (await textForSpans(engine, doc, spansForRange(index, start, end))).trim()
-      if (!text) return
+      if (!text) return null
 
       const ctxStart = Math.max(0, start - 200)
       const ctxEnd = Math.min(index.total, end + 200)
       const surrounding = (await textForSpans(engine, doc, spansForRange(index, ctxStart, ctxEnd))).trim()
       const pageContent = await pageText(pageIndex)
 
-      scope.clear()
-      setAiSelectionState({
-        anchorRect: rect,
-        pageIndex,
+      return {
         selectionText: text,
         surroundingContext: surrounding,
         pageText: pageContent,
         startOffset: start,
         endOffset: end,
-        initialMode: mode
-      })
+        page: range.start.page + 1
+      }
     },
     [selection, index, doc, documentId, engine, pageText]
   )
 
-  const handleSaveAiAsHighlight = async (note: string): Promise<void> => {
-    if (!aiSelectionState) return
-    const created = await createHighlight.mutateAsync({
-      bookmarkId,
-      startOffset: aiSelectionState.startOffset,
-      endOffset: aiSelectionState.endOffset,
-      color: DEFAULT_HIGHLIGHT_COLOR,
-      text: aiSelectionState.selectionText,
-      note
-    })
-    setAiSelectionState(null)
-    setActiveId(created.id)
-  }
+  const closeSelectionMenu = useCallback((): void => {
+    selection?.forDocument(documentId).clear()
+  }, [selection, documentId])
 
-  const aiHudAnchor = useCallback((): DOMRect | null => {
-    if (!aiSelectionState) return null
-    const pageEl = document.querySelector(`[data-pdf-page="${aiSelectionState.pageIndex}"]`)
-    if (!pageEl) return null
-    const box = pageEl.getBoundingClientRect()
-    return new DOMRect(
-      box.left + aiSelectionState.anchorRect.origin.x,
-      box.top + aiSelectionState.anchorRect.origin.y,
-      aiSelectionState.anchorRect.size.width,
-      aiSelectionState.anchorRect.size.height
-    )
-  }, [aiSelectionState])
+  const saveAiAsHighlight = useCallback(
+    async (cap: SelectionCapture, note: string): Promise<void> => {
+      const created = await createHighlight.mutateAsync({
+        bookmarkId,
+        startOffset: cap.startOffset,
+        endOffset: cap.endOffset,
+        color: DEFAULT_HIGHLIGHT_COLOR,
+        text: cap.selectionText,
+        note
+      })
+      selection?.forDocument(documentId).clear()
+      setActiveId(created.id)
+    },
+    [createHighlight, bookmarkId, selection, documentId]
+  )
 
   // Dev smoke only: announce readiness, and on request drive the exact path a
   // user drives — select text in the page, then create a highlight from it.
@@ -866,16 +852,14 @@ function PdfSurface({
           window.kk.dev.notifyPdfHighlighted('')
           return
         }
-        // Ask AI, driven the same way a user would: a real click on the
-        // toolbar's "Ask AI" button, on the selection the drag above made.
-        // This is the flow-preserving in-situ HUD (SelectionAiHUD.tsx) — the
-        // surface that a `pointer-events: none` host with no opt-in on the
-        // panel makes entirely unclickable, and that the click-through then
-        // dismisses via the outside-click handler. Both would show up here:
-        // a HUD that never reflects a mode change, or one that vanishes.
-        const askAiBtn = document.querySelector<HTMLElement>('[data-kk-ai]')
+        // Quick AI, driven the same way a user would: a real click on the
+        // toolbar's Explain button, on the selection the drag above made.
+        // The answer opens inside the same toolbar card; the toolbar must
+        // stay put (no click-through dismissal) and the selection must
+        // survive so the swatch flow below still works.
+        const askAiBtn = document.querySelector<HTMLElement>('[data-kk-ai-mode="micro-explain"]')
         if (!askAiBtn) {
-          console.error('[smoke-pdf] selection toolbar has no Ask AI button')
+          console.error('[smoke-pdf] selection toolbar has no Explain button')
         } else {
           const askAiBox = askAiBtn.getBoundingClientRect()
           await window.kk.dev.realClickOnPdf({
@@ -883,46 +867,29 @@ function PdfSurface({
             y: askAiBox.top + askAiBox.height / 2
           })
           await new Promise((r2) => setTimeout(r2, 400))
-          const hud = document.querySelector<HTMLElement>('[data-kk-ai-hud]')
-          if (!hud) {
-            console.error('[smoke-pdf] AI HUD did not open after clicking Ask AI')
+          const card = document.querySelector<HTMLElement>('[data-kk-inline-answer]')
+          if (!card) {
+            console.error('[smoke-pdf] inline answer did not open after clicking Explain')
           } else {
-            const cs = getComputedStyle(hud)
-            console.log(`[smoke-pdf] AI HUD opened; computed pointer-events=${cs.pointerEvents}`)
+            const cs = getComputedStyle(card)
+            console.log(`[smoke-pdf] inline answer opened; computed pointer-events=${cs.pointerEvents}`)
             if (cs.pointerEvents === 'none') {
-              console.error('[smoke-pdf] AI HUD panel is not hit-testable (pointer-events: none) — every control in it is dead')
-            }
-            const dejargon = hud.querySelector<HTMLElement>('[data-kk-ai-mode="micro-dejargon"]')
-            if (!dejargon) {
-              console.error('[smoke-pdf] AI HUD has no Dejargonify tab to click')
-            } else {
-              const db = dejargon.getBoundingClientRect()
-              await window.kk.dev.realClickOnPdf({ x: db.left + db.width / 2, y: db.top + db.height / 2 })
-              await new Promise((r2) => setTimeout(r2, 400))
-              const stillThere = document.querySelector<HTMLElement>('[data-kk-ai-hud]')
-              if (!stillThere) {
-                console.error('[smoke-pdf] AI HUD vanished after clicking a mode tab — the click-through/dismiss bug')
-              } else {
-                const active = stillThere.querySelector<HTMLElement>('[data-kk-ai-mode="micro-dejargon"]')
-                const isActive = active?.className.includes('bg-emerald-100')
-                if (isActive) console.log('[smoke-pdf] AI HUD stayed open and the Dejargonify tab became active — click landed')
-                else console.error('[smoke-pdf] AI HUD stayed open but the Dejargonify tab never became active — click did not land')
-              }
+              console.error('[smoke-pdf] inline answer is not hit-testable (pointer-events: none)')
             }
           }
-          // Dismiss the HUD the way a user would (Escape) and confirm it
-          // actually closes, then restore the selection for the swatch flow
-          // below — the HUD's askAiFromSelection cleared it when it opened.
+          // Dismiss the way a user would (Escape) and confirm it closes,
+          // then restore the selection for the swatch flow below — closing
+          // the toolbar clears the selection.
           document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
           await new Promise((r2) => setTimeout(r2, 250))
-          if (document.querySelector('[data-kk-ai-hud]')) {
-            console.error('[smoke-pdf] AI HUD did not dismiss on Escape')
+          if (document.querySelector('[data-kk-inline-answer]')) {
+            console.error('[smoke-pdf] inline answer did not dismiss on Escape')
           } else {
-            console.log('[smoke-pdf] AI HUD dismissed on Escape')
+            console.log('[smoke-pdf] inline answer dismissed on Escape')
           }
           // KK_SMOKE_AI_ONLY stops here, before the swatch click below ever
           // runs — that click creates a highlight, and this mode exists to
-          // verify the AI HUD against a bookmark that write-testing isn't
+          // verify the inline answer against a bookmark that write-testing isn't
           // scoped to.
           if (window.kk.dev.smokeAiOnly) {
             console.log('[smoke-pdf] KK_SMOKE_AI_ONLY=1 — stopping before highlight creation')
@@ -1092,8 +1059,15 @@ function PdfSurface({
           await deleteHighlight.mutateAsync({ id, bookmarkId })
         }}
         onCreate={createFromSelection}
-        onAskAi={askAiFromSelection}
         onCopy={copyFromSelection}
+        onCapture={captureSelection}
+        onCloseMenu={closeSelectionMenu}
+        onSaveAiNote={saveAiAsHighlight}
+        onStudyAttach={onStudyAttach}
+        onStudyContinue={onStudyContinue}
+        docTitle={title || fileName}
+        sourceUrl={sourceUrl}
+        author={author}
       />
     ),
     [
@@ -1109,8 +1083,16 @@ function PdfSurface({
       deleteHighlight,
       bookmarkId,
       createFromSelection,
-      askAiFromSelection,
-      copyFromSelection
+      copyFromSelection,
+      captureSelection,
+      closeSelectionMenu,
+      saveAiAsHighlight,
+      onStudyAttach,
+      onStudyContinue,
+      title,
+      fileName,
+      sourceUrl,
+      author
     ]
   )
 
@@ -1238,24 +1220,19 @@ function PdfSurface({
         </div>
 
       </div>
-
-      {aiSelectionState && (
-        <SelectionAiHUD
-          anchor={aiHudAnchor}
-          selectionText={aiSelectionState.selectionText}
-          surroundingContext={aiSelectionState.surroundingContext}
-          pageText={aiSelectionState.pageText}
-          docTitle={title || fileName}
-          initialMode={aiSelectionState.initialMode}
-          onDismiss={() => setAiSelectionState(null)}
-          sourceUrl={sourceUrl}
-          author={author}
-          docKind="pdf"
-          onSaveAsHighlight={handleSaveAiAsHighlight}
-        />
-      )}
     </>
   )
+}
+
+/** What the toolbar's AI actions read from the live selection (see captureSelection). */
+interface SelectionCapture {
+  selectionText: string
+  surroundingContext: string
+  pageText: string
+  startOffset: number
+  endOffset: number
+  /** 1-based, the page the selection starts on. */
+  page: number
 }
 
 interface PdfPageProps {
@@ -1277,8 +1254,15 @@ interface PdfPageProps {
   onRecolor: (id: string, color: string) => Promise<void>
   onDelete: (id: string) => Promise<void>
   onCreate: (color: string, withNote: boolean) => Promise<string | null>
-  onAskAi: (rect: Rect, pageIndex: number, mode?: AiMode) => void
   onCopy: () => Promise<boolean>
+  onCapture: (pageIndex: number) => Promise<SelectionCapture | null>
+  onCloseMenu: () => void
+  onSaveAiNote: (cap: SelectionCapture, note: string) => Promise<void>
+  onStudyAttach?: (attachment: StudyAttachment) => void
+  onStudyContinue?: (messages: StudyMessage[]) => void
+  docTitle: string
+  sourceUrl?: string
+  author?: string
 }
 
 function PdfPage({
@@ -1299,8 +1283,15 @@ function PdfPage({
   onRecolor,
   onDelete,
   onCreate,
-  onAskAi,
-  onCopy
+  onCopy,
+  onCapture,
+  onCloseMenu,
+  onSaveAiNote,
+  onStudyAttach,
+  onStudyContinue,
+  docTitle,
+  sourceUrl,
+  author
 }: PdfPageProps): React.JSX.Element {
   const geo = geometry.get(pageIndex)
 
@@ -1474,8 +1465,15 @@ function PdfPage({
               rect={menu.rect}
               pageIndex={pageIndex}
               onCreate={onCreate}
-              onAskAi={(mode) => onAskAi(menu.rect, pageIndex, mode)}
               onCopy={onCopy}
+              onCapture={() => onCapture(pageIndex)}
+              onClose={onCloseMenu}
+              onSaveAiNote={onSaveAiNote}
+              onStudyAttach={onStudyAttach}
+              onStudyContinue={onStudyContinue}
+              docTitle={docTitle}
+              sourceUrl={sourceUrl}
+              author={author}
             />
           ) : null
         }
@@ -1595,7 +1593,7 @@ function FloatingPopover({
       onPointerDown={(e) => {
         // Don't let a press on the toolbar drop the selection it was opened
         // for — except in the fields that own their own selection.
-        if (!(e.target as HTMLElement).closest('.kh-ta, .kh-note-view')) e.preventDefault()
+        if (!(e.target as HTMLElement).closest('.kh-ta, .kh-note-view, .kh-input, .kh-ans')) e.preventDefault()
       }}
     >
       {children}
@@ -1707,19 +1705,43 @@ function SwatchRow({
   )
 }
 
-/** Colour swatches + "Note" + "Copy" + "Ask AI", shown against a live text selection. */
+const QUICK_ACTIONS: { mode: Exclude<InlineMode, 'custom'>; label: string }[] = [
+  { mode: 'micro-explain', label: 'Explain' },
+  { mode: 'micro-define', label: 'Define' },
+  { mode: 'micro-formula', label: 'Math' }
+]
+
+/**
+ * Colour swatches, then the quick AI actions (Explain / Define / Math / Ask…)
+ * and "Add to Study", shown against a live text selection. Choosing an action
+ * grows an answer under the same toolbar, in the same card.
+ */
 function SelectionMenu({
   rect,
   pageIndex,
   onCreate,
-  onAskAi,
-  onCopy
+  onCopy,
+  onCapture,
+  onClose,
+  onSaveAiNote,
+  onStudyAttach,
+  onStudyContinue,
+  docTitle,
+  sourceUrl,
+  author
 }: {
   rect: Rect
   pageIndex: number
   onCreate: (color: string, withNote: boolean) => Promise<string | null>
-  onAskAi?: (mode?: AiMode) => void
   onCopy?: () => Promise<boolean>
+  onCapture: () => Promise<SelectionCapture | null>
+  onClose: () => void
+  onSaveAiNote: (cap: SelectionCapture, note: string) => Promise<void>
+  onStudyAttach?: (attachment: StudyAttachment) => void
+  onStudyContinue?: (messages: StudyMessage[]) => void
+  docTitle: string
+  sourceUrl?: string
+  author?: string
 }): React.JSX.Element {
   const [busy, setBusy] = useState(false)
   // Copying no longer clears the selection or closes the menu (see
@@ -1728,6 +1750,13 @@ function SelectionMenu({
   // "Copied" label, and reverts itself after COPY_CONFIRM_MS below so the
   // button is clickable again without the user having to reopen the menu.
   const [copied, setCopied] = useState(false)
+  // The open answer, if any. `cap` is what the selection said when the action
+  // was chosen; it is held here so Save and Continue use the very text the
+  // answer was written about. Asking… shows its input first and only starts
+  // a request on submit.
+  const [answer, setAnswer] = useState<{ mode: InlineMode; prompt?: string; cap: SelectionCapture } | null>(null)
+  const [asking, setAsking] = useState<SelectionCapture | null>(null)
+  const [question, setQuestion] = useState('')
 
   // Revert "Copied" back to "Copy" after COPY_CONFIRM_MS. The cleanup here
   // matters: if the popover unmounts mid-confirmation (the user dismissed it
@@ -1761,43 +1790,166 @@ function SelectionMenu({
     }
   }
 
+  const pickMode = async (mode: Exclude<InlineMode, 'custom'>): Promise<void> => {
+    setBusy(true)
+    try {
+      const cap = await onCapture()
+      if (!cap) return
+      setAsking(null)
+      setAnswer({ mode, cap })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const pickAsk = async (): Promise<void> => {
+    if (asking) {
+      setAsking(null)
+      return
+    }
+    setBusy(true)
+    try {
+      const cap = await onCapture()
+      if (!cap) return
+      setAnswer(null)
+      setAsking(cap)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const attach = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      const cap = answer?.cap ?? asking ?? (await onCapture())
+      if (!cap) return
+      onStudyAttach?.(textAttachment(cap.selectionText, cap.page, cap.surroundingContext))
+      onClose()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const expanded = !!answer || !!asking
+
   return (
-    <FloatingPopover anchor={anchor}>
-      <SwatchRow active={null} disabled={busy} onPick={(color) => void run(color, false)} />
-      <div className="kh-sep" />
-      <PopButton
-        label="Note"
-        icon={ICON_NOTE}
-        disabled={busy}
-        onClick={() => void run(DEFAULT_HIGHLIGHT_COLOR, true)}
-        data-kk-note=""
-      />
-      {/* Copy sits right next to Note, mirroring where it lands on an
-          existing highlight's popover (HighlightPopover below). */}
-      <PopButton
-        label={copied ? 'Copied' : 'Copy'}
-        reserveLabels={['Copy', 'Copied']}
-        icon={copied ? ICON_CHECK : ICON_COPY}
-        disabled={busy || copied}
-        onClick={() => {
-          void (async () => {
-            // Only confirm if the copy actually happened — otherwise the
-            // button would be stuck showing "Copied" for a copy that never
-            // reached the clipboard (e.g. an empty selection).
-            const ok = (await onCopy?.()) ?? false
-            if (ok) setCopied(true)
-          })()
-        }}
-        data-kk-copy=""
-      />
-      <div className="kh-sep" />
-      <PopButton
-        label="Ask AI"
-        icon="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"
-        disabled={busy}
-        onClick={() => onAskAi?.('micro-explain')}
-        data-kk-ai=""
-      />
+    // Esc or a press outside closes the toolbar — but only once it has grown
+    // an answer. Before that the menu behaves exactly as it always has: it
+    // lives and dies with the selection.
+    <FloatingPopover
+      anchor={anchor}
+      className={expanded ? 'kh-ai-mode' : undefined}
+      onDismiss={expanded ? onClose : undefined}
+    >
+      <div className="kh-toolbar">
+        <SwatchRow active={null} disabled={busy} onPick={(color) => void run(color, false)} />
+        <div className="kh-sep" />
+        <PopButton
+          label="Note"
+          icon={ICON_NOTE}
+          disabled={busy}
+          onClick={() => void run(DEFAULT_HIGHLIGHT_COLOR, true)}
+          data-kk-note=""
+        />
+        {/* Copy sits right next to Note, mirroring where it lands on an
+            existing highlight's popover (HighlightPopover below). */}
+        <PopButton
+          label={copied ? 'Copied' : 'Copy'}
+          reserveLabels={['Copy', 'Copied']}
+          icon={copied ? ICON_CHECK : ICON_COPY}
+          disabled={busy || copied}
+          onClick={() => {
+            void (async () => {
+              // Only confirm if the copy actually happened — otherwise the
+              // button would be stuck showing "Copied" for a copy that never
+              // reached the clipboard (e.g. an empty selection).
+              const ok = (await onCopy?.()) ?? false
+              if (ok) setCopied(true)
+            })()
+          }}
+          data-kk-copy=""
+        />
+        <div className="kh-sep" />
+        {QUICK_ACTIONS.map((a) => (
+          <PopButton
+            key={a.mode}
+            label={a.label}
+            disabled={busy}
+            data-on={answer?.mode === a.mode ? '1' : undefined}
+            onClick={() => void pickMode(a.mode)}
+            data-kk-ai-mode={a.mode}
+          />
+        ))}
+        <PopButton
+          label="Ask…"
+          disabled={busy}
+          data-on={asking || answer?.mode === 'custom' ? '1' : undefined}
+          onClick={() => void pickAsk()}
+          data-kk-ai-mode="custom"
+        />
+        {onStudyAttach && (
+          <PopButton
+            label="Add to Study"
+            icon={ICON_STUDY_ATTACH}
+            iconOnly
+            disabled={busy}
+            onClick={() => void attach()}
+            data-kk-study-attach=""
+          />
+        )}
+      </div>
+
+      {asking && (
+        <form
+          className="kh-ai-input"
+          onSubmit={(e) => {
+            e.preventDefault()
+            const q = question.trim()
+            if (!q) return
+            setAnswer({ mode: 'custom', prompt: q, cap: asking })
+            setAsking(null)
+          }}
+        >
+          <input
+            className="kh-input"
+            autoFocus
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            placeholder="Ask about this selection…"
+            aria-label="Ask about this selection"
+          />
+          <button type="submit" className="kh-btn kh-primary" disabled={!question.trim()}>
+            <span>Ask</span>
+          </button>
+        </form>
+      )}
+
+      {answer && (
+        <InlineAnswer
+          key={`${answer.mode}:${answer.prompt ?? ''}`}
+          mode={answer.mode}
+          prompt={answer.prompt}
+          selectionText={answer.cap.selectionText}
+          surroundingContext={answer.cap.surroundingContext}
+          pageText={answer.cap.pageText}
+          docTitle={docTitle}
+          docKind="pdf"
+          sourceUrl={sourceUrl}
+          author={author}
+          onSaveAsNote={(text) => onSaveAiNote(answer.cap, text)}
+          onContinue={(text) => {
+            onStudyContinue?.(
+              buildContinueMessages({
+                mode: answer.mode,
+                prompt: answer.prompt,
+                answer: text,
+                attachment: textAttachment(answer.cap.selectionText, answer.cap.page, answer.cap.surroundingContext)
+              })
+            )
+            onClose()
+          }}
+        />
+      )}
     </FloatingPopover>
   )
 }

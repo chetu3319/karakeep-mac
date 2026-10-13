@@ -25,6 +25,7 @@ function thinkingLevelFor(mode: AiStreamRequest['mode']): ThinkingLevel {
     case 'micro-dejargon':
     case 'micro-define':
     case 'micro-formula':
+    case 'custom':
       return 'low'
     case 'study':
     default:
@@ -46,6 +47,7 @@ function maxOutputTokensFor(mode: AiStreamRequest['mode']): number {
     case 'micro-dejargon':
     case 'micro-define':
     case 'micro-formula':
+    case 'custom':
       return 2048
     case 'study':
     default:

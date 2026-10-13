@@ -272,8 +272,6 @@ export type AiMode =
   | 'micro-dejargon'
   | 'micro-define'
   | 'micro-formula'
-  | 'meso-page'
-  | 'macro-chat'
   | 'custom'
   | 'study'
 

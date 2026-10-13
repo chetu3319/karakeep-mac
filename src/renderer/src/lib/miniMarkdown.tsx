@@ -14,7 +14,7 @@ import katex from 'katex'
  * reads as broken rather than as plain text.
  *
  * This builds real React elements rather than ever touching innerHTML —
- * SelectionAiHUD and PageAiDrawer render model output, which is untrusted
+ * InlineAnswer and the Study panel render model output, which is untrusted
  * text from the user's own document via an LLM, and `dangerouslySetInnerHTML`
  * on that would be a stored-XSS vector the moment a page manages to get its
  * own markup echoed back through a completion. Building elements keeps
