@@ -3,6 +3,9 @@ import { join } from 'node:path'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { KarakeepApiClient } from './api'
 import { aiService } from './ai'
+import { createStudyStore } from './studyStore'
+import { createStudySync } from './studySync'
+import type { StudyThread } from '../shared/study'
 import * as store from './store'
 import { loadDotEnvLocal } from './env'
 import { buildAppMenu } from './menu'
@@ -216,6 +219,38 @@ function registerIpc(): void {
   ipcMain.handle(IPC.API_GET_BOOKMARK_LISTS, (_e, bookmarkId: string) =>
     requireClient().getBookmarkLists(bookmarkId)
   )
+  // Study chats: saved locally on every change, backed up to Karakeep as an
+  // attached HTML file five seconds after the last one. The api is looked up
+  // per call so a sign-in or settings change is picked up.
+  const studySync = createStudySync({
+    api: {
+      getBookmark: (id) => requireClient().getBookmark(id),
+      uploadAsset: (input) => requireClient().uploadAsset(input),
+      attachAssetToBookmark: (b, a) => requireClient().attachAssetToBookmark(b, a),
+      detachAssetFromBookmark: (b, a) => requireClient().detachAssetFromBookmark(b, a),
+      getAssetText: (id) => requireClient().getAssetText(id)
+    },
+    store: createStudyStore(join(app.getPath('userData'), 'chats')),
+    debounceMs: 5000,
+    onState: (bookmarkId, state) => {
+      mainWindow?.webContents.send(IPC.STUDY_SYNC_STATE_EVENT, { bookmarkId, state })
+    }
+  })
+  // Give pending chat backups a few seconds to reach Karakeep before quitting.
+  let quitFlushed = false
+  app.on('before-quit', (e) => {
+    if (quitFlushed) return
+    e.preventDefault()
+    quitFlushed = true
+    void Promise.race([studySync.flushAll().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]).then(() =>
+      app.quit()
+    )
+  })
+  ipcMain.handle(IPC.STUDY_OPEN, (_e, bookmarkId: string) => studySync.open(bookmarkId))
+  ipcMain.handle(IPC.STUDY_SAVE, (_e, thread: StudyThread, docTitle: string) => studySync.save(thread, docTitle))
+  ipcMain.handle(IPC.STUDY_FLUSH, (_e, bookmarkId: string) => studySync.flush(bookmarkId))
+  ipcMain.handle(IPC.STUDY_CLEAR, (_e, bookmarkId: string) => studySync.clear(bookmarkId))
+
   ipcMain.handle(IPC.API_GET_ASSET, (_e, assetId: string) => requireClient().getAssetDataUrl(assetId))
   ipcMain.handle(IPC.API_GET_ASSET_BYTES, (_e, assetId: string) => requireClient().getAssetBytes(assetId))
 
@@ -314,7 +349,8 @@ function registerIpc(): void {
       }
       const message = err instanceof Error ? err.message : String(err)
       if (!sender.isDestroyed()) {
-        sender.send(IPC.AI_STREAM_ERROR_EVENT, { requestId: req.requestId, error: message })
+        const code = err instanceof Error ? (err as Error & { code?: 'too-large' }).code : undefined
+        sender.send(IPC.AI_STREAM_ERROR_EVENT, { requestId: req.requestId, error: message, code })
       }
       // No `error` field here — the event above is the single source of
       // truth for stream-in-progress failures. See the comment above this
@@ -339,6 +375,11 @@ function registerIpc(): void {
   ipcMain.handle(IPC.WEBPANE_FOCUS_HIGHLIGHT, (_e, highlightId: string) => {
     webPane?.focusHighlight(highlightId)
   })
+  ipcMain.handle(IPC.WEBPANE_REVEAL_QUOTE, (_e, quote: string, bookmarkId?: string) =>
+    typeof quote === 'string' && quote ? (webPane?.revealQuote(quote, bookmarkId) ?? 'unavailable') : 'not-found'
+  )
+  ipcMain.handle(IPC.WEBPANE_CAPTURE_REGION, () => webPane?.captureRegion() ?? { error: 'Open the Web tab to capture a region.' })
+  ipcMain.handle(IPC.WEBPANE_CANCEL_CAPTURE, () => webPane?.cancelCapture())
   ipcMain.handle(IPC.WEBPANE_GET_PAGE_TEXT, () => webPane?.getPageText() ?? '')
   ipcMain.handle(IPC.WEBPANE_SET_BOUNDS, (_e, bounds: WebPaneBounds) => webPane?.setBounds(bounds))
   ipcMain.handle(IPC.WEBPANE_SHOW, () => webPane?.show())

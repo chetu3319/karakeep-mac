@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { StudyMessage } from './study'
 
 // ─────────────────────────── Users ───────────────────────────
 export const UserSchema = z.object({
@@ -260,20 +261,15 @@ export interface AuthResult {
 }
 
 // ─────────────────────────── AI Assistant (Gemini) ───────────────────────────
-// The three in-situ modes match the product spec (Explain / Dejargonify /
-// Define) verbatim; `micro-formula` ("Math") is a fourth mode kept because it
-// is genuinely useful for the arxiv/paper use case, even though the spec only
-// names three. `micro-explain` used to *define* a term — it now explains a
-// selection in the document's own argument, and the old defining behaviour
-// moved to the new `micro-define`, so neither label lies about what it does.
+// The in-situ modes are Explain, Define and Math (`micro-formula`); `custom`
+// answers a typed question about a selection, and `study` is the whole-document
+// chat.
 export type AiMode =
   | 'micro-explain'
-  | 'micro-dejargon'
   | 'micro-define'
   | 'micro-formula'
-  | 'meso-page'
-  | 'macro-chat'
   | 'custom'
+  | 'study'
 
 export interface AiChatMessage {
   role: 'user' | 'model'
@@ -302,6 +298,13 @@ export interface AiStreamRequest {
   siteName?: string
   author?: string
   docKind?: 'pdf' | 'article' | 'note'
+  // Study mode: the whole document rides in the system instruction, the chat
+  // in `studyMessages`. `paged` says whether `documentText` carries
+  // `[[page N]]` markers.
+  documentText?: string
+  studyMessages?: StudyMessage[]
+  currentPage?: number
+  paged?: boolean
 }
 
 export interface AiStreamChunk {
@@ -317,6 +320,8 @@ export interface AiStreamDone {
 export interface AiStreamError {
   requestId: string
   error: string
+  /** Set when the document was too big for the model, so the caller can retry smaller. */
+  code?: 'too-large'
 }
 
 export interface AiTestResult {

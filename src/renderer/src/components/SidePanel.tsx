@@ -22,7 +22,7 @@ function clampWidth(width: number): number {
 /**
  * The shell both docked side panes sit in.
  *
- * There are two of them — the highlight rail and the AI Co-Pilot — and
+ * There are two of them — the highlight rail and the Study panel — and
  * they had drifted into two different designs: 288px against 320px, a
  * tinted panel against a white one, an uppercase label against a
  * sentence-case heading with a status dot, and two different close

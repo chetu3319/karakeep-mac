@@ -114,6 +114,13 @@ export function buildAppMenu(getTargetWindow: () => BrowserWindow | null): Menu 
           accelerator: 'Ctrl+Cmd+F',
           click: (): void => sendToRenderer(IPC.MENU_TOGGLE_FOCUS_MODE_EVENT)
         },
+        {
+          // A menu accelerator, like Find…, so it works while the native web
+          // view has focus. The renderer knows whether a bookmark is open.
+          label: 'Study panel',
+          accelerator: 'Alt+CmdOrCtrl+S',
+          click: (): void => sendToRenderer(IPC.MENU_TOGGLE_STUDY_EVENT)
+        },
         { type: 'separator' as const },
         { role: 'togglefullscreen' as const }
       ]

@@ -14,7 +14,7 @@ import katex from 'katex'
  * reads as broken rather than as plain text.
  *
  * This builds real React elements rather than ever touching innerHTML —
- * SelectionAiHUD and PageAiDrawer render model output, which is untrusted
+ * InlineAnswer and the Study panel render model output, which is untrusted
  * text from the user's own document via an LLM, and `dangerouslySetInnerHTML`
  * on that would be a stored-XSS vector the moment a page manages to get its
  * own markup echoed back through a completion. Building elements keeps
@@ -199,9 +199,35 @@ function renderEmphasis(text: string): React.ReactNode[] {
   return nodes
 }
 
-/** Bold, italic, inline code, inline math, strikethrough, and links within a single line of text. */
+/**
+ * lib/aiRefs.ts's parseRefs swaps each reference marker for U+2063 R{index}
+ * U+2063 (invisible separators, so the sentinel survives paragraph joining
+ * and can't collide with anything a model writes) before the text gets here.
+ */
+const REF_SENTINEL = /\u2063R(\d+)\u2063/
+
+/** Code and display math are shown verbatim, so a reference landing inside one is dropped rather than shown as "R0". */
+const stripRefs = (text: string): string => text.replace(new RegExp(REF_SENTINEL.source, 'g'), '')
+
+// renderInline is called from many block renderers, all synchronously inside
+// one renderMarkdown call, so the caller's renderRef is held here for the
+// duration of that call rather than threaded through every signature.
+let activeRenderRef: ((refIndex: number) => React.ReactNode) | undefined
+
+/** Bold, italic, inline code, inline math, strikethrough, links and reference tags within a single line of text. */
 function renderInline(text: string): React.ReactNode[] {
-  return splitMathAndCode(text)
+  if (!text.includes('\u2063')) return splitMathAndCode(text)
+  const nodes: React.ReactNode[] = []
+  const parts = text.split(new RegExp(REF_SENTINEL.source, 'g'))
+  // split() with one capture group alternates: text, index, text, index, …
+  parts.forEach((part, n) => {
+    if (n % 2 === 0) {
+      if (part) nodes.push(...splitMathAndCode(part))
+    } else if (activeRenderRef) {
+      nodes.push(<React.Fragment key={nextKey()}>{activeRenderRef(Number(part))}</React.Fragment>)
+    }
+  })
+  return nodes
 }
 
 /** One item in a (possibly nested) list, keyed by its indent depth. */
@@ -352,8 +378,24 @@ function matchDisplayMathOpen(line: string): { delim: '$$' | '\\['; rest: string
   return null
 }
 
-/** Parses a block of Markdown-ish text into React elements. */
-export function renderMarkdown(source: string): React.ReactNode {
+/**
+ * Parses a block of Markdown-ish text into React elements. `renderRef`
+ * supplies the element for each reference sentinel (see renderInline); without
+ * it the sentinels are dropped.
+ */
+export function renderMarkdown(
+  source: string,
+  opts?: { renderRef?: (refIndex: number) => React.ReactNode }
+): React.ReactNode {
+  activeRenderRef = opts?.renderRef
+  try {
+    return renderBlocks(source)
+  } finally {
+    activeRenderRef = undefined
+  }
+}
+
+function renderBlocks(source: string): React.ReactNode {
   const lines = source.replace(/\r\n/g, '\n').split('\n')
   const blocks: React.ReactNode[] = []
 
@@ -389,7 +431,7 @@ export function renderMarkdown(source: string): React.ReactNode {
           key={nextKey()}
           className="mb-2 overflow-x-auto rounded-md bg-neutral-900 p-2.5 text-[11px] leading-relaxed text-neutral-100 last:mb-0 dark:bg-black/60"
         >
-          <code>{codeLines.join('\n')}</code>
+          <code>{stripRefs(codeLines.join('\n'))}</code>
         </pre>
       )
       continue
@@ -421,7 +463,7 @@ export function renderMarkdown(source: string): React.ReactNode {
           i++
         }
       }
-      const expr = exprLines.join('\n').trim()
+      const expr = stripRefs(exprLines.join('\n')).trim()
       blocks.push(<Katex key={nextKey()} expr={expr} displayMode={true} />)
       continue
     }

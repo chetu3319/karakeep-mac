@@ -75,6 +75,7 @@ export const IPC = {
   MENU_FIND_NEXT_EVENT: 'menu:find-next',
   MENU_FIND_PREVIOUS_EVENT: 'menu:find-previous',
   MENU_OPEN_SETTINGS_EVENT: 'menu:open-settings',
+  MENU_TOGGLE_STUDY_EVENT: 'menu:toggle-study',
 
   // AI streaming (Gemini)
   AI_STREAM_START: 'ai:stream-start',
@@ -82,6 +83,11 @@ export const IPC = {
   AI_STREAM_CHUNK_EVENT: 'ai:stream-chunk', // main -> renderer push
   AI_STREAM_DONE_EVENT: 'ai:stream-done',   // main -> renderer push
   AI_STREAM_ERROR_EVENT: 'ai:stream-error', // main -> renderer push
+  STUDY_OPEN: 'study:open',
+  STUDY_SAVE: 'study:save',
+  STUDY_FLUSH: 'study:flush',
+  STUDY_CLEAR: 'study:clear',
+  STUDY_SYNC_STATE_EVENT: 'study:sync-state', // main -> renderer push
   AI_TEST_CONNECTION: 'ai:test-connection',
   AI_SET_CONFIG: 'ai:set-config',
 
@@ -99,6 +105,9 @@ export const IPC = {
   WEBPANE_IS_ATTACHED: 'webpane:is-attached', // dev/smoke diagnostic — confirms actual detach, not just visual hide
   WEBPANE_APPLY_HIGHLIGHTS: 'webpane:apply-highlights', // re-push highlights without re-navigating
   WEBPANE_FOCUS_HIGHLIGHT: 'webpane:focus-highlight', // scroll a highlight into view in the live page
+  WEBPANE_REVEAL_QUOTE: 'webpane:reveal-quote', // renderer -> main -> page: scroll to and flash a quote; resolves to 'found' | 'not-found' | 'unavailable'
+  WEBPANE_CAPTURE_REGION: 'webpane:capture-region', // renderer -> main -> page: drag a rectangle; resolves to { imageDataUrl, text } or null
+  WEBPANE_CANCEL_CAPTURE: 'webpane:cancel-capture', // renderer -> main -> page: abandon a capture in progress
   // Lets the sidebar chat ground itself in the live page's actual rendered
   // text (see lib/useBookmarkText.ts) instead of only the crawled snapshot
   // Karakeep stored at save time, which for a link bookmark can be stale or
@@ -109,7 +118,9 @@ export const IPC = {
   WEBPANE_FOUND_EVENT: 'webpane:found', // main -> renderer push: match count + active ordinal
   WEBPANE_STATE_EVENT: 'webpane:state', // main -> renderer push
   WEBPANE_HIGHLIGHTS_CHANGED_EVENT: 'webpane:highlights-changed', // main -> renderer push
-  WEBPANE_HIGHLIGHT_STATUS_EVENT: 'webpane:highlight-status' // main -> renderer push: which highlights anchored
+  WEBPANE_HIGHLIGHT_STATUS_EVENT: 'webpane:highlight-status', // main -> renderer push: which highlights anchored
+  WEBPANE_STUDY_ATTACH_EVENT: 'webpane:study-attach', // main -> renderer push: { bookmarkId, attachment } from the page's toolbar
+  WEBPANE_STUDY_CONTINUE_EVENT: 'webpane:study-continue' // main -> renderer push: { bookmarkId, messages } seeding Study
 } as const
 
 export const WEBPANE_IPC = {
@@ -120,5 +131,12 @@ export const WEBPANE_IPC = {
   HIGHLIGHT_REMOVED: 'kk:highlight-removed', // webpane -> main
   FOCUS: 'kk:focus', // main -> webpane: scroll+flash one highlight
   ID_ASSIGNED: 'kk:id-assigned', // main -> webpane: client id -> server id
-  STATUS: 'kk:highlight-status' // webpane -> main: anchored / missing ids
+  STATUS: 'kk:highlight-status', // webpane -> main: anchored / missing ids
+  REVEAL_QUOTE: 'kk:reveal-quote', // main -> webpane: { requestId, quote }
+  REVEAL_RESULT: 'kk:reveal-result', // webpane -> main: { requestId, found }
+  CAPTURE_START: 'kk:capture-start', // main -> webpane: { requestId } show the crosshair
+  CAPTURE_CANCEL: 'kk:capture-cancel', // main -> webpane: remove the crosshair
+  CAPTURE_RESULT: 'kk:capture-result', // webpane -> main: { requestId, rect | null, text } rect in viewport CSS px
+  STUDY_ATTACH: 'kk:study-attach', // webpane -> main: StudyAttachment (the selection as a chip)
+  STUDY_CONTINUE: 'kk:study-continue' // webpane -> main: StudyMessage[] (an inline answer to continue)
 } as const

@@ -22,16 +22,20 @@ import {
   COPY_CONFIRM_MS,
   DEFAULT_HIGHLIGHT_COLOR,
   HIGHLIGHT_COLORS,
-  ICON_AI,
   ICON_CHECK,
   ICON_COPY,
   ICON_NOTE,
+  ICON_STUDY_ATTACH,
   ICON_TRASH,
   highlightPopoverStylesheet,
   normalizeHighlightColor,
   placePopover
 } from '../shared/highlightUi'
-import { IPC } from '../shared/ipc'
+import { IPC, WEBPANE_IPC } from '../shared/ipc'
+import { buildContinueMessages, textAttachment, type InlineMode } from '../shared/inlineAnswer'
+import { findQuote } from '../shared/quoteMatch'
+import { markdownSegments } from '../shared/safeMarkdown'
+import { MAX_REGION_TEXT, isTinyDrag, layoutToVisualRect, rectFromPoints, rectsIntersect, type PxRect } from '../shared/regionCapture'
 
 const HIGHLIGHT_CLASS = 'karakeep-hl'
 const OVERLAY_HOST_ID = 'karakeep-hl-overlay'
@@ -103,6 +107,17 @@ function getStylesheet(): string {
     }
     .${HIGHLIGHT_CLASS}[data-kh-flash="1"] {
       animation: kh-flash 0.55s ease-in-out 2;
+    }
+    /* Study's "jump to this passage" marker: temporary, never a highlight. */
+    @keyframes kk-ref-flash {
+      0%, 100% { background-color: rgba(255, 224, 102, 0.55); }
+      50%      { background-color: rgba(255, 224, 102, 0.95); }
+    }
+    mark[data-kk-flash] {
+      background-color: rgba(255, 224, 102, 0.75) !important;
+      color: inherit !important;
+      border-radius: 2px;
+      animation: kk-ref-flash 0.6s ease-in-out infinite;
     }
   `
 }
@@ -669,6 +684,8 @@ function karakeepInit(): void {
     el: HTMLElement
     anchor: () => DOMRect | null
     highlightId?: string
+    /** An expanded AI card: it ignores selection changes until dismissed. */
+    sticky?: boolean
   }
 
   let popover: OpenPopover | null = null
@@ -700,6 +717,7 @@ function karakeepInit(): void {
     if (popover.highlightId) {
       for (const el of marksFor(popover.highlightId)) delete el.dataset.khActive
     }
+    if (activeAiHandler) void ipcRenderer.invoke(IPC.AI_STREAM_ABORT, activeAiHandler.requestId)
     activeAiHandler = null
     popover.el.remove()
     popover = null
@@ -851,7 +869,7 @@ function karakeepInit(): void {
       // The textarea and the note reader own their own selection; everywhere
       // else the default is suppressed so clicking the popover doesn't drop
       // the page selection it was opened for.
-      if ((e.target as HTMLElement).closest('.kh-ta, .kh-note-view')) return
+      if ((e.target as HTMLElement).closest('.kh-ta, .kh-note-view, .kh-input, .kh-ans')) return
       e.preventDefault()
       e.stopPropagation()
     })
@@ -871,7 +889,42 @@ function karakeepInit(): void {
     if (rect) placePopover(el, rect)
   }
 
-  /** Popover for a fresh text selection: pick a colour, or add a note. */
+  const QUICK_ACTIONS: { mode: Exclude<InlineMode, 'custom'>; label: string }[] = [
+    { mode: 'micro-explain', label: 'Explain' },
+    { mode: 'micro-define', label: 'Define' },
+    { mode: 'micro-formula', label: 'Math' }
+  ]
+
+  /** Replaces the text of a button's label span (the one that is not the icon). */
+  function setPlainLabel(b: HTMLElement, label: string): void {
+    const span = b.querySelector('span')
+    if (span) span.textContent = label
+  }
+
+  /**
+   * Draws model text into `target` using text nodes and <b> elements only.
+   * This runs inside an untrusted page: never build HTML from model output.
+   */
+  function paintSegments(target: HTMLElement, md: string): void {
+    target.textContent = ''
+    for (const seg of markdownSegments(md)) {
+      if (seg.bold) {
+        const b = document.createElement('b')
+        b.textContent = seg.text
+        target.appendChild(b)
+      } else {
+        target.appendChild(document.createTextNode(seg.text))
+      }
+    }
+  }
+
+  /**
+   * Popover for a fresh text selection. Same toolbar as the PDF reader:
+   * swatches, Note, Copy | Explain, Define, Math, Ask..., Add to Study. An AI
+   * action grows the same card downward with the answer; from then on the card
+   * ignores selection changes and only Esc, a press outside, or an action that
+   * finishes with it closes it.
+   */
   function openSelectionPopover(range: Range): void {
     const el = newPopoverEl()
     const anchor = (): DOMRect | null => {
@@ -883,7 +936,41 @@ function karakeepInit(): void {
       }
     }
 
-    el.appendChild(
+    const selectionText = range.toString().trim()
+    // Computed on first use: the selection and its DOM don't change while the
+    // card is up, and most selections never reach an AI action.
+    let ctx: { surrounding: string; pageText: string } | null = null
+    const context = (): { surrounding: string; pageText: string } =>
+      (ctx ??= { surrounding: computeSurroundingContext(range), pageText: computePageTextAroundSelection(range) })
+
+    let view: { mode: InlineMode; prompt?: string } | null = null
+    let asking = false
+    let inputRow: HTMLElement | null = null
+    let answerWrap: HTMLElement | null = null
+    const modeBtns = new Map<string, HTMLElement>()
+
+    function expand(): void {
+      el.className = 'kh-pop kh-ai-mode'
+      if (popover?.el === el) popover.sticky = true
+    }
+
+    function finish(): void {
+      closePopover()
+      window.getSelection()?.removeAllRanges()
+    }
+
+    function syncToolbar(): void {
+      for (const [mode, btn] of modeBtns) {
+        const on = mode === 'custom' ? asking || view?.mode === 'custom' : view?.mode === mode
+        if (on) btn.dataset.on = '1'
+        else delete btn.dataset.on
+      }
+    }
+
+    const toolbar = document.createElement('div')
+    toolbar.className = 'kh-toolbar'
+
+    toolbar.appendChild(
       makeSwatchRow(null, (color) => {
         const clone = range.cloneRange()
         closePopover()
@@ -894,9 +981,9 @@ function karakeepInit(): void {
 
     const sep = document.createElement('div')
     sep.className = 'kh-sep'
-    el.appendChild(sep)
+    toolbar.appendChild(sep)
 
-    el.appendChild(
+    toolbar.appendChild(
       makeButton('Note', ICON_NOTE, () => {
         const clone = range.cloneRange()
         closePopover()
@@ -906,30 +993,21 @@ function karakeepInit(): void {
     )
 
     // Copy sits right next to Note, same as it does on an existing
-    // highlight's popover — copying is the other thing you'd want to do
-    // with a selection before committing to a colour or a note.
+    // highlight's popover.
     const copyBtn = makeButton(
       'Copy',
       ICON_COPY,
       () => {
         const text = range.toString()
-        // Nothing was actually copied — don't show a confirmation for a
-        // copy that never happened, and don't leave the button stuck on
-        // "Copied" forever since nothing will ever flip it back.
+        // Nothing was actually copied: no confirmation for a copy that never
+        // happened, and nothing to flip back later.
         if (!text) return
         void copyToClipboard(text).catch(() => undefined)
-        // Swap in a check + "Copied" for visible feedback. The selection
-        // and the popover are left alone: copying shouldn't cost the user
-        // their selection any more than it would anywhere else text gets
-        // copied, and closing here used to do exactly that.
         setBtnIcon(copyBtn, ICON_CHECK)
         setBtnLabel(copyBtn, 'Copied')
         ;(copyBtn as HTMLButtonElement).disabled = true
         setTimeout(() => {
-          // Guard against this popover having been replaced or closed in
-          // the meantime (e.g. the user dismissed it, or a new selection
-          // opened a different popover reusing this same closure) — this
-          // timer must only ever touch the button it belongs to.
+          // Only ever touch the button this closure belongs to.
           if (popover?.el !== el) return
           setBtnIcon(copyBtn, ICON_COPY)
           setBtnLabel(copyBtn, 'Copy')
@@ -940,19 +1018,238 @@ function karakeepInit(): void {
       false,
       ['Copy', 'Copied']
     )
-    el.appendChild(copyBtn)
+    toolbar.appendChild(copyBtn)
 
     const sep2 = document.createElement('div')
     sep2.className = 'kh-sep'
-    el.appendChild(sep2)
+    toolbar.appendChild(sep2)
 
-    el.appendChild(
-      makeButton('Ask AI', ICON_AI, () => {
-        const text = range.toString().trim()
-        const clone = range.cloneRange()
-        openAiPopover(clone, text)
-      })
+    for (const a of QUICK_ACTIONS) {
+      const b = makeButton(a.label, '', () => startAnswer(a.mode))
+      modeBtns.set(a.mode, b)
+      toolbar.appendChild(b)
+    }
+    const askBtn = makeButton('Ask…', '', () => {
+      asking = !asking
+      renderAsk()
+      syncToolbar()
+      if (popover?.el === el) reposition()
+    })
+    modeBtns.set('custom', askBtn)
+    toolbar.appendChild(askBtn)
+
+    toolbar.appendChild(
+      makeButton(
+        'Add to Study',
+        ICON_STUDY_ATTACH,
+        () => {
+          if (!selectionText) return
+          sendHost(WEBPANE_IPC.STUDY_ATTACH, textAttachment(selectionText, undefined, context().surrounding))
+          // From the expanded card, attaching finishes with it (like the PDF
+          // reader); from the bare toolbar the selection is left alone.
+          if (popover?.el === el && popover.sticky) finish()
+        },
+        false,
+        true
+      )
     )
+
+    el.appendChild(toolbar)
+
+    function renderAsk(): void {
+      inputRow?.remove()
+      inputRow = null
+      if (!asking) return
+      expand()
+      const row = document.createElement('form')
+      row.className = 'kh-ai-input'
+      const input = document.createElement('input')
+      input.className = 'kh-input'
+      input.type = 'text'
+      input.placeholder = 'Ask about this selection…'
+      input.setAttribute('aria-label', 'Ask about this selection')
+      const go = makeButton('Ask', '', () => submit())
+      go.className = 'kh-btn kh-primary'
+      ;(go as HTMLButtonElement).disabled = true
+      const submit = (): void => {
+        const q = input.value.trim()
+        if (q) startAnswer('custom', q)
+      }
+      row.addEventListener('submit', (e) => {
+        e.preventDefault()
+        submit()
+      })
+      input.addEventListener('input', () => {
+        ;(go as HTMLButtonElement).disabled = !input.value.trim()
+      })
+      // Typing here must not reach the page's own shortcuts. Escape still
+      // bubbles so it dismisses the card.
+      for (const type of ['keydown', 'keyup', 'keypress'] as const) {
+        input.addEventListener(type, (e) => {
+          if ((e as KeyboardEvent).key !== 'Escape') e.stopPropagation()
+        })
+      }
+      row.append(input, go)
+      toolbar.after(row)
+      inputRow = row
+      requestAnimationFrame(() => input.focus())
+    }
+
+    function startAnswer(mode: InlineMode, prompt?: string): void {
+      if (activeAiHandler) void ipcRenderer.invoke(IPC.AI_STREAM_ABORT, activeAiHandler.requestId)
+      activeAiHandler = null
+      view = { mode, prompt }
+      asking = false
+      renderAsk()
+      syncToolbar()
+      expand()
+      answerWrap?.remove()
+
+      let text = ''
+      let streaming = true
+      let error = ''
+      let saveState: 'idle' | 'saving' | 'failed' = 'idle'
+      let copied = false
+      const requestId = `ai-web-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+
+      const wrap = document.createElement('div')
+      wrap.className = 'kh-ans-wrap'
+      const ans = document.createElement('div')
+      ans.className = 'kh-ans kh-ans-plain'
+      ans.tabIndex = 0
+      const foot = document.createElement('div')
+      foot.className = 'kh-ans-foot'
+
+      const copyAns = makeButton('Copy', ICON_COPY, () => {
+        if (!text) return
+        void copyToClipboard(text).catch(() => undefined)
+        copied = true
+        paint()
+        setTimeout(() => {
+          if (popover?.el !== el) return
+          copied = false
+          paint()
+        }, COPY_CONFIRM_MS)
+      })
+      const saveAns = makeButton('Save as note', ICON_NOTE, () => {
+        saveState = 'saving'
+        paint()
+        const clone = range.cloneRange()
+        window.getSelection()?.removeAllRanges()
+        const hl = createHighlight(clone, lastUsedColor, false)
+        if (!hl) {
+          saveState = 'failed'
+          paint()
+          return
+        }
+        setHighlightNote(hl, text)
+        closePopover()
+      })
+      const spacer = document.createElement('div')
+      spacer.className = 'kh-spacer'
+      const stopBtn = makeButton('Stop', '', () => {
+        void ipcRenderer.invoke(IPC.AI_STREAM_ABORT, requestId)
+        if (activeAiHandler?.requestId === requestId) activeAiHandler = null
+        streaming = false
+        paint()
+      })
+      const goBtn = makeButton('Continue in Study', '', () => {
+        sendHost(
+          WEBPANE_IPC.STUDY_CONTINUE,
+          buildContinueMessages({
+            mode,
+            prompt,
+            answer: text,
+            attachment: textAttachment(selectionText, undefined, context().surrounding)
+          })
+        )
+        finish()
+      })
+      goBtn.classList.add('kh-go')
+      const arrow = document.createElement('span')
+      arrow.setAttribute('aria-hidden', 'true')
+      arrow.textContent = '→'
+      goBtn.appendChild(arrow)
+      foot.append(copyAns, saveAns, spacer, stopBtn, goBtn)
+      wrap.append(ans, foot)
+      el.appendChild(wrap)
+      answerWrap = wrap
+
+      function paint(): void {
+        ans.textContent = ''
+        if (error) {
+          const box = document.createElement('div')
+          box.className = 'kh-ans-error'
+          const strong = document.createElement('strong')
+          strong.textContent = 'Could not get an answer'
+          const detail = document.createElement('div')
+          detail.textContent = error
+          box.append(strong, detail)
+          ans.appendChild(box)
+        } else {
+          if (text) paintSegments(ans, text)
+          if (streaming && !text) {
+            const hint = document.createElement('span')
+            hint.className = 'kh-hint'
+            hint.textContent = 'Thinking…'
+            ans.appendChild(hint)
+          }
+          if (streaming && text) {
+            const caret = document.createElement('span')
+            caret.className = 'kh-caret'
+            ans.appendChild(caret)
+          }
+        }
+        const ready = !!text && !streaming && !error
+        ;(copyAns as HTMLButtonElement).disabled = !text
+        setBtnIcon(copyAns, copied ? ICON_CHECK : ICON_COPY)
+        setPlainLabel(copyAns, copied ? 'Copied' : 'Copy')
+        ;(saveAns as HTMLButtonElement).disabled = !ready || saveState === 'saving'
+        setPlainLabel(
+          saveAns,
+          saveState === 'saving' ? 'Saving…' : saveState === 'failed' ? 'Save failed, retry' : 'Save as note'
+        )
+        stopBtn.style.display = streaming ? '' : 'none'
+        ;(goBtn as HTMLButtonElement).disabled = !ready
+        if (popover?.el === el) reposition()
+      }
+
+      activeAiHandler = {
+        requestId,
+        onChunk: (delta) => {
+          text += delta
+          paint()
+        },
+        onDone: (fullText) => {
+          text = fullText
+          streaming = false
+          if (activeAiHandler?.requestId === requestId) activeAiHandler = null
+          paint()
+        },
+        onError: (message) => {
+          error = message
+          streaming = false
+          if (activeAiHandler?.requestId === requestId) activeAiHandler = null
+          paint()
+        }
+      }
+      paint()
+
+      const meta = getPageSourceMetadata()
+      void ipcRenderer.invoke(IPC.AI_STREAM_START, {
+        requestId,
+        mode,
+        ...(prompt ? { prompt } : {}),
+        selectionText,
+        surroundingContext: context().surrounding,
+        pageText: context().pageText,
+        docTitle: document.title,
+        sourceUrl: meta.sourceUrl,
+        siteName: meta.siteName,
+        author: meta.author,
+        docKind: 'article'
+      })
+    }
 
     mountPopover('selection', el, anchor)
   }
@@ -1052,192 +1349,6 @@ function karakeepInit(): void {
       metaContent('meta[property="article:author"]') ||
       metaContent('meta[name="twitter:creator"]')
     return { sourceUrl: location.href, siteName, author }
-  }
-
-  // Strips Markdown syntax down to clean plain text for the vanilla-DOM
-  // popover. This popover renders inside an untrusted third-party page (see
-  // the file header), so it must never use innerHTML on model output —
-  // unlike the two React surfaces (SelectionAiHUD, PageAiDrawer), which can
-  // safely build real elements via lib/miniMarkdown.tsx, this one sticks to
-  // `.textContent` and settles for readable plain text instead of rendered
-  // formatting.
-  function stripMarkdownToPlainText(md: string): string {
-    return md
-      .replace(/```[a-zA-Z0-9]*\n?/g, '')
-      .replace(/```/g, '')
-      .replace(/^#{1,6}\s+/gm, '')
-      .replace(/\*\*([^*]+)\*\*/g, '$1')
-      .replace(/__([^_]+)__/g, '$1')
-      .replace(/\*([^*]+)\*/g, '$1')
-      .replace(/(^|\s)_([^_]+)_(?=\s|$)/g, '$1$2')
-      .replace(/`([^`]+)`/g, '$1')
-      .replace(/^\s*[-*]\s+/gm, '• ')
-  }
-
-  /** In-situ AI Assistant HUD for a web selection: explain, dejargonify, define, math decode, save to note. */
-  function openAiPopover(range: Range, text: string): void {
-    const el = newPopoverEl()
-    el.style.cssText =
-      'display: flex; flex-direction: column; width: 350px; max-height: 380px; padding: 10px; gap: 8px;'
-
-    const anchor = (): DOMRect | null => {
-      try {
-        const r = range.getBoundingClientRect()
-        return r.width || r.height ? r : null
-      } catch {
-        return null
-      }
-    }
-
-    let activeRequestId = `ai-web-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
-    let accumulatedText = ''
-
-    // Header toolbar
-    const header = document.createElement('div')
-    header.className = 'kh-toolbar'
-    header.style.cssText =
-      'border-bottom: 1px solid rgba(255,255,255,0.12); padding-bottom: 6px; margin-bottom: 2px;'
-
-    // Same four modes, same order and labels, as the PDF/React HUD
-    // (SelectionAiHUD.tsx) — Explain / Dejargonify / Define is the exact
-    // spec wording, Math stays as a fourth mode for the paper-reading case.
-    const modes = [
-      { id: 'micro-explain', label: '💡 Explain' },
-      { id: 'micro-dejargon', label: '⚡ Dejargonify' },
-      { id: 'micro-define', label: '📖 Define' },
-      { id: 'micro-formula', label: '🧮 Math' }
-    ]
-
-    // Computed once per popover open rather than per mode switch: the
-    // selection and its surrounding DOM don't change while this popover is
-    // up, so there's no reason to re-walk the DOM on every button click.
-    const surroundingContext = computeSurroundingContext(range)
-    const pageTextAroundSelection = computePageTextAroundSelection(range)
-    const sourceMeta = getPageSourceMetadata()
-
-    const buttons: HTMLElement[] = []
-    function startQuery(mode: string): void {
-      if (activeRequestId) {
-        void ipcRenderer.invoke(IPC.AI_STREAM_ABORT, activeRequestId)
-      }
-      activeRequestId = `ai-web-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
-      accumulatedText = ''
-      body.textContent = 'Thinking with Gemini…'
-      saveBtn.style.display = 'none'
-
-      activeAiHandler = {
-        requestId: activeRequestId,
-        onChunk: (delta) => {
-          if (body.textContent === 'Thinking with Gemini…') body.textContent = ''
-          accumulatedText += delta
-          // .textContent only, never innerHTML — this popover lives inside
-          // the loaded page's own document, which is untrusted content.
-          body.textContent = stripMarkdownToPlainText(accumulatedText)
-          reposition()
-        },
-        onDone: (fullText) => {
-          accumulatedText = fullText
-          body.textContent = stripMarkdownToPlainText(fullText)
-          saveBtn.style.display = 'inline-flex'
-          reposition()
-        },
-        onError: (error) => {
-          body.textContent = `AI Error: ${error}`
-        }
-      }
-
-      void ipcRenderer.invoke(IPC.AI_STREAM_START, {
-        requestId: activeRequestId,
-        mode,
-        selectionText: text,
-        surroundingContext,
-        pageText: pageTextAroundSelection,
-        docTitle: document.title,
-        sourceUrl: sourceMeta.sourceUrl,
-        siteName: sourceMeta.siteName,
-        author: sourceMeta.author,
-        docKind: 'article'
-      })
-    }
-
-    modes.forEach(({ id, label }) => {
-      const b = document.createElement('button')
-      b.className = 'kh-btn'
-      b.style.cssText = 'font-size: 11px; padding: 3px 7px; border-radius: 5px;'
-      b.textContent = label
-      b.addEventListener('click', (e) => {
-        e.preventDefault()
-        e.stopPropagation()
-        buttons.forEach((btn) => (btn.style.background = 'transparent'))
-        b.style.background = 'rgba(16, 185, 129, 0.25)'
-        startQuery(id)
-      })
-      buttons.push(b)
-      header.appendChild(b)
-    })
-    buttons[0].style.background = 'rgba(16, 185, 129, 0.25)'
-
-    const spacer = document.createElement('div')
-    spacer.className = 'kh-spacer'
-    header.appendChild(spacer)
-
-    const closeBtn = makeButton(
-      'Close',
-      'M18 6L6 18M6 6l12 12',
-      () => {
-        if (activeRequestId) void ipcRenderer.invoke(IPC.AI_STREAM_ABORT, activeRequestId)
-        closePopover()
-      },
-      false,
-      true
-    )
-    header.appendChild(closeBtn)
-
-    el.appendChild(header)
-
-    // Selection preview snippet
-    const snippet = document.createElement('div')
-    snippet.style.cssText =
-      'font-size: 11px; font-style: italic; opacity: 0.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 6px; background: rgba(255,255,255,0.06); border-radius: 4px;'
-    snippet.textContent = `"${text.slice(0, 80)}${text.length > 80 ? '…' : ''}"`
-    el.appendChild(snippet)
-
-    // Response body
-    const body = document.createElement('div')
-    body.className = 'kh-note-view'
-    body.style.cssText =
-      'flex: 1; max-height: 190px; font-size: 12px; line-height: 1.5; color: #f2f2f7; white-space: pre-wrap;'
-    body.textContent = 'Thinking with Gemini…'
-    el.appendChild(body)
-
-    // Footer actions
-    const footer = document.createElement('div')
-    footer.className = 'kh-toolbar'
-    footer.style.cssText =
-      'border-top: 1px solid rgba(255,255,255,0.12); padding-top: 6px; margin-top: 2px;'
-
-    const saveBtn = makeButton('Save as Note', ICON_NOTE, () => {
-      const clone = range.cloneRange()
-      closePopover()
-      window.getSelection()?.removeAllRanges()
-      const hl = createHighlight(clone, lastUsedColor, false)
-      if (hl && accumulatedText) setHighlightNote(hl, accumulatedText)
-    })
-    saveBtn.className = 'kh-btn kh-primary'
-    saveBtn.style.cssText = 'font-size: 11px; padding: 3px 8px; font-weight: 500;'
-    saveBtn.style.display = 'none'
-    footer.appendChild(saveBtn)
-
-    const copyBtn = makeButton('Copy', ICON_COPY, () => {
-      if (accumulatedText) void navigator.clipboard?.writeText(accumulatedText)
-    })
-    copyBtn.style.cssText = 'font-size: 11px; padding: 3px 8px;'
-    footer.appendChild(copyBtn)
-
-    el.appendChild(footer)
-
-    mountPopover('selection', el, anchor)
-    startQuery('micro-explain')
   }
 
   /** Popover for an existing highlight: recolour, note, copy, delete. */
@@ -1578,6 +1689,113 @@ function karakeepInit(): void {
     }
   }
 
+  // ───────────────────────── Study references ─────────────────────────
+
+  const REF_FLASH_MS = 1500
+  let refFlashTimer: ReturnType<typeof setTimeout> | null = null
+
+  function clearRefFlash(): void {
+    if (refFlashTimer) clearTimeout(refFlashTimer)
+    refFlashTimer = null
+    for (const m of Array.from(document.querySelectorAll<HTMLElement>('mark[data-kk-flash]'))) {
+      const parent = m.parentNode
+      if (!parent) continue
+      while (m.firstChild) parent.insertBefore(m.firstChild, m)
+      parent.removeChild(m)
+      parent.normalize()
+    }
+  }
+
+  /**
+   * Finds `quote` in the rendered text and returns a Range over it. The page
+   * text is the same text nodes the highlight anchoring walks, joined with a
+   * newline wherever the block changes so "end of one paragraph / start of
+   * the next" reads like whitespace to findQuote rather than gluing words
+   * together. Falls back to the highlight matcher for anything findQuote's
+   * stricter normalisation misses.
+   */
+  function rangeForQuote(quote: string): Range | null {
+    const nodes = collectTextNodes()
+    if (!nodes.length) return null
+    const blockOf = new Map<Element, Element>()
+    const blockFor = (n: Text): Element => {
+      const parent = n.parentElement as Element
+      let b = blockOf.get(parent)
+      if (!b) {
+        b = nearestBlockContainer(n)
+        blockOf.set(parent, b)
+      }
+      return b
+    }
+    let full = ''
+    const entries: { node: Text; start: number }[] = []
+    let prevBlock: Element | null = null
+    for (const n of nodes) {
+      const block = blockFor(n)
+      if (prevBlock && block !== prevBlock) full += '\n'
+      prevBlock = block
+      entries.push({ node: n, start: full.length })
+      full += n.data
+    }
+    const hit = findQuote(full, quote)
+    if (!hit) return locateText(quote)
+    let startNode: Text | null = null
+    let startOffset = 0
+    let endNode: Text | null = null
+    let endOffset = 0
+    for (const e of entries) {
+      const end = e.start + e.node.data.length
+      if (!startNode && end > hit.start) {
+        startNode = e.node
+        startOffset = Math.max(0, hit.start - e.start)
+      }
+      if (e.start < hit.end) {
+        endNode = e.node
+        endOffset = Math.min(e.node.data.length, hit.end - e.start)
+      }
+    }
+    if (!startNode || !endNode) return null
+    try {
+      const range = document.createRange()
+      range.setStart(startNode, startOffset)
+      range.setEnd(endNode, endOffset)
+      return range.collapsed ? null : range
+    } catch {
+      return null
+    }
+  }
+
+  function revealQuote(quote: string): boolean {
+    clearRefFlash()
+    const range = rangeForQuote(quote)
+    if (!range) return false
+    const marks: HTMLElement[] = []
+    for (const node of textNodesIn(range)) {
+      if (!node.isConnected) continue
+      const nr = document.createRange()
+      try {
+        nr.selectNodeContents(node)
+        if (node === range.startContainer) nr.setStart(node, Math.min(range.startOffset, node.data.length))
+        if (node === range.endContainer) nr.setEnd(node, Math.min(range.endOffset, node.data.length))
+      } catch {
+        continue
+      }
+      if (nr.collapsed || !nr.toString().trim()) continue
+      try {
+        const mark = document.createElement('mark')
+        mark.setAttribute('data-kk-flash', '1')
+        nr.surroundContents(mark)
+        marks.push(mark)
+      } catch {
+        // A fragment that straddles a non-text node is skipped; the rest still flashes.
+      }
+    }
+    if (!marks.length) return false
+    marks[0].scrollIntoView({ block: 'center', behavior: 'smooth' })
+    refFlashTimer = setTimeout(clearRefFlash, REF_FLASH_MS)
+    return true
+  }
+
   // ───────────────────────── events ─────────────────────────
 
   let selectionTimer: ReturnType<typeof setTimeout> | null = null
@@ -1597,6 +1815,9 @@ function karakeepInit(): void {
   }
 
   function onSelectionSettled(): void {
+    // An expanded AI card keeps its place and its stream whatever the page
+    // selection does; only a dismissal closes it.
+    if (popover?.sticky) return
     const range = currentSelectionRange()
     if (range) {
       openSelectionPopover(range)
@@ -1664,11 +1885,159 @@ function karakeepInit(): void {
   window.addEventListener('scroll', queueReposition, true)
   window.addEventListener('resize', queueReposition)
 
+
+  // ───────────────────────── region capture ─────────────────────────
+  // A crosshair the user drags over a figure or equation. The native view
+  // covers the React UI, so this has to live in the page. It is built from
+  // elements and inline styles only (no page or model text ever reaches it),
+  // inside the same closed shadow root as the toolbar. Esc, a drag under 8px
+  // or a navigation cancels; the main process takes the picture, so the layer
+  // is removed first and the rectangle is reported in viewport CSS px.
+
+  let captureLayer: { el: HTMLElement; stop: () => void; requestId: string } | null = null
+
+  function endCapture(): void {
+    if (!captureLayer) return
+    const layer = captureLayer
+    captureLayer = null
+    layer.stop()
+  }
+
+  /** Text of the nodes drawn inside `area`, in document order, bounded. */
+  function textWithin(area: PxRect): string {
+    const root = document.body
+    if (!root) return ''
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+    const range = document.createRange()
+    const parts: string[] = []
+    let length = 0
+    let visited = 0
+    let n: Node | null
+    while ((n = walker.nextNode()) && length < MAX_REGION_TEXT && visited++ < 40000) {
+      const value = n.textContent
+      const parent = n.parentElement
+      if (!value || !value.trim() || !parent) continue
+      if (SKIP_TAGS.has(parent.tagName.toUpperCase()) || parent.closest(`#${OVERLAY_HOST_ID}`)) continue
+      range.selectNodeContents(n)
+      const bounds = range.getBoundingClientRect()
+      if (!rectsIntersect(area, { x: bounds.left, y: bounds.top, width: bounds.width, height: bounds.height })) continue
+      const rects = Array.from(range.getClientRects())
+      if (!rects.some((r) => rectsIntersect(area, { x: r.left, y: r.top, width: r.width, height: r.height }))) continue
+      parts.push(value.trim())
+      length += value.length + 1
+    }
+    return parts.join(' ').replace(/\s+/g, ' ').trim().slice(0, MAX_REGION_TEXT)
+  }
+
+  function startCapture(requestId: string): void {
+    endCapture()
+    closePopover()
+    const { root } = ensureOverlay()
+    const layer = document.createElement('div')
+    layer.style.cssText =
+      'position: fixed; inset: 0; cursor: crosshair; pointer-events: auto; background: rgba(0,0,0,0.12); touch-action: none; user-select: none;'
+    const box = document.createElement('div')
+    box.style.cssText =
+      'position: fixed; display: none; box-sizing: border-box; border: 1.5px solid #10b981; background: rgba(16,185,129,0.14); border-radius: 2px; pointer-events: none;'
+    layer.appendChild(box)
+    root.appendChild(layer)
+
+    let start: { x: number; y: number } | null = null
+    let rect: PxRect | null = null
+
+    const draw = (): void => {
+      if (!rect) return
+      box.style.display = 'block'
+      box.style.left = rect.x + 'px'
+      box.style.top = rect.y + 'px'
+      box.style.width = rect.width + 'px'
+      box.style.height = rect.height + 'px'
+    }
+    const report = (r: PxRect | null): void => {
+      const text = r ? textWithin(r) : ''
+      // capturePage works in the visible area; under pinch zoom that is the
+      // visual viewport, so the layout-space drag is mapped into it.
+      const vv = window.visualViewport
+      const rect =
+        r && vv
+          ? layoutToVisualRect(r, {
+              offsetLeft: vv.offsetLeft,
+              offsetTop: vv.offsetTop,
+              width: vv.width,
+              height: vv.height,
+              scale: vv.scale
+            })
+          : r
+      sendHost(WEBPANE_IPC.CAPTURE_RESULT, { requestId, rect, text })
+    }
+    const finish = (r: PxRect | null): void => {
+      endCapture()
+      if (!r) return report(null)
+      // Two frames: the layer is gone from what the compositor shows before
+      // the main process photographs the view.
+      requestAnimationFrame(() => requestAnimationFrame(() => report(r)))
+    }
+    const onDown = (e: PointerEvent): void => {
+      if (e.button !== 0) return
+      e.preventDefault()
+      layer.setPointerCapture?.(e.pointerId)
+      start = { x: e.clientX, y: e.clientY }
+      rect = rectFromPoints(start.x, start.y, e.clientX, e.clientY)
+      draw()
+    }
+    const onMove = (e: PointerEvent): void => {
+      if (!start) return
+      rect = rectFromPoints(start.x, start.y, e.clientX, e.clientY)
+      draw()
+    }
+    const onUp = (e: PointerEvent): void => {
+      if (!start) return
+      rect = rectFromPoints(start.x, start.y, e.clientX, e.clientY)
+      const r = rect
+      start = null
+      finish(isTinyDrag(r) ? null : r)
+    }
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      finish(null)
+    }
+    layer.addEventListener('pointerdown', onDown)
+    layer.addEventListener('pointermove', onMove)
+    layer.addEventListener('pointerup', onUp)
+    layer.addEventListener('pointercancel', () => finish(null))
+    layer.addEventListener('contextmenu', (e) => e.preventDefault())
+    window.addEventListener('keydown', onKey, true)
+    captureLayer = {
+      el: layer,
+      requestId,
+      stop: () => {
+        window.removeEventListener('keydown', onKey, true)
+        layer.remove()
+      }
+    }
+  }
+
+  ipcRenderer.on(WEBPANE_IPC.CAPTURE_START, (_e, req: { requestId?: string }) => {
+    if (typeof req?.requestId === 'string') startCapture(req.requestId)
+  })
+  ipcRenderer.on(WEBPANE_IPC.CAPTURE_CANCEL, () => endCapture())
+
   ipcRenderer.on('kk:apply', (_e, highlights: StoredHighlight[]) => {
     ensureStyles()
     syncHighlights(highlights)
   })
   ipcRenderer.on('kk:focus', (_e, id: string) => focusHighlight(id))
+  ipcRenderer.on(WEBPANE_IPC.REVEAL_QUOTE, (_e, req: { requestId: string; quote: string }) => {
+    let found = false
+    try {
+      found = typeof req?.quote === 'string' && revealQuote(req.quote)
+    } catch {
+      found = false
+    }
+    sendHost(WEBPANE_IPC.REVEAL_RESULT, { requestId: req?.requestId, found })
+  })
   ipcRenderer.on('kk:id-assigned', (_e, p: { clientId: string; serverId: string }) => {
     adoptServerId(p.clientId, p.serverId)
   })
