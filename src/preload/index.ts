@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/ipc'
+import type { StudyThread, SyncState } from '../shared/study'
 import type {
   AiStreamChunk,
   AiStreamDone,
@@ -131,6 +132,18 @@ const api = {
       }
     }
   })(),
+  study: {
+    open: (bookmarkId: string): Promise<StudyThread | null> => ipcRenderer.invoke(IPC.STUDY_OPEN, bookmarkId),
+    save: (thread: StudyThread, docTitle: string): Promise<void> =>
+      ipcRenderer.invoke(IPC.STUDY_SAVE, thread, docTitle),
+    flush: (bookmarkId: string): Promise<void> => ipcRenderer.invoke(IPC.STUDY_FLUSH, bookmarkId),
+    clear: (bookmarkId: string): Promise<void> => ipcRenderer.invoke(IPC.STUDY_CLEAR, bookmarkId),
+    onSyncState: (cb: (e: { bookmarkId: string; state: SyncState }) => void): (() => void) => {
+      const listener = (_e: unknown, payload: { bookmarkId: string; state: SyncState }): void => cb(payload)
+      ipcRenderer.on(IPC.STUDY_SYNC_STATE_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.STUDY_SYNC_STATE_EVENT, listener)
+    }
+  },
   window: {
     minimize: (): void => ipcRenderer.send(IPC.WINDOW_MINIMIZE),
     maximize: (): void => ipcRenderer.send(IPC.WINDOW_MAXIMIZE),

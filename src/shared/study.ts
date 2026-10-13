@@ -68,3 +68,6 @@ export function stripForPersistence(thread: StudyThread): StudyThread {
     })
   }
 }
+
+/** Where the Karakeep backup of a chat stands. */
+export type SyncState = 'idle' | 'pending' | 'saved' | 'failed' | 'newer-version'

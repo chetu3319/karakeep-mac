@@ -19,6 +19,7 @@ import TagEditor from './TagEditor'
 import WebPane from './WebPane'
 import PageAiDrawer from './PageAiDrawer'
 import SidePanel from './SidePanel'
+import { isStudyAsset } from '../../../shared/study'
 import { TRAFFIC_LIGHT_INSET } from './TitlebarRow'
 
 type Tab = 'preview' | 'pdf' | 'web'
@@ -134,7 +135,7 @@ export default function DetailPane({
   // only carry it in the assets array, so fall back to that.
   const pdfAssetId = useMemo(() => {
     if (!bookmark || bookmark.content?.type !== 'asset' || bookmark.content?.assetType !== 'pdf') return null
-    return bookmark.content.assetId || bookmark.assets.find((a) => a.assetType === 'bookmarkAsset')?.id || null
+    return bookmark.content.assetId || bookmark.assets.find((a) => a.assetType === 'bookmarkAsset' && !isStudyAsset(a))?.id || null
   }, [bookmark])
   const pdfFileName = bookmark?.content?.fileName || 'document.pdf'
 

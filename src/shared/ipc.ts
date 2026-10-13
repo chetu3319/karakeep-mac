@@ -82,6 +82,11 @@ export const IPC = {
   AI_STREAM_CHUNK_EVENT: 'ai:stream-chunk', // main -> renderer push
   AI_STREAM_DONE_EVENT: 'ai:stream-done',   // main -> renderer push
   AI_STREAM_ERROR_EVENT: 'ai:stream-error', // main -> renderer push
+  STUDY_OPEN: 'study:open',
+  STUDY_SAVE: 'study:save',
+  STUDY_FLUSH: 'study:flush',
+  STUDY_CLEAR: 'study:clear',
+  STUDY_SYNC_STATE_EVENT: 'study:sync-state', // main -> renderer push
   AI_TEST_CONNECTION: 'ai:test-connection',
   AI_SET_CONFIG: 'ai:set-config',
 
