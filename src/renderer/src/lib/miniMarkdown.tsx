@@ -206,6 +206,9 @@ function renderEmphasis(text: string): React.ReactNode[] {
  */
 const REF_SENTINEL = /\u2063R(\d+)\u2063/
 
+/** Code and display math are shown verbatim, so a reference landing inside one is dropped rather than shown as "R0". */
+const stripRefs = (text: string): string => text.replace(new RegExp(REF_SENTINEL.source, 'g'), '')
+
 // renderInline is called from many block renderers, all synchronously inside
 // one renderMarkdown call, so the caller's renderRef is held here for the
 // duration of that call rather than threaded through every signature.
@@ -428,7 +431,7 @@ function renderBlocks(source: string): React.ReactNode {
           key={nextKey()}
           className="mb-2 overflow-x-auto rounded-md bg-neutral-900 p-2.5 text-[11px] leading-relaxed text-neutral-100 last:mb-0 dark:bg-black/60"
         >
-          <code>{codeLines.join('\n')}</code>
+          <code>{stripRefs(codeLines.join('\n'))}</code>
         </pre>
       )
       continue
@@ -460,7 +463,7 @@ function renderBlocks(source: string): React.ReactNode {
           i++
         }
       }
-      const expr = exprLines.join('\n').trim()
+      const expr = stripRefs(exprLines.join('\n')).trim()
       blocks.push(<Katex key={nextKey()} expr={expr} displayMode={true} />)
       continue
     }

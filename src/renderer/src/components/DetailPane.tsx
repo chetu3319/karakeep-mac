@@ -157,7 +157,7 @@ export default function DetailPane({
 
   // A PDF's text only exists inside the PDF pane, which is mounted for the
   // PDF tab's bookmark whichever tab is showing.
-  const [studyPages, setStudyPages] = useState<{ bookmarkId: string; pages: DocPage[] } | null>(null)
+  const [studyPages, setStudyPages] = useState<{ bookmarkId: string; assetId: string; pages: DocPage[] } | null>(null)
   const [studyProgress, setStudyProgress] = useState<{ done: number; total: number } | null>(null)
   useEffect(() => {
     if (!studyOpen || !bookmark || !pdfAssetId || !pdfReader) return
@@ -169,11 +169,11 @@ export default function DetailPane({
         if (!cancelled) setStudyProgress({ done, total })
       })
       .then((pages) => {
-        if (!cancelled) setStudyPages({ bookmarkId: id, pages })
+        if (!cancelled) setStudyPages({ bookmarkId: id, assetId: pdfAssetId, pages })
       })
       // An unreadable PDF still opens Study, answering from the title.
       .catch(() => {
-        if (!cancelled) setStudyPages({ bookmarkId: id, pages: [] })
+        if (!cancelled) setStudyPages({ bookmarkId: id, assetId: pdfAssetId, pages: [] })
       })
     return () => {
       cancelled = true
@@ -181,7 +181,7 @@ export default function DetailPane({
   }, [studyOpen, bookmark?.id, pdfAssetId, pdfReader]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const studyIsPdf = !!pdfAssetId
-  const studyPageList = studyPages && studyPages.bookmarkId === bookmark?.id ? studyPages.pages : null
+  const studyPageList = studyPages && studyPages.bookmarkId === bookmark?.id && studyPages.assetId === pdfAssetId ? studyPages.pages : null
   const studyText = studyIsPdf ? null : (bookmarkText.data?.text ?? '')
   const studyDocReady = studyIsPdf ? studyPageList !== null : !bookmarkText.isPending
   const studyHasText = studyIsPdf

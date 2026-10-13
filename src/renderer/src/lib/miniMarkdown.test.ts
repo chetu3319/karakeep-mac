@@ -27,3 +27,15 @@ describe('renderMarkdown renderRef', () => {
     expect(html).toContain('a b')
   })
 })
+
+describe('renderMarkdown refs in verbatim blocks', () => {
+  it('never shows R0 inside fenced code or display math', () => {
+    const fenced = renderToStaticMarkup(
+      renderMarkdown(`\`\`\`\nx = 1 ${S}R0${S}\n\`\`\``, { renderRef: () => 'TAG' }) as never
+    )
+    expect(fenced).toContain('x = 1 ')
+    expect(fenced).not.toMatch(/R0|TAG/)
+    const math = renderToStaticMarkup(renderMarkdown(`$$a+b ${S}R0${S}$$`, { renderRef: () => 'TAG' }) as never)
+    expect(math).not.toMatch(/R0|TAG/)
+  })
+})

@@ -159,10 +159,11 @@ export function useStudyThread(
           next = { ...next, messages: [...next.messages, ...seeds] }
           persist(next)
         }
-        // A question sent while the chat was loading cannot happen (the
-        // composer waits for `ready`), but an in-flight stream for this
-        // bookmark must not be overwritten by an older read.
-        if (!inflight.current || inflight.current.bookmarkId !== bookmarkId) setThread(next)
+        // A request still on the wire for this bookmark (the user went away
+        // and came back) is newer than what is on disk: its base already
+        // holds the question that is being answered.
+        const live = inflight.current
+        setThread(live && live.bookmarkId === bookmarkId ? live.base : next)
         setReady(true)
       })
     return () => {
@@ -212,10 +213,15 @@ export function useStudyThread(
         ...(pending.length ? { attachments: pending } : {}),
         createdAt: now
       }
+      // A question that never got an answer (it failed or was stopped) is
+      // replaced by the new one: two user turns in a row are not a valid
+      // conversation for the model. Retry is how to ask the same thing again.
+      let earlier = threadRef.current?.messages ?? []
+      if (earlier[earlier.length - 1]?.role === 'user') earlier = earlier.slice(0, -1)
       const base: StudyThread = {
         ...(threadRef.current ?? emptyThread(id)),
         updatedAt: now,
-        messages: [...(threadRef.current?.messages ?? []), userTurn]
+        messages: [...earlier, userTurn]
       }
       setThread(base)
       setPending([])
@@ -224,16 +230,28 @@ export function useStudyThread(
     [dispatch, pending, streaming]
   )
 
-  // Too large for the model: ask once more with half the document.
+  // A request that failed ends here. Too large for the model is the one
+  // failure that is not final: ask once more with half the document. Any
+  // other failure (or that second one) releases the request, so it can no
+  // longer stand in for the saved chat.
+  const willResend = (): boolean => {
+    const sent = inflight.current
+    return !!sent && !sent.retried && !!sent.ctx.rebuild && errorCode === 'too-large'
+  }
   useEffect(() => {
     const sent = inflight.current
-    if (errorCode !== 'too-large' || !sent || sent.retried || !sent.ctx.rebuild) return
-    dispatch({
-      ...sent,
-      retried: true,
-      ctx: { ...sent.ctx, documentText: sent.ctx.rebuild(STUDY_BUDGET_CHARS / 2) }
-    })
-  }, [errorCode, dispatch])
+    if (!error || streaming || !sent) return
+    if (willResend()) {
+      dispatch({
+        ...sent,
+        retried: true,
+        ctx: { ...sent.ctx, documentText: sent.ctx.rebuild!(STUDY_BUDGET_CHARS / 2) }
+      })
+      return
+    }
+    inflight.current = null
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [error, errorCode, streaming, dispatch])
 
   const retry = useCallback(
     (ctx: StudySendContext): void => {
@@ -305,8 +323,9 @@ export function useStudyThread(
     streaming: streaming && mine,
     busy: streaming,
     streamText: mine && streaming ? text : '',
-    error: mine && !streaming ? error : null,
-    canRetry: !!last && last.role === 'user' && !(streaming && mine),
+    // Hidden while the automatic smaller resend is about to start.
+    error: mine && !streaming && !willResend() ? error : null,
+    canRetry: !!last && last.role === 'user' && !(streaming && mine) && !willResend(),
     retry,
     stop,
     retrySync

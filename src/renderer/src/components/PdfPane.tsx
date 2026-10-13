@@ -40,7 +40,7 @@ import {
 } from '../../../shared/highlightUi'
 import type { AiMode, Highlight } from '../../../shared/types'
 import type { StudyAttachment, StudyMessage } from '../../../shared/study'
-import type { DocPage } from '../lib/studyContext'
+import { createPdfDocumentReader, type PdfDocumentReader } from '../lib/pdfDocumentReader'
 import { useCreateHighlight, useDeleteHighlight, useUpdateHighlight } from '../lib/queries'
 import { useIsDark, usePref } from '../lib/prefs'
 import SelectionAiHUD from './SelectionAiHUD'
@@ -116,17 +116,7 @@ interface PlacedHighlight {
   quality: AnchorQuality
 }
 
-/** What Study needs from an open PDF: every page's text, and where the reader is. */
-export interface PdfDocumentReader {
-  /**
-   * Text of every page, 1-based. Extracted once per document and then served
-   * from memory; `onProgress` is called as pages finish. Rejects if the
-   * document cannot be read.
-   */
-  getDocumentPages(onProgress: (done: number, total: number) => void): Promise<DocPage[]>
-  /** 1-based page the reader is on. */
-  getCurrentPage(): number
-}
+export type { PdfDocumentReader }
 
 export interface PdfPaneProps {
   assetId: string
@@ -615,47 +605,22 @@ function PdfSurface({
   pageTextRef.current = pageText
   const currentPageRef = useRef(scrollState.currentPage)
   currentPageRef.current = scrollState.currentPage
-  const docPagesRef = useRef<{ doc: PdfDocumentObject; promise: Promise<DocPage[]>; listeners: Set<(d: number, t: number) => void> } | null>(null)
-
   const docRef = useRef(doc)
   docRef.current = doc
+
   useEffect(() => {
     if (!onDocumentReader) return
-    onDocumentReader({
-      getDocumentPages: (onProgress) => {
-        const current = docRef.current
-        if (!current) return Promise.reject(new Error('The document is not open yet'))
-        const memo = docPagesRef.current
-        if (memo && memo.doc === current) {
-          memo.listeners.add(onProgress)
-          return memo.promise
-        }
-        const listeners = new Set([onProgress])
-        const total = current.pageCount
-        const promise = (async (): Promise<DocPage[]> => {
-          // pageText is empty until the text index exists.
-          while (!indexRef.current) {
-            if (docRef.current !== current) throw new Error('The document changed')
-            await new Promise((r) => setTimeout(r, 50))
-          }
-          const pages: DocPage[] = []
-          for (let i = 0; i < total; i++) {
-            if (docRef.current !== current) throw new Error('The document changed')
-            pages.push({ page: i + 1, text: (await pageTextRef.current(i)).trim() })
-            listeners.forEach((l) => l(i + 1, total))
-          }
-          return pages
-        })()
-        // A failed read must not stick: the next ask tries again.
-        promise.catch(() => {
-          if (docPagesRef.current?.promise === promise) docPagesRef.current = null
-        })
-        docPagesRef.current = { doc: current, promise, listeners }
-        return promise
-      },
+    const reader = createPdfDocumentReader({
+      getDocument: () => docRef.current,
+      hasIndex: () => !!indexRef.current,
+      getPageText: (page) => pageTextRef.current(page),
       getCurrentPage: () => currentPageRef.current
     })
-    return () => onDocumentReader(null)
+    onDocumentReader(reader)
+    return () => {
+      reader.dispose()
+      onDocumentReader(null)
+    }
   }, [onDocumentReader])
 
   const askAiFromSelection = useCallback(
