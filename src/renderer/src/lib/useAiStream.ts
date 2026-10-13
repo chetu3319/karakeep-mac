@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { StudyMessage } from '../../../shared/study'
 import type { AiChatMessage, AiMode, AiStreamChunk, AiStreamDone, AiStreamError, AiStreamRequest } from '../../../shared/types'
 
 export interface StartStreamOptions {
@@ -13,6 +14,11 @@ export interface StartStreamOptions {
   siteName?: string
   author?: string
   docKind?: 'pdf' | 'article' | 'note'
+  // Study mode
+  documentText?: string
+  studyMessages?: StudyMessage[]
+  currentPage?: number
+  paged?: boolean
 }
 
 export function useAiStream(options?: {

@@ -85,7 +85,10 @@ export interface BookmarkTextResult {
 
 export function useBookmarkText(
   bookmark: Bookmark | null | undefined,
-  webTabActive: boolean
+  webTabActive: boolean,
+  // Study asks for the whole document (STUDY_BUDGET_CHARS); everything else
+  // keeps the small default.
+  maxChars: number = MAX_CHARS
 ): UseQueryResult<BookmarkTextResult, Error> {
   const content = bookmark?.content
 
@@ -93,7 +96,7 @@ export function useBookmarkText(
     // webTabActive is part of the key: switching from Web to Preview (or
     // back) should re-resolve which source wins, not keep serving whatever
     // was cached for the other tab.
-    queryKey: ['bookmarkText', bookmark?.id, webTabActive, content?.htmlContent, content?.contentAssetId, content?.text, content?.description],
+    queryKey: ['bookmarkText', bookmark?.id, webTabActive, content?.htmlContent, content?.contentAssetId, content?.text, content?.description, maxChars],
     queryFn: async (): Promise<BookmarkTextResult> => {
       if (webTabActive) {
         const live = await window.kk.webpane.getPageText()
@@ -101,22 +104,22 @@ export function useBookmarkText(
         // page worth grounding a chat in — fall through to the stored
         // content rather than "chatting" with an empty page.
         if (live && live.trim().length > 200) {
-          return { text: truncateForContext(live.trim()), source: 'live-page' }
+          return { text: truncateForContext(live.trim(), maxChars), source: 'live-page' }
         }
       }
 
       if (content?.htmlContent) {
         const stripped = stripHtml(content.htmlContent)
-        if (stripped) return { text: truncateForContext(stripped), source: 'html-content' }
+        if (stripped) return { text: truncateForContext(stripped, maxChars), source: 'html-content' }
       }
 
       if (content?.contentAssetId) {
         const assetText = await fetchAssetText(content.contentAssetId)
-        if (assetText) return { text: truncateForContext(assetText), source: 'reader-asset' }
+        if (assetText) return { text: truncateForContext(assetText, maxChars), source: 'reader-asset' }
       }
 
       if (content?.text) {
-        return { text: truncateForContext(content.text), source: 'text' }
+        return { text: truncateForContext(content.text, maxChars), source: 'text' }
       }
 
       if (content?.description) {

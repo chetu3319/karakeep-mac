@@ -39,6 +39,8 @@ import {
   placePopover
 } from '../../../shared/highlightUi'
 import type { AiMode, Highlight } from '../../../shared/types'
+import type { StudyAttachment, StudyMessage } from '../../../shared/study'
+import type { DocPage } from '../lib/studyContext'
 import { useCreateHighlight, useDeleteHighlight, useUpdateHighlight } from '../lib/queries'
 import { useIsDark, usePref } from '../lib/prefs'
 import SelectionAiHUD from './SelectionAiHUD'
@@ -114,6 +116,18 @@ interface PlacedHighlight {
   quality: AnchorQuality
 }
 
+/** What Study needs from an open PDF: every page's text, and where the reader is. */
+export interface PdfDocumentReader {
+  /**
+   * Text of every page, 1-based. Extracted once per document and then served
+   * from memory; `onProgress` is called as pages finish. Rejects if the
+   * document cannot be read.
+   */
+  getDocumentPages(onProgress: (done: number, total: number) => void): Promise<DocPage[]>
+  /** 1-based page the reader is on. */
+  getCurrentPage(): number
+}
+
 export interface PdfPaneProps {
   assetId: string
   fileName: string
@@ -129,16 +143,15 @@ export interface PdfPaneProps {
   sourceUrl?: string
   author?: string
   /**
-   * The Co-Pilot is one control in the detail pane's utility bar, and the
-   * drawer itself is rendered *there* for every kind of bookmark — docked
-   * to the window's edge rather than inside this pane, so it doesn't start
-   * below the PDF's own toolbar while the web version starts above it.
-   * This pane's only job is to keep the chat grounded in the page that is
-   * actually on screen: while the drawer is open it reports the current
-   * page's text and label upward.
+   * Study reads the whole document through this: the pane hands up a reader
+   * once it is mounted and takes it back (null) when it goes away. The
+   * reader serves whichever document the pane currently has open.
    */
-  aiDrawerOpen?: boolean
-  onAiContextChange?: (context: { scopeLabel: string; pageText: string }) => void
+  onDocumentReader?: (reader: PdfDocumentReader | null) => void
+  /** Attach a selection or region to the Study panel's next question. Wired up by the selection tools. */
+  onStudyAttach?: (attachment: StudyAttachment) => void
+  /** Open Study with an exchange already in it ("Continue in Study"). */
+  onStudyContinue?: (messages: StudyMessage[]) => void
   /** Find bar state is owned by the detail pane, which routes the menu's ⌘F/⌘G to it. */
   findOpen: boolean
   findFocusSignal: number
@@ -260,8 +273,7 @@ function PdfSurface({
   onAnchorStatus,
   sourceUrl,
   author,
-  aiDrawerOpen = false,
-  onAiContextChange,
+  onDocumentReader,
   findOpen,
   findFocusSignal,
   findStep,
@@ -592,34 +604,59 @@ function PdfSurface({
   const [nightPref, setNightPref] = usePref<NightPref>('pdfNight', 'auto')
   const isDark = useIsDark()
   const night = nightPref === 'auto' ? isDark : nightPref === 'on'
-  const [currentPageText, setCurrentPageText] = useState('')
 
-  // The drawer used to fetch the page text once, at the moment it was
-  // opened, and never again — so scrolling from page 1 to page 7 left the
-  // header still claiming "page 7" (scopeLabel reads scrollState.currentPage
-  // live) while the model underneath was still grounded in page 1's text.
-  // Debounced on a timer rather than firing per scroll-page-changed event:
-  // a fast scroll through several pages should only cost one re-fetch, at
-  // wherever the reader actually lands.
-  useEffect(() => {
-    if (!aiDrawerOpen || !doc || !index) return
-    const page = Math.max(0, scrollState.currentPage - 1)
-    const timer = setTimeout(() => {
-      void pageText(page).then((t) => setCurrentPageText(t))
-    }, 400)
-    return () => clearTimeout(timer)
-  }, [aiDrawerOpen, doc, index, scrollState.currentPage, pageText])
+  // ── Whole-document text for Study ───────────────────────────────────────
+  // Extraction waits for the text index (pageText is empty until it exists),
+  // reuses the per-page cache the highlight anchoring already fills, and is
+  // memoised per document so closing and reopening the panel costs nothing.
+  const indexRef = useRef(index)
+  indexRef.current = index
+  const pageTextRef = useRef(pageText)
+  pageTextRef.current = pageText
+  const currentPageRef = useRef(scrollState.currentPage)
+  currentPageRef.current = scrollState.currentPage
+  const docPagesRef = useRef<{ doc: PdfDocumentObject; promise: Promise<DocPage[]>; listeners: Set<(d: number, t: number) => void> } | null>(null)
 
-  // Hand that context to whoever is rendering the drawer. Kept as its own
-  // effect so the label updates the moment the page changes, without
-  // waiting on the text fetch above.
+  const docRef = useRef(doc)
+  docRef.current = doc
   useEffect(() => {
-    if (!aiDrawerOpen) return
-    onAiContextChange?.({
-      scopeLabel: `page ${scrollState.currentPage} of ${totalPages || '—'}`,
-      pageText: currentPageText
+    if (!onDocumentReader) return
+    onDocumentReader({
+      getDocumentPages: (onProgress) => {
+        const current = docRef.current
+        if (!current) return Promise.reject(new Error('The document is not open yet'))
+        const memo = docPagesRef.current
+        if (memo && memo.doc === current) {
+          memo.listeners.add(onProgress)
+          return memo.promise
+        }
+        const listeners = new Set([onProgress])
+        const total = current.pageCount
+        const promise = (async (): Promise<DocPage[]> => {
+          // pageText is empty until the text index exists.
+          while (!indexRef.current) {
+            if (docRef.current !== current) throw new Error('The document changed')
+            await new Promise((r) => setTimeout(r, 50))
+          }
+          const pages: DocPage[] = []
+          for (let i = 0; i < total; i++) {
+            if (docRef.current !== current) throw new Error('The document changed')
+            pages.push({ page: i + 1, text: (await pageTextRef.current(i)).trim() })
+            listeners.forEach((l) => l(i + 1, total))
+          }
+          return pages
+        })()
+        // A failed read must not stick: the next ask tries again.
+        promise.catch(() => {
+          if (docPagesRef.current?.promise === promise) docPagesRef.current = null
+        })
+        docPagesRef.current = { doc: current, promise, listeners }
+        return promise
+      },
+      getCurrentPage: () => currentPageRef.current
     })
-  }, [aiDrawerOpen, currentPageText, scrollState.currentPage, totalPages, onAiContextChange])
+    return () => onDocumentReader(null)
+  }, [onDocumentReader])
 
   const askAiFromSelection = useCallback(
     async (rect: Rect, pageIndex: number, mode: AiMode = 'micro-explain') => {

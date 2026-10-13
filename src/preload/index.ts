@@ -163,6 +163,11 @@ const api = {
       ipcRenderer.on(IPC.MENU_TOGGLE_FOCUS_MODE_EVENT, listener)
       return () => ipcRenderer.removeListener(IPC.MENU_TOGGLE_FOCUS_MODE_EVENT, listener)
     },
+    onToggleStudy: (cb: () => void): (() => void) => {
+      const listener = (): void => cb()
+      ipcRenderer.on(IPC.MENU_TOGGLE_STUDY_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.MENU_TOGGLE_STUDY_EVENT, listener)
+    },
     onNewBookmark: (cb: () => void): (() => void) => {
       const listener = (): void => cb()
       ipcRenderer.on(IPC.MENU_NEW_BOOKMARK_EVENT, listener)

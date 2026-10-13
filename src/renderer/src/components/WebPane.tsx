@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type { Highlight, WebPaneState } from '../../../shared/types'
+import type { StudyAttachment, StudyMessage } from '../../../shared/study'
 import FindBar, { type FindResult } from './FindBar'
 import type { FindStep } from '../lib/findStep'
 import { onWebPaneShown, setWebPaneWanted } from '../lib/webPaneVisibility'
@@ -39,6 +40,10 @@ export default function WebPane({
   /** Highlight to scroll to once the page is loaded (set by the highlight rail). */
   focusHighlightId?: string | null
   onFocusHandled?: () => void
+  /** Attach a selection or region to the Study panel's next question. Wired up by the selection tools. */
+  onStudyAttach?: (attachment: StudyAttachment) => void
+  /** Open Study with an exchange already in it ("Continue in Study"). */
+  onStudyContinue?: (messages: StudyMessage[]) => void
   findOpen: boolean
   findFocusSignal: number
   /** ⌘G / ⇧⌘G from the menu, as a new object per press. */

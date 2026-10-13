@@ -5,7 +5,10 @@ import type { Bookmark, Highlight, UpdateBookmarkInput, WebPaneState } from '../
 import { useBookmark, useDeleteBookmark, useHighlightsForBookmark, useUpdateBookmark } from '../lib/queries'
 import type { FindStep } from '../lib/findStep'
 import { FOCUS_LIBRARY_SEARCH } from '../lib/libraryFocus'
-import { useBookmarkText } from '../lib/useBookmarkText'
+import { truncateForContext, useBookmarkText } from '../lib/useBookmarkText'
+import { useStudyThread, type StudySendContext } from '../lib/useStudyThread'
+import { assembleDocument, type DocPage } from '../lib/studyContext'
+import type { AiRef } from '../lib/aiRefs'
 import { displayForBookmark } from '../lib/bookmarkDisplay'
 import { usePref } from '../lib/prefs'
 import { errMessage } from '../lib/errors'
@@ -14,12 +17,12 @@ import ConfirmDialog from './ConfirmDialog'
 import EditableField from './EditableField'
 import Icon from './Icon'
 import ListMembership from './ListMembership'
-import PdfPane from './PdfPane'
+import PdfPane, { type PdfDocumentReader } from './PdfPane'
 import TagEditor from './TagEditor'
 import WebPane from './WebPane'
-import PageAiDrawer from './PageAiDrawer'
+import StudyPanel from './StudyPanel'
 import SidePanel from './SidePanel'
-import { isStudyAsset } from '../../../shared/study'
+import { STUDY_BUDGET_CHARS, isStudyAsset, type StudyAttachment, type StudyMessage } from '../../../shared/study'
 import { TRAFFIC_LIGHT_INSET } from './TitlebarRow'
 
 type Tab = 'preview' | 'pdf' | 'web'
@@ -74,7 +77,7 @@ export default function DetailPane({
   // screen. As a rail it stays put across tabs. Persisted, because whether
   // you work with highlights open is a habit, not a per-bookmark decision.
   const [railOpen, setRailOpenPref] = usePref('highlightRailOpen', false)
-  const [aiDrawerOpen, setAiDrawerOpen] = useState(false)
+  const [studyOpen, setStudyOpen] = useState(false)
 
   // One side pane at a time. Both dock to the same right-hand edge, and
   // opening the second used to stack them, leaving the page itself a
@@ -83,22 +86,14 @@ export default function DetailPane({
   const openRail = useCallback(
     (next: boolean) => {
       setRailOpenPref(next)
-      if (next) setAiDrawerOpen(false)
-    },
-    [setRailOpenPref]
-  )
-  const openAiDrawer = useCallback(
-    (next: boolean) => {
-      setAiDrawerOpen(next)
-      if (next) setRailOpenPref(false)
+      if (next) setStudyOpen(false)
     },
     [setRailOpenPref]
   )
 
-  // What the PDF pane is currently showing, so the one shared Co-Pilot
-  // drawer below can be grounded in the page on screen rather than in the
-  // whole document. Reported upward by PdfPane while the drawer is open.
-  const [pdfAiContext, setPdfAiContext] = useState<{ scopeLabel: string; pageText: string } | null>(null)
+  // The open PDF's text, handed up by PdfPane once it is mounted. Study reads
+  // the whole document through it rather than one page at a time.
+  const [pdfReader, setPdfReader] = useState<PdfDocumentReader | null>(null)
 
   // Navigation state for the live pane. It lives here rather than in
   // WebPane because the back/forward/reload buttons moved into this
@@ -149,7 +144,125 @@ export default function DetailPane({
   // lib/useBookmarkText.ts. Called unconditionally (before the `!bookmark`
   // early return) because it's a hook; `enabled: !!bookmark` inside it makes
   // that safe to call with a possibly-null bookmark.
-  const bookmarkText = useBookmarkText(bookmark, tab === 'web')
+  const bookmarkText = useBookmarkText(bookmark, tab === 'web', STUDY_BUDGET_CHARS)
+
+  // ── Study ────────────────────────────────────────────────────────────────
+  // The chat hook lives here, not in the panel, so a question keeps streaming
+  // and saves to its own bookmark when the panel is closed or the user moves
+  // on, and so readers can attach to it while the panel is still closed.
+  const study = useStudyThread(bookmark?.id ?? null, {
+    active: studyOpen,
+    docTitle: display?.title ?? bookmark?.title ?? 'Untitled'
+  })
+
+  // A PDF's text only exists inside the PDF pane, which is mounted for the
+  // PDF tab's bookmark whichever tab is showing.
+  const [studyPages, setStudyPages] = useState<{ bookmarkId: string; pages: DocPage[] } | null>(null)
+  const [studyProgress, setStudyProgress] = useState<{ done: number; total: number } | null>(null)
+  useEffect(() => {
+    if (!studyOpen || !bookmark || !pdfAssetId || !pdfReader) return
+    const id = bookmark.id
+    let cancelled = false
+    setStudyProgress(null)
+    pdfReader
+      .getDocumentPages((done, total) => {
+        if (!cancelled) setStudyProgress({ done, total })
+      })
+      .then((pages) => {
+        if (!cancelled) setStudyPages({ bookmarkId: id, pages })
+      })
+      // An unreadable PDF still opens Study, answering from the title.
+      .catch(() => {
+        if (!cancelled) setStudyPages({ bookmarkId: id, pages: [] })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [studyOpen, bookmark?.id, pdfAssetId, pdfReader]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const studyIsPdf = !!pdfAssetId
+  const studyPageList = studyPages && studyPages.bookmarkId === bookmark?.id ? studyPages.pages : null
+  const studyText = studyIsPdf ? null : (bookmarkText.data?.text ?? '')
+  const studyDocReady = studyIsPdf ? studyPageList !== null : !bookmarkText.isPending
+  const studyHasText = studyIsPdf
+    ? !!studyPageList?.some((p) => p.text)
+    : !!studyText && bookmarkText.data?.source !== 'description'
+
+  let studyScope: string
+  if (!studyDocReady) {
+    studyScope =
+      studyIsPdf && studyProgress
+        ? `Reading document… ${studyProgress.done} / ${studyProgress.total} pages`
+        : 'Reading document…'
+  } else if (!studyHasText) {
+    studyScope = 'No page text available — answering from title and description'
+  } else if (studyIsPdf) {
+    const n = studyPageList?.length ?? 0
+    studyScope = `Whole paper · ${n} ${n === 1 ? 'page' : 'pages'}`
+  } else {
+    studyScope = display?.kind === 'text' ? 'Whole note' : 'Whole article'
+  }
+
+  // Pages the question is about (attached selections and regions) are kept
+  // when a very long document has to be trimmed.
+  function studyContext(focusPages: number[]): StudySendContext {
+    const currentPage = studyIsPdf ? pdfReader?.getCurrentPage() : undefined
+    const build = (budget: number): string =>
+      studyIsPdf
+        ? assembleDocument(studyPageList ?? [], { budget, focusPages, currentPage })
+        : truncateForContext(studyText ?? '', budget)
+    const c = bookmark?.content
+    return {
+      documentText: build(STUDY_BUDGET_CHARS),
+      rebuild: build,
+      paged: studyIsPdf && studyHasText,
+      currentPage,
+      docTitle: display?.title ?? bookmark?.title ?? 'Untitled',
+      sourceUrl: c?.url || c?.sourceUrl || undefined,
+      siteName: c?.publisher || undefined,
+      author: c?.author || undefined,
+      docKind: studyIsPdf ? 'pdf' : display?.kind === 'text' ? 'note' : 'article'
+    }
+  }
+  const pagesOf = (attachments?: StudyAttachment[]): number[] =>
+    (attachments ?? []).flatMap((a) => (a.page !== undefined ? [a.page] : []))
+
+  // Opening Study from the Preview tab of a PDF moves to the PDF first: its
+  // text, and later its references, live there.
+  const openStudy = useCallback(
+    (next: boolean) => {
+      setStudyOpen(next)
+      if (next) {
+        setRailOpenPref(false)
+        if (pdfAssetId && tab === 'preview') setTab('pdf')
+      }
+    },
+    [setRailOpenPref, pdfAssetId, tab]
+  )
+  const onStudyAttach = useCallback(
+    (a: StudyAttachment) => {
+      openStudy(true)
+      study.addAttachment(a)
+    },
+    [openStudy, study.addAttachment] // eslint-disable-line react-hooks/exhaustive-deps
+  )
+  const onStudyContinue = useCallback(
+    (messages: StudyMessage[]) => {
+      openStudy(true)
+      study.seed(messages)
+    },
+    [openStudy, study.seed] // eslint-disable-line react-hooks/exhaustive-deps
+  )
+  // Task 5 makes references jump; until then a tag only reports it found nothing.
+  const onRevealRef = useCallback(async (_ref: AiRef): Promise<'exact' | 'approximate' | 'missing'> => 'missing', [])
+
+  // View → Study panel (⌥⌘S) arrives from the app menu, like Find, so it works
+  // while the native web view has focus.
+  const toggleStudyRef = useRef<() => void>(() => {})
+  toggleStudyRef.current = () => {
+    if (bookmark) openStudy(!studyOpen)
+  }
+  useEffect(() => window.kk.window.onToggleStudy(() => toggleStudyRef.current()), [])
 
   /**
    * Where a bookmark opens.
@@ -198,7 +311,6 @@ export default function DetailPane({
     // an update; leaving it would light up Back for a page this bookmark
     // has never been on.
     setWebState(EMPTY_WEB_STATE)
-    setPdfAiContext(null)
     // Matches belong to the document that was on screen.
     setFindOpen(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -419,14 +531,13 @@ export default function DetailPane({
             </>
           )}
 
-          {/* Highlights and the Co-Pilot are the same two controls on every
-              tab. They used to be conditional — the rail button appeared
-              only once a bookmark already had highlights, and the Co-Pilot
-              was hidden on PDFs because the PDF pane carried its own copy
-              in a second toolbar. Both read as "this app can't do that
-              here". They are always present now, and the PDF pane's
-              copy is gone: its bar keeps only what is genuinely
-              PDF-specific (paging, zoom, night mode). */}
+          {/* Highlights and Study are the same two controls on every tab.
+              They used to be conditional — the rail button appeared only
+              once a bookmark already had highlights, and the AI button was
+              hidden on PDFs because the PDF pane carried its own copy in a
+              second toolbar. Both read as "this app can't do that here".
+              They are always present now, and the PDF pane's bar keeps only
+              what is genuinely PDF-specific (paging, zoom, night mode). */}
           <button
             type="button"
             data-testid="detail-highlights"
@@ -445,21 +556,18 @@ export default function DetailPane({
 
           <button
             type="button"
-            data-testid="detail-ai-copilot"
-            onClick={() => openAiDrawer(!aiDrawerOpen)}
-            aria-pressed={aiDrawerOpen}
-            title={aiDrawerOpen ? 'Close AI Co-Pilot' : 'Open AI Co-Pilot'}
+            data-testid="detail-study"
+            onClick={() => openStudy(!studyOpen)}
+            aria-pressed={studyOpen}
+            title={studyOpen ? 'Close Study panel (⌥⌘S)' : 'Open Study panel (⌥⌘S)'}
             className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition ${
-              aiDrawerOpen
+              studyOpen
                 ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
                 : 'text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800'
             }`}
           >
-            {/* The one emoji in a bar of line icons read as a sticker
-                stuck on the toolbar. Same icon set as everything beside
-                it, tinted rather than illustrated. */}
-            <Icon name="sparkles" size={14} />
-            <span>AI Co-Pilot</span>
+            <Icon name="study" size={14} />
+            <span>Study</span>
           </button>
           <button
             type="button"
@@ -653,8 +761,9 @@ export default function DetailPane({
                 onAnchorStatus={handleAnchorStatus}
                 sourceUrl={content?.sourceUrl || content?.url || undefined}
                 author={content?.author || content?.publisher || undefined}
-                aiDrawerOpen={aiDrawerOpen}
-                onAiContextChange={setPdfAiContext}
+                onDocumentReader={setPdfReader}
+                onStudyAttach={onStudyAttach}
+                onStudyContinue={onStudyContinue}
                 findOpen={findOpen && tab === 'pdf'}
                 findFocusSignal={findFocusSignal}
                 findStep={findStep}
@@ -673,6 +782,8 @@ export default function DetailPane({
                 state={webState}
                 focusHighlightId={focusHighlightId}
                 onFocusHandled={clearFocus}
+                onStudyAttach={onStudyAttach}
+                onStudyContinue={onStudyContinue}
                 findOpen={findOpen && tab === 'web'}
                 findFocusSignal={findFocusSignal}
                 findStep={findStep}
@@ -701,33 +812,33 @@ export default function DetailPane({
           />
         )}
 
-        {/* One drawer for every kind of bookmark, docked to the same edge
-            as the highlight rail. Only what it's grounded in differs: the
-            PDF pane reports the page you're on, everything else uses the
-            bookmark's own text. */}
-        {aiDrawerOpen && (
-          <PageAiDrawer
-            open={aiDrawerOpen}
-            onClose={() => setAiDrawerOpen(false)}
-            scopeLabel={
-              tab === 'pdf'
-                ? pdfAiContext?.scopeLabel || 'this PDF'
-                : display?.kind === 'text'
-                  ? 'this note'
-                  : display?.kind === 'link'
-                    ? 'this article'
-                    : 'this page'
+        {/* One panel for every kind of bookmark, docked to the same edge as
+            the highlight rail. It reads the whole document: the PDF's pages,
+            or the article's text. */}
+        {studyOpen && (
+          <StudyPanel
+            onClose={() => setStudyOpen(false)}
+            scopeLine={studyScope}
+            documentReady={studyDocReady}
+            paged={studyIsPdf && studyHasText}
+            thread={study.thread}
+            chatReady={study.ready}
+            syncState={study.syncState}
+            pending={study.pending}
+            streaming={study.streaming}
+            busy={study.busy}
+            streamText={study.streamText}
+            error={study.error}
+            canRetry={study.canRetry}
+            onSend={(q) => study.send(q, studyContext(pagesOf(study.pending)))}
+            onStop={study.stop}
+            onRetry={() =>
+              study.retry(studyContext(pagesOf(study.thread?.messages[study.thread.messages.length - 1]?.attachments)))
             }
-            pageText={
-              tab === 'pdf'
-                ? pdfAiContext?.pageText || ''
-                : bookmarkText.data?.text || bookmark.title || ''
-            }
-            docTitle={title}
-            sourceUrl={content?.url || content?.sourceUrl || undefined}
-            siteName={content?.publisher || undefined}
-            author={content?.author || undefined}
-            docKind={tab === 'pdf' ? 'pdf' : display?.kind === 'text' ? 'note' : 'article'}
+            onClear={study.clear}
+            onRemoveAttachment={study.removeAttachment}
+            onRetrySync={study.retrySync}
+            onRevealRef={onRevealRef}
           />
         )}
       </div>

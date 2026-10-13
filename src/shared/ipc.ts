@@ -75,6 +75,7 @@ export const IPC = {
   MENU_FIND_NEXT_EVENT: 'menu:find-next',
   MENU_FIND_PREVIOUS_EVENT: 'menu:find-previous',
   MENU_OPEN_SETTINGS_EVENT: 'menu:open-settings',
+  MENU_TOGGLE_STUDY_EVENT: 'menu:toggle-study',
 
   // AI streaming (Gemini)
   AI_STREAM_START: 'ai:stream-start',
