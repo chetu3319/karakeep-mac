@@ -378,7 +378,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.WEBPANE_REVEAL_QUOTE, (_e, quote: string, bookmarkId?: string) =>
     typeof quote === 'string' && quote ? (webPane?.revealQuote(quote, bookmarkId) ?? 'unavailable') : 'not-found'
   )
-  ipcMain.handle(IPC.WEBPANE_CAPTURE_REGION, () => webPane?.captureRegion() ?? null)
+  ipcMain.handle(IPC.WEBPANE_CAPTURE_REGION, () => webPane?.captureRegion() ?? { error: 'Open the Web tab to capture a region.' })
   ipcMain.handle(IPC.WEBPANE_CANCEL_CAPTURE, () => webPane?.cancelCapture())
   ipcMain.handle(IPC.WEBPANE_GET_PAGE_TEXT, () => webPane?.getPageText() ?? '')
   ipcMain.handle(IPC.WEBPANE_SET_BOUNDS, (_e, bounds: WebPaneBounds) => webPane?.setBounds(bounds))

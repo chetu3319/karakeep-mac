@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  encodedTooLarge,
   fitLongSide,
+  layoutToVisualRect,
   glyphSpansInRect,
   isTinyDrag,
   pickPage,
@@ -74,5 +76,27 @@ describe('region capture helpers', () => {
     expect(glyphSpansInRect(runs, { x: 12, y: 2, width: 30, height: 5 })).toEqual([{ from: 1, to: 2 }])
     expect(glyphSpansInRect(runs, { x: 0, y: 0, width: 100, height: 100 })).toEqual([{ from: 0, to: 4 }])
     expect(glyphSpansInRect(runs, { x: 200, y: 200, width: 5, height: 5 })).toEqual([])
+  })
+
+  it('is the identity without pinch zoom', () => {
+    const vv = { offsetLeft: 0, offsetTop: 0, width: 800, height: 600, scale: 1 }
+    expect(layoutToVisualRect({ x: 10, y: 20, width: 30, height: 40 }, vv)).toEqual({ x: 10, y: 20, width: 30, height: 40 })
+  })
+
+  it('maps layout coordinates into the magnified visual viewport', () => {
+    // pinched 2x onto the region starting at (100, 50) of the layout viewport
+    const vv = { offsetLeft: 100, offsetTop: 50, width: 400, height: 300, scale: 2 }
+    expect(layoutToVisualRect({ x: 150, y: 80, width: 40, height: 30 }, vv)).toEqual({ x: 100, y: 60, width: 80, height: 60 })
+  })
+
+  it('clips to what is visible and drops what is not', () => {
+    const vv = { offsetLeft: 100, offsetTop: 50, width: 400, height: 300, scale: 2 }
+    expect(layoutToVisualRect({ x: 80, y: 40, width: 40, height: 40 }, vv)).toEqual({ x: 0, y: 0, width: 40, height: 60 })
+    expect(layoutToVisualRect({ x: 0, y: 0, width: 50, height: 20 }, vv)).toBeNull()
+  })
+
+  it('flags oversized encodings', () => {
+    expect(encodedTooLarge('x'.repeat(100))).toBe(false)
+    expect(encodedTooLarge('x'.repeat(4_000_001))).toBe(true)
   })
 })

@@ -411,6 +411,12 @@ export default function DetailPane({
   // the native view covers this UI, so it lives in the page itself.
   const [capturing, setCapturing] = useState(false)
   const captureTokenRef = useRef(0)
+  const [captureNote, setCaptureNote] = useState<string | null>(null)
+  useEffect(() => {
+    if (!captureNote) return
+    const t = setTimeout(() => setCaptureNote(null), 4000)
+    return () => clearTimeout(t)
+  }, [captureNote])
   const cancelCapture = useCallback(() => {
     captureTokenRef.current++
     setCapturing(false)
@@ -427,7 +433,9 @@ export default function DetailPane({
         a = (await pdfReaderRef.current?.startRegionCapture()) ?? null
       } else if (tab === 'web') {
         const r = await window.kk.webpane.captureRegion()
-        if (r) a = { kind: 'region', label: 'Region', rect: { x: 0, y: 0, width: 0, height: 0 }, text: r.text || undefined, imageDataUrl: r.imageDataUrl }
+        if (r && 'error' in r) {
+          if (token === captureTokenRef.current) setCaptureNote(r.error)
+        } else if (r) a = { kind: 'region', label: 'Region', rect: { x: 0, y: 0, width: 0, height: 0 }, text: r.text || undefined, imageDataUrl: r.imageDataUrl }
       }
       if (a && token === captureTokenRef.current) onStudyAttach(a)
     } catch {
@@ -703,6 +711,11 @@ export default function DetailPane({
             <Icon name="region" size={14} />
             <span>Capture region</span>
           </button>
+          {captureNote && (
+            <span role="status" className="text-xs text-amber-600 dark:text-amber-400">
+              {captureNote}
+            </span>
+          )}
           <button
             type="button"
             data-testid="detail-favourite"

@@ -211,7 +211,7 @@ const api = {
       ipcRenderer.invoke(IPC.WEBPANE_REVEAL_QUOTE, quote, bookmarkId),
     // Drag a rectangle over the live page; resolves to the PNG and the page
     // text under it, or null when cancelled (Esc, a tiny drag, navigation).
-    captureRegion: (): Promise<{ imageDataUrl: string; text: string } | null> =>
+    captureRegion: (): Promise<{ imageDataUrl: string; text: string } | { error: string } | null> =>
       ipcRenderer.invoke(IPC.WEBPANE_CAPTURE_REGION),
     cancelCapture: (): Promise<void> => ipcRenderer.invoke(IPC.WEBPANE_CANCEL_CAPTURE),
     // main/webpane.ts's getPageText(). Used by lib/useBookmarkText.ts to

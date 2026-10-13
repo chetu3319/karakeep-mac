@@ -35,7 +35,7 @@ import { IPC, WEBPANE_IPC } from '../shared/ipc'
 import { buildContinueMessages, textAttachment, type InlineMode } from '../shared/inlineAnswer'
 import { findQuote } from '../shared/quoteMatch'
 import { markdownSegments } from '../shared/safeMarkdown'
-import { MAX_REGION_TEXT, isTinyDrag, rectFromPoints, rectsIntersect, type PxRect } from '../shared/regionCapture'
+import { MAX_REGION_TEXT, isTinyDrag, layoutToVisualRect, rectFromPoints, rectsIntersect, type PxRect } from '../shared/regionCapture'
 
 const HIGHLIGHT_CLASS = 'karakeep-hl'
 const OVERLAY_HOST_ID = 'karakeep-hl-overlay'
@@ -1955,7 +1955,20 @@ function karakeepInit(): void {
     }
     const report = (r: PxRect | null): void => {
       const text = r ? textWithin(r) : ''
-      sendHost(WEBPANE_IPC.CAPTURE_RESULT, { requestId, rect: r, text })
+      // capturePage works in the visible area; under pinch zoom that is the
+      // visual viewport, so the layout-space drag is mapped into it.
+      const vv = window.visualViewport
+      const rect =
+        r && vv
+          ? layoutToVisualRect(r, {
+              offsetLeft: vv.offsetLeft,
+              offsetTop: vv.offsetTop,
+              width: vv.width,
+              height: vv.height,
+              scale: vv.scale
+            })
+          : r
+      sendHost(WEBPANE_IPC.CAPTURE_RESULT, { requestId, rect, text })
     }
     const finish = (r: PxRect | null): void => {
       endCapture()

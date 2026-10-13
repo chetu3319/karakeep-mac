@@ -10,7 +10,14 @@ import { IPC, WEBPANE_IPC } from '../shared/ipc'
 import type { WebPaneBounds, WebPaneFindResult, WebPaneState } from '../shared/types'
 import { sanitizeStudyAttachment, sanitizeStudyMessages } from '../shared/studyPayload'
 import { lockPageZoom } from './zoomLock'
-import { MAX_CAPTURE_SIDE, fitLongSide, isTinyDrag, tidyRegionText } from '../shared/regionCapture'
+import {
+  MAX_CAPTURE_SIDE,
+  encodedTooLarge,
+  fitLongSide,
+  isTinyDrag,
+  tidyRegionText,
+  type RegionCaptureResult
+} from '../shared/regionCapture'
 
 /** Longest a quote reveal waits for the page to exist, load and answer. */
 const REVEAL_BUDGET_MS = 10_000
@@ -18,6 +25,8 @@ const REVEAL_BUDGET_MS = 10_000
 const CAPTURE_BUDGET_MS = 120_000
 /** Lets the page repaint without the crosshair before it is photographed. */
 const CAPTURE_SETTLE_MS = 90
+/** Longest a capture waits for the page's preload to be live. */
+const CAPTURE_READY_MS = 4000
 const WEBPANE_PRELOAD = join(__dirname, '../preload/webpane.mjs')
 
 export class WebPaneManager {
@@ -25,9 +34,10 @@ export class WebPaneManager {
   private attached = false
   private win: BrowserWindow
   private currentBookmarkId: string | null = null
+  private preloadReady = false
   private pendingHighlights: unknown[] = []
   private pendingReveals = new Map<string, (result: 'found' | 'not-found' | 'unavailable') => void>()
-  private pendingCapture: { requestId: string; finish: (r: { imageDataUrl: string; text: string } | null) => void } | null = null
+  private pendingCapture: { requestId: string; finish: (r: RegionCaptureResult) => void } | null = null
   private onHighlightEvent: (type: 'created' | 'updated' | 'removed', payload: unknown, bookmarkId: string | null) => void
 
   constructor(
@@ -105,6 +115,19 @@ export class WebPaneManager {
         this.stopFind()
         this.abandonReveals()
         this.cancelCapture()
+        this.preloadReady = false
+      }
+    })
+    // A crashed page can never answer, and Esc must work even when focus is
+    // in an iframe the crosshair's own key handler cannot see.
+    wc.on('render-process-gone', () => {
+      this.preloadReady = false
+      this.cancelCapture()
+    })
+    wc.on('before-input-event', (event, input) => {
+      if (this.pendingCapture && input.type === 'keyDown' && input.key === 'Escape') {
+        event.preventDefault()
+        this.cancelCapture()
       }
     })
     wc.on('page-title-updated', () => pushState())
@@ -138,6 +161,7 @@ export class WebPaneManager {
     })
     ipcMain.on(WEBPANE_IPC.READY, (e) => {
       if (!fromThisView(e.sender.id)) return
+      this.preloadReady = true
       if (this.pendingHighlights.length) wc.send(WEBPANE_IPC.APPLY, this.pendingHighlights)
     })
     ipcMain.on(WEBPANE_IPC.REVEAL_RESULT, (e, payload: { requestId: string; found: boolean }) => {
@@ -272,13 +296,22 @@ export class WebPaneManager {
    * Null when cancelled, abandoned (navigation, destroy, a newer capture) or
    * the page could not be captured.
    */
-  async captureRegion(): Promise<{ imageDataUrl: string; text: string } | null> {
+  async captureRegion(): Promise<RegionCaptureResult> {
     this.cancelCapture()
-    const wc = this.view && !this.view.webContents.isDestroyed() ? this.view.webContents : null
-    if (!wc || !this.attached || wc.isLoading()) return null
+    const live = (): Electron.WebContents | null =>
+      this.view && !this.view.webContents.isDestroyed() ? this.view.webContents : null
+    if (!live() || !this.attached) return { error: 'Open the Web tab to capture a region.' }
+    // The crosshair is the page's preload, live from dom-ready; a page that
+    // keeps "loading" long after it looks complete is fine. Wait briefly for
+    // the preload rather than refusing on isLoading().
+    const readyBy = Date.now() + CAPTURE_READY_MS
+    while (!this.preloadReady && live() && Date.now() < readyBy) await new Promise((r) => setTimeout(r, 50))
+    const wc = live()
+    if (!wc || !this.attached) return { error: 'Open the Web tab to capture a region.' }
+    if (!this.preloadReady) return { error: 'This page is not ready yet. Try again in a moment.' }
     const requestId = `cp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     return new Promise((resolve) => {
-      const finish = (r: { imageDataUrl: string; text: string } | null): void => {
+      const finish = (r: RegionCaptureResult): void => {
         clearTimeout(timer)
         if (this.pendingCapture?.requestId === requestId) this.pendingCapture = null
         resolve(r)
@@ -342,7 +375,18 @@ export class WebPaneManager {
       }
       if (image.isEmpty()) return pending.finish(null)
       const text = typeof rawText === 'string' ? tidyRegionText(rawText) : ''
-      pending.finish({ imageDataUrl: `data:image/png;base64,${image.toPNG().toString('base64')}`, text })
+      let imageDataUrl = `data:image/png;base64,${image.toPNG().toString('base64')}`
+      // A busy photograph can make a huge PNG: JPEG first, then smaller.
+      if (encodedTooLarge(imageDataUrl)) {
+        imageDataUrl = `data:image/jpeg;base64,${image.toJPEG(85).toString('base64')}`
+        for (let i = 0; i < 3 && encodedTooLarge(imageDataUrl); i++) {
+          const now = image.getSize()
+          image = image.resize({ width: Math.max(1, Math.round(now.width / 1.5)), height: Math.max(1, Math.round(now.height / 1.5)), quality: 'good' })
+          imageDataUrl = `data:image/jpeg;base64,${image.toJPEG(85).toString('base64')}`
+        }
+        if (encodedTooLarge(imageDataUrl)) return pending.finish(null)
+      }
+      pending.finish({ imageDataUrl, text })
     } catch {
       pending.finish(null)
     }

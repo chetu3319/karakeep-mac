@@ -146,3 +146,41 @@ export function glyphSpansInRect(runs: RunLike[], rect: PxRect): Array<{ from: n
   }
   return spans
 }
+
+/** The part of window.visualViewport the conversion needs (CSS px, layout-viewport space). */
+export interface VisualViewportLike {
+  offsetLeft: number
+  offsetTop: number
+  width: number
+  height: number
+  scale: number
+}
+
+/**
+ * A rectangle in layout-viewport CSS px (pointer clientX/Y, position: fixed)
+ * to the visible-area space `capturePage` works in. Under pinch zoom the
+ * visible area is the visual viewport, magnified by `scale` and offset inside
+ * the layout viewport. The rectangle is clipped to what is visible first, and
+ * null when none of it is.
+ */
+export function layoutToVisualRect(r: PxRect, vv: VisualViewportLike): PxRect | null {
+  const scale = vv.scale > 0 ? vv.scale : 1
+  const hit = intersection(r, { x: vv.offsetLeft, y: vv.offsetTop, width: vv.width, height: vv.height })
+  if (!hit) return null
+  return {
+    x: (hit.x - vv.offsetLeft) * scale,
+    y: (hit.y - vv.offsetTop) * scale,
+    width: hit.width * scale,
+    height: hit.height * scale
+  }
+}
+
+/** A PNG data URL longer than this is re-encoded smaller (about 4MB of text). */
+export const MAX_ENCODED_CHARS = 4_000_000
+
+export function encodedTooLarge(dataUrl: string): boolean {
+  return dataUrl.length > MAX_ENCODED_CHARS
+}
+
+/** What a web capture hands back: the picture, a reason it could not start, or null for a cancel. */
+export type RegionCaptureResult = { imageDataUrl: string; text: string } | { error: string } | null
