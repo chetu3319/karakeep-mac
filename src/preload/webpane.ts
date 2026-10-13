@@ -1603,6 +1603,7 @@ function karakeepInit(): void {
       if (!parent) continue
       while (m.firstChild) parent.insertBefore(m.firstChild, m)
       parent.removeChild(m)
+      parent.normalize()
     }
   }
 

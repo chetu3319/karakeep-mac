@@ -9,7 +9,7 @@ import { truncateForContext, useBookmarkText } from '../lib/useBookmarkText'
 import { useStudyThread, type StudySendContext } from '../lib/useStudyThread'
 import { assembleDocument, type DocPage } from '../lib/studyContext'
 import type { AiRef } from '../lib/aiRefs'
-import { locatePdfRef, waitUntil, type RefQuality } from '../lib/revealRef'
+import { afterPaint, locatePdfRef, waitUntil, type NormalizedPage, type RefQuality, type RevealResult } from '../lib/revealRef'
 import { displayForBookmark } from '../lib/bookmarkDisplay'
 import { usePref } from '../lib/prefs'
 import { errMessage } from '../lib/errors'
@@ -267,6 +267,13 @@ export default function DetailPane({
   const tabRef = useRef(tab)
   tabRef.current = tab
 
+  // Pages normalised once and shared by every reference resolved against this
+  // document; dropped when the reader (so the document) changes.
+  const refPageCache = useRef(new Map<number, NormalizedPage>())
+  useEffect(() => {
+    refPageCache.current = new Map()
+  }, [pdfReader])
+
   const onResolveRef = useCallback(
     async (ref: AiRef): Promise<RefQuality | 'unknown'> => {
       if (!pdfAssetId) return 'unknown'
@@ -274,45 +281,46 @@ export default function DetailPane({
       if (!reader) return 'unknown'
       const ready = await reader.whenReady(REF_READY_MS)
       if (!ready) return 'unknown'
-      const found = await locatePdfRef(ref, ready.pageCount, (p) => reader.getPageText(p))
+      const found = await locatePdfRef(ref, ready.pageCount, (p) => reader.getPageText(p), {
+        cache: refPageCache.current,
+        yieldToLoop: true
+      })
       return found.quality
     },
     [pdfAssetId]
   )
 
   const onRevealRef = useCallback(
-    async (ref: AiRef): Promise<RefQuality> => {
+    async (ref: AiRef): Promise<RevealResult> => {
       if (pdfAssetId) {
         // Preview has no reader to point at, so go to the PDF first.
-        if (tabRef.current !== 'pdf') setTab('pdf')
+        const switched = tabRef.current !== 'pdf'
+        if (switched) setTab('pdf')
         const reader = await waitUntil(() => pdfReaderRef.current, REF_READY_MS)
         const ready = reader && (await reader.whenReady(REF_READY_MS))
-        if (!reader || !ready) return 'missing'
-        const found = await locatePdfRef(ref, ready.pageCount, (p) => reader.getPageText(p))
+        if (!reader || !ready) return 'unavailable'
+        // The pane was mounted but hidden; let it be laid out at its real size
+        // before scrolling, or the scroll lands in a zero-height container.
+        if (switched) await afterPaint()
+        const found = await locatePdfRef(ref, ready.pageCount, (p) => reader.getPageText(p), {
+          cache: refPageCache.current
+        })
         if (found.quality === 'missing') return 'missing'
         // An approximate hit goes to the page and flashes nothing.
         reader.reveal(found.page0, found.start, found.end)
         return found.quality
       }
       if (!url) return 'missing'
-      const switched = tabRef.current !== 'web'
-      if (switched) {
+      if (tabRef.current !== 'web') {
         setTab('web')
-        // The native view is attached by the Web tab's own effects.
-        const end = Date.now() + REF_READY_MS
-        while (Date.now() < end && !(await window.kk.dev.isPaneAttached())) {
-          await new Promise((r) => setTimeout(r, 100))
-        }
+        // Let the Web tab's effects run: they navigate the native view, and
+        // main then waits for that load before asking the page.
+        await afterPaint()
       }
-      // After a tab switch the page may only just have started loading;
-      // main waits out a load in progress, so a few spaced tries cover the gap.
-      for (let attempt = 0; attempt < (switched ? 5 : 1); attempt++) {
-        if (attempt > 0) await new Promise((r) => setTimeout(r, 600))
-        if (await window.kk.webpane.revealQuote(ref.quote)) return 'exact'
-      }
-      return 'missing'
+      const result = await window.kk.webpane.revealQuote(ref.quote, bookmark?.id)
+      return result === 'found' ? 'exact' : result === 'not-found' ? 'missing' : 'unavailable'
     },
-    [pdfAssetId, url]
+    [pdfAssetId, url, bookmark?.id]
   )
 
   // View → Study panel (⌥⌘S) arrives from the app menu, like Find, so it works
@@ -899,6 +907,7 @@ export default function DetailPane({
             onRetrySync={study.retrySync}
             onRevealRef={onRevealRef}
             onResolveRef={onResolveRef}
+            refSource={pdfReader}
           />
         )}
       </div>

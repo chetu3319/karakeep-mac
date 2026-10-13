@@ -3,7 +3,7 @@ import type { StudyAttachment, StudyMessage, StudyThread, SyncState } from '../.
 import { parseRefs, refLabel, type AiRef } from '../lib/aiRefs'
 import { renderMarkdown } from '../lib/miniMarkdown'
 import ConfirmDialog from './ConfirmDialog'
-import { type RefQuality } from '../lib/revealRef'
+import { applyRevealResult, type RefQuality, type RevealResult } from '../lib/revealRef'
 import Icon from './Icon'
 import SidePanel from './SidePanel'
 
@@ -32,7 +32,7 @@ export interface StudyPanelProps {
   onRemoveAttachment: (index: number) => void
   onRetrySync: () => void
   /** Scrolls the reader to the passage a tag cites. */
-  onRevealRef: (ref: AiRef) => Promise<RefQuality>
+  onRevealRef: (ref: AiRef) => Promise<RevealResult>
   /**
    * Checks a reference without moving the reader, for styling its tag once its
    * turn is done. 'unknown' when the document can't be checked right now (a
@@ -40,6 +40,8 @@ export interface StudyPanelProps {
    * clickable until a click finds out.
    */
   onResolveRef: (ref: AiRef) => Promise<RefQuality | 'unknown'>
+  /** Changes when the thing refs are checked against becomes available (the PDF reader), so tags left 'unknown' are checked again. */
+  refSource?: unknown
 }
 
 const SUGGESTIONS = [
@@ -76,13 +78,15 @@ function Answer({
   streaming,
   paged,
   onRevealRef,
-  onResolveRef
+  onResolveRef,
+  refSource
 }: {
   text: string
   streaming: boolean
   paged: boolean
   onRevealRef: StudyPanelProps['onRevealRef']
   onResolveRef: StudyPanelProps['onResolveRef']
+  refSource: unknown
 }): React.JSX.Element {
   const parsed = useMemo(() => {
     const refs: AiRef[] = []
@@ -100,15 +104,22 @@ function Answer({
   // How well each tag's passage was found. Component state only: it is cheap
   // to recompute and describes the document as it is open right now.
   const [quality, setQuality] = useState<Record<number, RefQuality>>({})
+  const qualityRef = useRef(quality)
+  qualityRef.current = quality
   const resolveRef = useRef(onResolveRef)
   resolveRef.current = onResolveRef
+  // Tags whose click is still being worked out; repeat clicks are ignored.
+  const [pending, setPending] = useState<Set<number>>(new Set())
+  const pendingRef = useRef(new Set<number>())
   useEffect(() => {
-    // Once, when the turn is finished: never while it streams, never per render.
+    // When the turn is finished: never while it streams, never per render. It
+    // runs again only when the document source changes, and then only for tags
+    // that are still undecided.
     if (streaming) return
     let cancelled = false
     void (async () => {
       for (const ref of parsed.refs) {
-        if (!ref) continue
+        if (!ref || qualityRef.current[ref.index]) continue
         let q: RefQuality | 'unknown'
         try {
           q = await resolveRef.current(ref)
@@ -122,7 +133,7 @@ function Answer({
     return () => {
       cancelled = true
     }
-  }, [parsed, streaming])
+  }, [parsed, streaming, refSource])
 
   const body = useMemo(
     () =>
@@ -133,6 +144,7 @@ function Answer({
           const q = quality[i]
           const approx = q === 'approximate'
           const missing = q === 'missing'
+          const busy = pending.has(i)
           const title = missing
             ? "Couldn't find this passage"
             : approx
@@ -142,13 +154,26 @@ function Answer({
             <button
               type="button"
               disabled={missing}
-              title={title}
-              onClick={() =>
-                void onRevealRef(ref).then((result) => {
-                  setQuality((prev) => (prev[i] === result ? prev : { ...prev, [i]: result }))
-                })
-              }
+              aria-busy={busy}
+              title={busy ? 'Looking for this passage…' : title}
+              onClick={() => {
+                if (pendingRef.current.has(i)) return
+                pendingRef.current.add(i)
+                setPending(new Set(pendingRef.current))
+                void onRevealRef(ref)
+                  .catch((): RevealResult => 'unavailable')
+                  .then((result) => {
+                    const next = applyRevealResult(qualityRef.current[i], result)
+                    if (next) setQuality((prev) => (prev[i] === next ? prev : { ...prev, [i]: next }))
+                  })
+                  .finally(() => {
+                    pendingRef.current.delete(i)
+                    setPending(new Set(pendingRef.current))
+                  })
+              }}
               className={`mx-0.5 inline-block rounded border px-1 align-baseline text-[10px] leading-4 ${
+                busy ? 'animate-pulse' : ''
+              } ${
                 missing
                   ? 'cursor-default border-neutral-200 text-neutral-300 dark:border-neutral-800 dark:text-neutral-600'
                   : `text-neutral-500 hover:border-emerald-500 hover:text-emerald-700 dark:text-neutral-400 dark:hover:border-emerald-500 dark:hover:text-emerald-400 ${
@@ -163,7 +188,7 @@ function Answer({
           )
         }
       }),
-    [parsed, quality, paged, onRevealRef]
+    [parsed, quality, pending, paged, onRevealRef]
   )
   return <>{body}</>
 }
@@ -207,7 +232,8 @@ export default function StudyPanel(props: StudyPanelProps): React.JSX.Element {
     onRemoveAttachment,
     onRetrySync,
     onRevealRef,
-    onResolveRef
+    onResolveRef,
+    refSource
   } = props
   const [input, setInput] = useState('')
   const [confirmClear, setConfirmClear] = useState(false)
@@ -278,7 +304,7 @@ export default function StudyPanel(props: StudyPanelProps): React.JSX.Element {
             <UserTurn key={m.id} message={m} />
           ) : (
             <div key={m.id} className="text-neutral-800 dark:text-neutral-200">
-              <Answer text={m.text} streaming={false} paged={paged} onRevealRef={onRevealRef} onResolveRef={onResolveRef} />
+              <Answer text={m.text} streaming={false} paged={paged} onRevealRef={onRevealRef} onResolveRef={onResolveRef} refSource={refSource} />
             </div>
           )
         )}
@@ -286,7 +312,7 @@ export default function StudyPanel(props: StudyPanelProps): React.JSX.Element {
         {streaming && (
           <div className="text-neutral-800 dark:text-neutral-200">
             {streamText ? (
-              <Answer text={streamText} streaming paged={paged} onRevealRef={onRevealRef} onResolveRef={onResolveRef} />
+              <Answer text={streamText} streaming paged={paged} onRevealRef={onRevealRef} onResolveRef={onResolveRef} refSource={refSource} />
             ) : (
               <span className="italic text-neutral-400">Reading the document…</span>
             )}

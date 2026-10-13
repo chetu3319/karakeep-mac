@@ -10,6 +10,8 @@ import { IPC, WEBPANE_IPC } from '../shared/ipc'
 import type { WebPaneBounds, WebPaneFindResult, WebPaneState } from '../shared/types'
 import { lockPageZoom } from './zoomLock'
 
+/** Longest a quote reveal waits for the page to exist, load and answer. */
+const REVEAL_BUDGET_MS = 10_000
 const WEBPANE_PRELOAD = join(__dirname, '../preload/webpane.mjs')
 
 export class WebPaneManager {
@@ -18,7 +20,7 @@ export class WebPaneManager {
   private win: BrowserWindow
   private currentBookmarkId: string | null = null
   private pendingHighlights: unknown[] = []
-  private pendingReveals = new Map<string, (found: boolean) => void>()
+  private pendingReveals = new Map<string, (result: 'found' | 'not-found' | 'unavailable') => void>()
   private onHighlightEvent: (type: 'created' | 'updated' | 'removed', payload: unknown, bookmarkId: string | null) => void
 
   constructor(
@@ -92,7 +94,10 @@ export class WebPaneManager {
     // The renderer re-runs the query against the new page if the bar is
     // still open; this just makes sure nothing stale stays painted.
     wc.on('did-start-navigation', (details) => {
-      if (details.isMainFrame && !details.isSameDocument) this.stopFind()
+      if (details.isMainFrame && !details.isSameDocument) {
+        this.stopFind()
+        this.abandonReveals()
+      }
     })
     wc.on('page-title-updated', () => pushState())
     wc.on('did-fail-load', (_e, errorCode, errorDescription, _validatedURL, isMainFrame) => {
@@ -130,7 +135,7 @@ export class WebPaneManager {
     ipcMain.on(WEBPANE_IPC.REVEAL_RESULT, (e, payload: { requestId: string; found: boolean }) => {
       if (!fromThisView(e.sender.id)) return
       const done = this.pendingReveals.get(payload?.requestId)
-      if (done) done(payload.found === true)
+      if (done) done(payload.found === true ? 'found' : 'not-found')
     })
     ipcMain.on(WEBPANE_IPC.STATUS, (e, payload: { anchored: string[]; missing: string[] }) => {
       if (!fromThisView(e.sender.id)) return
@@ -185,30 +190,45 @@ export class WebPaneManager {
   }
 
   /**
-   * Asks the live page to scroll to a quote and flash it. Resolves to whether
-   * the page found it; false if there is no page, it is still loading after a
-   * while, or it does not answer. The page does the matching, so this never
-   * touches its DOM from here.
+   * Asks the live page to scroll to a quote and flash it. The page does the
+   * matching. 'unavailable' means nothing was learned (no view, a different
+   * bookmark is showing, the page never finished loading within the bound, it
+   * navigated away, or it did not answer), so callers must not treat it as
+   * "not on the page". The whole wait, view creation and load included, is
+   * bounded by REVEAL_BUDGET_MS.
    */
-  async revealQuote(quote: string): Promise<boolean> {
-    if (!this.view || this.view.webContents.isDestroyed()) return false
-    const wc = this.view.webContents
-    const loadDeadline = Date.now() + 8000
-    while (wc.isLoading() && !wc.isDestroyed() && Date.now() < loadDeadline) {
-      await new Promise((r) => setTimeout(r, 100))
+  async revealQuote(quote: string, bookmarkId?: string): Promise<'found' | 'not-found' | 'unavailable'> {
+    const deadline = Date.now() + REVEAL_BUDGET_MS
+    const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+    const live = (): Electron.WebContents | null =>
+      this.view && !this.view.webContents.isDestroyed() ? this.view.webContents : null
+    // The view appears when the Web tab first navigates, which can trail the click.
+    while (!live() && Date.now() < deadline) await sleep(50)
+    let wc = live()
+    if (!wc) return 'unavailable'
+    while (wc.isLoading() && Date.now() < deadline) {
+      await sleep(50)
+      wc = live()
+      if (!wc) return 'unavailable'
     }
-    if (wc.isDestroyed()) return false
+    if (wc.isLoading()) return 'unavailable'
+    if (bookmarkId && this.currentBookmarkId !== bookmarkId) return 'unavailable'
     const requestId = `rq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    return new Promise<boolean>((resolve) => {
-      const finish = (found: boolean): void => {
+    return new Promise((resolve) => {
+      const finish = (r: 'found' | 'not-found' | 'unavailable'): void => {
         clearTimeout(timer)
         this.pendingReveals.delete(requestId)
-        resolve(found)
+        resolve(r)
       }
-      const timer = setTimeout(() => finish(false), 3000)
+      const timer = setTimeout(() => finish('unavailable'), Math.max(500, Math.min(3000, deadline - Date.now())))
       this.pendingReveals.set(requestId, finish)
-      wc.send(WEBPANE_IPC.REVEAL_QUOTE, { requestId, quote })
+      wc!.send(WEBPANE_IPC.REVEAL_QUOTE, { requestId, quote })
     })
+  }
+
+  /** The page the requests were for is going away; nobody should wait out their timers. */
+  private abandonReveals(): void {
+    for (const finish of Array.from(this.pendingReveals.values())) finish('unavailable')
   }
 
   /**
@@ -285,6 +305,7 @@ export class WebPaneManager {
   }
 
   destroy(): void {
+    this.abandonReveals()
     if (this.view) {
       this.hide()
       this.attached = false

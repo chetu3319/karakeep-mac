@@ -85,10 +85,18 @@ export function normalizeForMatch(s: string): { flat: string; map: number[] } {
  * offsets into the original haystack (end exclusive), or null.
  */
 export function findQuote(haystack: string, quote: string): { start: number; end: number } | null {
+  return findQuoteIn(normalizeForMatch(haystack), quote)
+}
+
+/** `findQuote` against a haystack already run through `normalizeForMatch`, so one page can be searched for many quotes. */
+export function findQuoteIn(
+  normalized: { flat: string; map: number[] },
+  quote: string
+): { start: number; end: number } | null {
   const needle = normalizeForMatch(quote).flat.trim()
   if (!needle) return null
 
-  const { flat, map } = normalizeForMatch(haystack)
+  const { flat, map } = normalized
   const hit = flat.indexOf(needle)
   if (hit < 0) return null
 

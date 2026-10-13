@@ -375,8 +375,8 @@ function registerIpc(): void {
   ipcMain.handle(IPC.WEBPANE_FOCUS_HIGHLIGHT, (_e, highlightId: string) => {
     webPane?.focusHighlight(highlightId)
   })
-  ipcMain.handle(IPC.WEBPANE_REVEAL_QUOTE, (_e, quote: string) =>
-    typeof quote === 'string' && quote ? (webPane?.revealQuote(quote) ?? false) : false
+  ipcMain.handle(IPC.WEBPANE_REVEAL_QUOTE, (_e, quote: string, bookmarkId?: string) =>
+    typeof quote === 'string' && quote ? (webPane?.revealQuote(quote, bookmarkId) ?? 'unavailable') : 'not-found'
   )
   ipcMain.handle(IPC.WEBPANE_GET_PAGE_TEXT, () => webPane?.getPageText() ?? '')
   ipcMain.handle(IPC.WEBPANE_SET_BOUNDS, (_e, bounds: WebPaneBounds) => webPane?.setBounds(bounds))

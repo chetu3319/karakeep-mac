@@ -120,6 +120,8 @@ export type { PdfDocumentReader }
 
 /** How long a Study reference flash stays on the page. */
 const REF_FLASH_MS = 1500
+/** Time a smooth scroll to a nearby page is given before the flash starts. */
+const REF_SCROLL_MS = 350
 
 export interface PdfPaneProps {
   assetId: string
@@ -633,19 +635,23 @@ function PdfSurface({
     const geo = geometry.current.get(page0)
     const hasRange = start !== undefined && end !== undefined && end > start
     const rect = hasRange && geo ? rectsWithinSlice(geo, start, end - 1)[0] : undefined
+    // A distant page would be gone before a smooth scroll arrives, so jump
+    // there at once; a near one glides, and the flash starts as it lands.
+    const far = Math.abs(page0 + 1 - currentPageRef.current) > 2
     scrollRef.current?.scrollToPage({
       pageNumber: page0 + 1,
       pageCoordinates: rect ? { x: rect.origin.x, y: rect.origin.y } : undefined,
-      behavior: 'smooth',
+      behavior: far ? 'instant' : 'smooth',
       alignY: 30
     })
     if (refFlashTimer.current) clearTimeout(refFlashTimer.current)
-    if (!hasRange) {
-      setRefFlash(null)
-      return
-    }
-    setRefFlash({ page: page0, from: start, to: end - 1 })
-    refFlashTimer.current = setTimeout(() => setRefFlash(null), REF_FLASH_MS)
+    setRefFlash(null)
+    if (!hasRange) return
+    const delay = far ? 50 : REF_SCROLL_MS
+    refFlashTimer.current = setTimeout(() => {
+      setRefFlash({ page: page0, from: start, to: end - 1 })
+      refFlashTimer.current = setTimeout(() => setRefFlash(null), REF_FLASH_MS)
+    }, delay)
   }, [])
   const revealRangeRef = useRef(revealRange)
   revealRangeRef.current = revealRange

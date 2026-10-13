@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { locatePdfRef } from './revealRef'
+import { applyRevealResult, locatePdfRef } from './revealRef'
 import type { AiRef } from './aiRefs'
 
 const ref = (quote: string, page?: number): AiRef => ({ index: 0, quote, page, figure: false })
@@ -36,5 +36,28 @@ describe('locatePdfRef', () => {
   it('matches a quote hyphenated across a line break', async () => {
     const r = await locatePdfRef(ref('pay attention to this', 2), 2, pagesOf(['x', 'we pay atten-\ntion to this now']))
     expect(r).toMatchObject({ quality: 'exact', page0: 1 })
+  })
+
+  it('normalises each page once across refs when given a cache', async () => {
+    const calls: number[] = []
+    const text = async (i: number) => (calls.push(i), pages[i] ?? '')
+    const cache = new Map()
+    await locatePdfRef(ref('nothing like this', 4), pages.length, text, { cache })
+    const first = calls.length
+    await locatePdfRef(ref('also nothing', 4), pages.length, text, { cache })
+    expect(first).toBe(pages.length)
+    expect(calls.length).toBe(first)
+  })
+})
+
+describe('applyRevealResult', () => {
+  it('keeps the prior quality when the reader or page was not ready', () => {
+    expect(applyRevealResult(undefined, 'unavailable')).toBeUndefined()
+    expect(applyRevealResult('exact', 'unavailable')).toBe('exact')
+    expect(applyRevealResult('approximate', 'unavailable')).toBe('approximate')
+  })
+  it('only a confirmed answer replaces it', () => {
+    expect(applyRevealResult(undefined, 'missing')).toBe('missing')
+    expect(applyRevealResult('missing', 'exact')).toBe('exact')
   })
 })
