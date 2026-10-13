@@ -1,4 +1,5 @@
 import type { PdfDocumentObject, PdfEngine, PdfPageGeometry } from '@embedpdf/models'
+import { findQuote } from '../../../shared/quoteMatch'
 
 /**
  * Anchoring PDF highlights into Karakeep's highlight model.
@@ -192,31 +193,11 @@ function pagesByDistance(from: number, total: number): number[] {
 }
 
 /**
- * Whitespace-insensitive `indexOf` that reports the offset in the *original*
- * string, so the hit can be turned back into glyph indices.
+ * Quote search that reports the offset in the *original* string, so the hit
+ * can be turned back into glyph indices. One matcher, shared with Study's
+ * references (see `findQuote`): it also copes with hyphenated line breaks,
+ * ligatures and curly quotes, which PDF text is full of.
  */
 function indexOfNormalized(haystack: string, needle: string): number {
-  const direct = haystack.indexOf(needle)
-  if (direct >= 0) return direct
-
-  const map: number[] = []
-  let flat = ''
-  let pendingSpace = false
-  for (let i = 0; i < haystack.length; i++) {
-    const ch = haystack[i]
-    if (/\s/.test(ch)) {
-      pendingSpace = flat.length > 0
-      continue
-    }
-    if (pendingSpace) {
-      flat += ' '
-      map.push(i)
-      pendingSpace = false
-    }
-    flat += ch.toLowerCase()
-    map.push(i)
-  }
-
-  const hit = flat.indexOf(normalizeQuote(needle))
-  return hit < 0 ? -1 : map[hit]
+  return findQuote(haystack, needle)?.start ?? -1
 }
