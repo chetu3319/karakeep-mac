@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createPdfDocumentReader } from './pdfDocumentReader'
 
 const tick = (ms = 5): Promise<void> => new Promise((r) => setTimeout(r, ms))
@@ -7,16 +7,18 @@ function pane(pageCount = 3) {
   const state = {
     doc: null as { pageCount: number } | null,
     index: false,
-    page: 1
+    page: 1,
+    failure: null as string | null
   }
   const reader = createPdfDocumentReader(
     {
       getDocument: () => state.doc,
       hasIndex: () => state.index,
       getPageText: async (i) => ` text ${i} `,
-      getCurrentPage: () => state.page
+      getCurrentPage: () => state.page,
+      getFailure: () => state.failure
     },
-    2
+    { pollMs: 2 }
   )
   return { state, reader, pageCount }
 }
@@ -67,5 +69,48 @@ describe('createPdfDocumentReader', () => {
     const pending = reader.getDocumentPages(() => {})
     reader.dispose()
     await expect(pending).rejects.toThrow()
+  })
+
+  it('rejects when the document fails to open', async () => {
+    const { state, reader } = pane()
+    const pending = reader.getDocumentPages(() => {})
+    await tick(10)
+    state.failure = 'The PDF could not be opened'
+    await expect(pending).rejects.toThrow('could not be opened')
+  })
+
+  it('rejects when the text index fails after the document opened', async () => {
+    const { state, reader } = pane()
+    state.doc = { pageCount: 2 }
+    const pending = reader.getDocumentPages(() => {})
+    await tick(10)
+    state.failure = 'The PDF text could not be read'
+    await expect(pending).rejects.toThrow('text could not be read')
+  })
+
+  it('gives up after the timeout as a backstop', async () => {
+    vi.useFakeTimers()
+    try {
+      const reader = createPdfDocumentReader(
+        { getDocument: () => null, hasIndex: () => false, getPageText: async () => '', getCurrentPage: () => 1, getFailure: () => null },
+        { pollMs: 50, timeoutMs: 1000 }
+      )
+      const pending = reader.getDocumentPages(() => {})
+      const assertion = expect(pending).rejects.toThrow('Timed out')
+      await vi.advanceTimersByTimeAsync(1200)
+      await assertion
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('tries again after a failed read', async () => {
+    const { state, reader } = pane()
+    state.failure = 'broken'
+    await expect(reader.getDocumentPages(() => {})).rejects.toThrow('broken')
+    state.failure = null
+    state.doc = { pageCount: 1 }
+    state.index = true
+    expect(await reader.getDocumentPages(() => {})).toHaveLength(1)
   })
 })

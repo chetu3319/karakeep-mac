@@ -21,6 +21,8 @@ export interface PdfPaneSource {
   /** Text of one page, 0-based. */
   getPageText(page: number): Promise<string>
   getCurrentPage(): number
+  /** Why the document can never be read (it failed to open, or its text index failed), or null. */
+  getFailure(): string | null
 }
 
 /**
@@ -28,24 +30,33 @@ export interface PdfPaneSource {
  * as it mounts, which is before the document has opened, so extraction waits
  * for the document and then the text index instead of failing; if the pane's
  * document is swapped part-way it starts over on the new one. `dispose`
- * abandons any read still waiting.
+ * abandons any read still waiting. A read that can never finish (the PDF
+ * failed to open or to index, or nothing happened within `timeoutMs`) rejects
+ * so the caller can carry on without document text.
  */
-export function createPdfDocumentReader(src: PdfPaneSource, pollMs = 50): PdfDocumentReader & { dispose(): void } {
+export function createPdfDocumentReader(
+  src: PdfPaneSource,
+  { pollMs = 50, timeoutMs = 60_000 }: { pollMs?: number; timeoutMs?: number } = {}
+): PdfDocumentReader & { dispose(): void } {
   let disposed = false
   let memo: { promise: Promise<DocPage[]>; listeners: Set<(done: number, total: number) => void> } | null = null
 
-  const waitFor = async (ready: () => boolean): Promise<void> => {
+  const waitFor = async (ready: () => boolean, since: number): Promise<void> => {
     while (!ready()) {
       if (disposed) throw new Error('The PDF pane was closed')
+      const failure = src.getFailure()
+      if (failure) throw new Error(failure)
+      if (Date.now() - since > timeoutMs) throw new Error('Timed out waiting for the PDF')
       await new Promise((r) => setTimeout(r, pollMs))
     }
   }
 
   async function extract(listeners: Set<(done: number, total: number) => void>): Promise<DocPage[]> {
     for (;;) {
-      await waitFor(() => !!src.getDocument())
+      const since = Date.now()
+      await waitFor(() => !!src.getDocument(), since)
       const doc = src.getDocument()!
-      await waitFor(() => src.hasIndex() || src.getDocument() !== doc)
+      await waitFor(() => src.hasIndex() || src.getDocument() !== doc, since)
       if (src.getDocument() !== doc) continue
       const pages: DocPage[] = []
       let swapped = false

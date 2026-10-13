@@ -371,6 +371,9 @@ function PdfSurface({
   const deleteHighlight = useDeleteHighlight()
 
   const [index, setIndex] = useState<PageIndex | null>(null)
+  const [indexFailed, setIndexFailed] = useState(false)
+  const indexFailedRef = useRef(false)
+  indexFailedRef.current = indexFailed
   const [indexing, setIndexing] = useState<{ done: number; total: number } | null>(null)
   const geometry = useRef<Map<number, PdfPageGeometry>>(new Map())
   const pageTextCache = useRef<Map<number, string>>(new Map())
@@ -386,6 +389,7 @@ function PdfSurface({
     if (!doc) return
     let cancelled = false
     setIndex(null)
+    setIndexFailed(false)
     setIndexing({ done: 0, total: doc.pages.length })
     geometry.current = new Map()
     pageTextCache.current = new Map()
@@ -400,7 +404,10 @@ function PdfSurface({
         setIndexing(null)
       })
       .catch(() => {
-        if (!cancelled) setIndexing(null)
+        if (!cancelled) {
+          setIndexing(null)
+          setIndexFailed(true)
+        }
       })
 
     return () => {
@@ -605,6 +612,8 @@ function PdfSurface({
   pageTextRef.current = pageText
   const currentPageRef = useRef(scrollState.currentPage)
   currentPageRef.current = scrollState.currentPage
+  const docStatusRef = useRef(docState?.status)
+  docStatusRef.current = docState?.status
   const docRef = useRef(doc)
   docRef.current = doc
 
@@ -614,7 +623,13 @@ function PdfSurface({
       getDocument: () => docRef.current,
       hasIndex: () => !!indexRef.current,
       getPageText: (page) => pageTextRef.current(page),
-      getCurrentPage: () => currentPageRef.current
+      getCurrentPage: () => currentPageRef.current,
+      getFailure: () =>
+        docStatusRef.current === 'error'
+          ? 'The PDF could not be opened'
+          : indexFailedRef.current
+            ? 'The PDF text could not be read'
+            : null
     })
     onDocumentReader(reader)
     return () => {

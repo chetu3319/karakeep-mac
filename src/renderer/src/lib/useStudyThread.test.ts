@@ -83,6 +83,7 @@ describe('useStudyThread', () => {
     h.rerender({ id: 'A' })
     await waitFor(() => expect(h.result.current.ready).toBe(true))
     expect(texts(h.result.current.thread)).toEqual(['old q', 'old a'])
+    expect(h.result.current.error).toBeNull()
 
     act(() => h.result.current.send('again', ctx()))
     await waitFor(() => expect(requests).toHaveLength(2))

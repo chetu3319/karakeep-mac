@@ -129,6 +129,9 @@ export function useStudyThread(
     setPending([])
     loadedFor.current = null
     seedQueue.current = []
+    // A failure belongs to the bookmark it happened on: coming back later must
+    // not show its error above a chat that was reloaded from disk.
+    if (!inflight.current) setStreamFor(null)
     return () => {
       // Leaving a bookmark (or the pane) pushes its backup now.
       if (bookmarkId) void window.kk.study.flush(bookmarkId)
