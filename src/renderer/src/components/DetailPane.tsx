@@ -143,7 +143,7 @@ export default function DetailPane({
   const display = useMemo(() => (bookmark ? displayForBookmark(bookmark) : null), [bookmark])
   const url = display?.url
 
-  // Grounds the sidebar chat (PageAiDrawer, below) in the bookmark's real
+  // Grounds the Study panel's chat in the bookmark's real
   // content rather than a two-line meta description — see
   // lib/useBookmarkText.ts. Called unconditionally (before the `!bookmark`
   // early return) because it's a hook; `enabled: !!bookmark` inside it makes

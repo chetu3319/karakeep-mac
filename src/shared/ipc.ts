@@ -105,7 +105,7 @@ export const IPC = {
   WEBPANE_IS_ATTACHED: 'webpane:is-attached', // dev/smoke diagnostic — confirms actual detach, not just visual hide
   WEBPANE_APPLY_HIGHLIGHTS: 'webpane:apply-highlights', // re-push highlights without re-navigating
   WEBPANE_FOCUS_HIGHLIGHT: 'webpane:focus-highlight', // scroll a highlight into view in the live page
-  WEBPANE_REVEAL_QUOTE: 'webpane:reveal-quote', // renderer -> main -> page: scroll to and flash a quote; resolves to found
+  WEBPANE_REVEAL_QUOTE: 'webpane:reveal-quote', // renderer -> main -> page: scroll to and flash a quote; resolves to 'found' | 'not-found' | 'unavailable'
   WEBPANE_CAPTURE_REGION: 'webpane:capture-region', // renderer -> main -> page: drag a rectangle; resolves to { imageDataUrl, text } or null
   WEBPANE_CANCEL_CAPTURE: 'webpane:cancel-capture', // renderer -> main -> page: abandon a capture in progress
   // Lets the sidebar chat ground itself in the live page's actual rendered

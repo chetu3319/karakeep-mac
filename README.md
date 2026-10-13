@@ -20,6 +20,15 @@ every highlight synced back to Karakeep.
   wasm and fonts are bundled, so the viewer never reaches out to a CDN.
 - Highlights, notes and colours round-trip through the Karakeep API, so they
   show up in the web app and the browser extension too.
+- **Study panel** (⌥⌘S) — an AI side panel that reads the whole bookmark.
+  Attach selections or captured figure and equation regions, and ask
+  questions. Answers cite the document, and clicking a citation jumps to the
+  passage and flashes it. Chats are saved per bookmark on this Mac and backed
+  up to Karakeep as an attached `karakeep-desktop-study.html`, which reads as a
+  transcript in the Karakeep web app.
+- **Inline answers** — selecting text in the PDF or web pane offers quick AI
+  answers in the selection toolbar (Explain, Define, Math, Ask), and Add to
+  Study or Continue in Study to move the exchange into the panel.
 
 ## Running it
 
@@ -116,12 +125,6 @@ TanStack Query · zod · EmbedPDF/PDFium.
 - The `reference/` directory cited in a few source comments holds verbatim
   copies of the Karakeep browser extension and Raindrop sources that were read
   while building this. It is deliberately not part of this repository.
-- **AI chats are not persisted.** The sidebar co-pilot (`PageAiDrawer`) and the
-  in-situ selection HUD are backed by Gemini, but a conversation lives only in
-  React state and is gone on close, tab switch, or app restart. Karakeep's API
-  has no chat/conversation resource, so persistence would need a local store
-  here, keyed by bookmark id. See the `TODO(ai-chat-persistence)` comment at
-  the top of `src/renderer/src/components/PageAiDrawer.tsx`.
 
 ## Credits
 

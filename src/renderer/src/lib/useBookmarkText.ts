@@ -4,7 +4,7 @@ import type { Bookmark } from '../../../shared/types'
 /**
  * Resolves the best available body of text to ground a sidebar chat in.
  *
- * DetailPane used to hand PageAiDrawer `bookmark.content?.text ||
+ * DetailPane used to hand the sidebar chat `bookmark.content?.text ||
  * bookmark.content?.description || bookmark.title` — for a `link` bookmark
  * (the main use case: someone saved a URL), `content.text` is unset and
  * `description` is a two-line meta description, so "chat with the content

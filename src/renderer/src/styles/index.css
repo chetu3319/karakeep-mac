@@ -1,4 +1,5 @@
-/* KaTeX's own stylesheet (math rendering in the AI Co-Pilot sidebar — see
+/* KaTeX's own stylesheet (math rendering in the Study panel and the selection
+ * toolbar's inline answers — see
  * lib/miniMarkdown.tsx). Imported here rather than as a JS import in
  * main.tsx so Vite treats it like the rest of this file: bundled through
  * PostCSS and emitted as a single hashed asset in out/renderer/assets,
