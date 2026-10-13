@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { StudyMessage } from './study'
 
 // ─────────────────────────── Users ───────────────────────────
 export const UserSchema = z.object({
@@ -274,6 +275,7 @@ export type AiMode =
   | 'meso-page'
   | 'macro-chat'
   | 'custom'
+  | 'study'
 
 export interface AiChatMessage {
   role: 'user' | 'model'
@@ -302,6 +304,13 @@ export interface AiStreamRequest {
   siteName?: string
   author?: string
   docKind?: 'pdf' | 'article' | 'note'
+  // Study mode: the whole document rides in the system instruction, the chat
+  // in `studyMessages`. `paged` says whether `documentText` carries
+  // `[[page N]]` markers.
+  documentText?: string
+  studyMessages?: StudyMessage[]
+  currentPage?: number
+  paged?: boolean
 }
 
 export interface AiStreamChunk {
@@ -317,6 +326,8 @@ export interface AiStreamDone {
 export interface AiStreamError {
   requestId: string
   error: string
+  /** Set when the document was too big for the model, so the caller can retry smaller. */
+  code?: 'too-large'
 }
 
 export interface AiTestResult {

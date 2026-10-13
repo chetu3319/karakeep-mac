@@ -314,7 +314,8 @@ function registerIpc(): void {
       }
       const message = err instanceof Error ? err.message : String(err)
       if (!sender.isDestroyed()) {
-        sender.send(IPC.AI_STREAM_ERROR_EVENT, { requestId: req.requestId, error: message })
+        const code = err instanceof Error ? (err as Error & { code?: 'too-large' }).code : undefined
+        sender.send(IPC.AI_STREAM_ERROR_EVENT, { requestId: req.requestId, error: message, code })
       }
       // No `error` field here — the event above is the single source of
       // truth for stream-in-progress failures. See the comment above this

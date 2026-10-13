@@ -1,6 +1,7 @@
 import { net } from 'electron'
 import { getResolvedAiConfig, setAiConfig } from './store'
 import type { AiStreamRequest, AiTestResult } from '../shared/types'
+import { buildPromptPayload } from './aiPrompt'
 
 // Gemini 3.x generation config is a breaking change from 2.5: `temperature`,
 // `topP`, `topK` and `candidateCount` are deprecated/unsupported on the 3.x
@@ -25,6 +26,7 @@ function thinkingLevelFor(mode: AiStreamRequest['mode']): ThinkingLevel {
     case 'micro-define':
     case 'micro-formula':
       return 'low'
+    case 'study':
     default:
       return 'medium'
   }
@@ -45,6 +47,7 @@ function maxOutputTokensFor(mode: AiStreamRequest['mode']): number {
     case 'micro-define':
     case 'micro-formula':
       return 2048
+    case 'study':
     default:
       return 8192
   }
@@ -124,7 +127,7 @@ export class GeminiAiService {
     this.activeStreams.set(req.requestId, controller)
 
     try {
-      const { systemInstruction, contents } = this.buildPromptPayload(req)
+      const { systemInstruction, contents } = buildPromptPayload(req)
 
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`
 
@@ -153,7 +156,13 @@ export class GeminiAiService {
         } catch {
           // ignore
         }
-        throw new Error(message)
+        const error = new Error(message) as Error & { code?: 'too-large' }
+        // Study sends the whole document, so the one failure the caller can
+        // act on is "too big": it retries once at half the budget.
+        if (res.status === 400 && /token|context|too (long|large)|exceed/i.test(message)) {
+          error.code = 'too-large'
+        }
+        throw error
       }
 
       if (!res.body) {
@@ -233,113 +242,6 @@ export class GeminiAiService {
     } finally {
       this.activeStreams.delete(req.requestId)
     }
-  }
-
-  private buildPromptPayload(req: AiStreamRequest): {
-    systemInstruction: string
-    userPrompt: string
-    contents: Array<{ role: string; parts: Array<{ text: string }> }>
-  } {
-    // "Paper" only fits a small slice of what this app now grounds chats
-    // in — the same prompt runs against blog posts and the user's own
-    // notes, where "the authors" and "this paper" read as obviously wrong.
-    // `docKind` picks the noun that actually matches the surface the mode
-    // was invoked from; PDF bookmarks are still overwhelmingly papers, so
-    // that stays the default when the caller didn't say.
-    const noun = req.docKind === 'note' ? 'note' : req.docKind === 'article' ? 'article' : 'paper'
-    const authorNoun = noun === 'paper' ? 'the authors' : noun === 'note' ? 'the note' : 'the author'
-
-    let systemInstruction =
-      'You are an expert AI research co-pilot integrated directly into a flow-preserving document reader. ' +
-      'Your goal is to maintain the reader\'s deep flow state and comprehension. ' +
-      'Be direct, crisp, and intellectually rigorous. Use clear formatting and bullet points where helpful. Avoid generic fluff.'
-
-    const contextSnippets: string[] = []
-    if (req.docTitle) {
-      contextSnippets.push(`Document Title: "${req.docTitle}"`)
-    }
-    // Source/site metadata the product spec calls "website/source info" —
-    // gives the model enough to judge register, authority and intent (a
-    // corporate blog post reads differently than an arxiv preprint) without
-    // spending a whole extra round trip on it.
-    const sourceParts: string[] = []
-    if (req.siteName) sourceParts.push(`Site: ${req.siteName}`)
-    if (req.author) sourceParts.push(`Author: ${req.author}`)
-    if (req.sourceUrl) sourceParts.push(`URL: ${req.sourceUrl}`)
-    if (sourceParts.length) {
-      contextSnippets.push(`Source: ${sourceParts.join(' | ')}`)
-    }
-    if (req.pageText) {
-      contextSnippets.push(`--- Active Page / Section Content ---\n${req.pageText}\n--- End Page Content ---`)
-    }
-    if (req.surroundingContext) {
-      contextSnippets.push(`--- Immediate Surrounding Paragraph ---\n${req.surroundingContext}\n--- End Paragraph ---`)
-    }
-
-    let userPrompt = ''
-
-    switch (req.mode) {
-      case 'micro-dejargon':
-        systemInstruction +=
-          `\nTask: De-jargon and simplify the selected text from this ${noun}. Rewrite it in plain, crystal-clear English while strictly preserving technical precision. Return the concise plain-English explanation immediately.`
-        userPrompt = `${contextSnippets.join('\n\n')}\n\nSelected Text to Simplify:\n"${req.selectionText || ''}"`
-        break
-
-      case 'micro-explain':
-        systemInstruction +=
-          `\nTask: Explain the selected text strictly in the context of this ${noun}: what it means here, why ${authorNoun} say it, and how it connects to the surrounding argument. Keep it under 3-4 sentences.`
-        userPrompt = `${contextSnippets.join('\n\n')}\n\nSelected Text to Explain:\n"${req.selectionText || ''}"`
-        break
-
-      case 'micro-define':
-        systemInstruction +=
-          `\nTask: Give a tight definition of the highlighted term. Cover both its general meaning and, if different, the specific sense it carries in this ${noun}. Keep it under 2-3 sentences.`
-        userPrompt = `${contextSnippets.join('\n\n')}\n\nTerm to Define:\n"${req.selectionText || ''}"`
-        break
-
-      case 'micro-formula':
-        systemInstruction +=
-          `\nTask: Mathematical and formula breakdown. Unpack the mathematical notation step-by-step:\n1. Core intuition (what is this computing?)\n2. Variable breakdown (what each symbol represents)\n3. Why this formula is used here in the ${noun}.`
-        userPrompt = `${contextSnippets.join('\n\n')}\n\nEquation / Math Notation to Decode:\n"${req.selectionText || ''}"`
-        break
-
-      case 'meso-page':
-        systemInstruction +=
-          '\nTask: Answer questions specifically grounded in the active page / section text. Be accurate, cite specifics from the page, and explain figures or tables if referenced.'
-        userPrompt = `${contextSnippets.join('\n\n')}\n\nUser Question:\n${req.prompt || 'Summarize the core idea and key takeaways of this page in 3 clear bullet points.'}`
-        break
-
-      case 'macro-chat':
-      case 'custom':
-      default:
-        userPrompt = `${contextSnippets.join('\n\n')}`
-        if (req.selectionText) {
-          userPrompt += `\n\nSelected Text:\n"${req.selectionText}"`
-        }
-        if (req.prompt) {
-          userPrompt += `\n\nQuestion / Request:\n${req.prompt}`
-        }
-        break
-    }
-
-    const contents: Array<{ role: string; parts: Array<{ text: string }> }> = []
-
-    // Append prior chat history if provided
-    if (req.history && req.history.length > 0) {
-      for (const h of req.history) {
-        contents.push({
-          role: h.role === 'user' ? 'user' : 'model',
-          parts: [{ text: h.text }]
-        })
-      }
-    }
-
-    contents.push({
-      role: 'user',
-      parts: [{ text: userPrompt }]
-    })
-
-    return { systemInstruction, userPrompt, contents }
   }
 }
 
