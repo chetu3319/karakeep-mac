@@ -42,6 +42,18 @@ import {
 import type { Highlight } from '../../../shared/types'
 import type { StudyAttachment, StudyMessage } from '../../../shared/study'
 import { createPdfDocumentReader, type PdfDocumentReader } from '../lib/pdfDocumentReader'
+import {
+  glyphSpansInRect,
+  isTinyDrag,
+  pickPage,
+  rectFromPoints,
+  regionLabel,
+  renderScaleFor,
+  screenToPageRect,
+  tidyRegionText,
+  type PageBox,
+  type PxRect
+} from '../../../shared/regionCapture'
 import { useCreateHighlight, useDeleteHighlight, useUpdateHighlight } from '../lib/queries'
 import { useIsDark, usePref } from '../lib/prefs'
 import InlineAnswer from './InlineAnswer'
@@ -648,6 +660,99 @@ function PdfSurface({
   const revealRangeRef = useRef(revealRange)
   revealRangeRef.current = revealRange
 
+  // ── Region capture ──────────────────────────────────────────────────────
+  // The user drags a rectangle over a figure or equation. The drag is in
+  // client pixels; it is mapped onto the page it covers most, rendered by the
+  // engine (sharp for the display, long side capped) and read for text from
+  // the page geometry that anchoring already caches.
+  const [capturing, setCapturing] = useState(false)
+  const captureResolve = useRef<((a: StudyAttachment | null) => void) | null>(null)
+  const engineRef = useRef(engine)
+  engineRef.current = engine
+
+  const cancelRegionCapture = useCallback(() => {
+    const resolve = captureResolve.current
+    captureResolve.current = null
+    setCapturing(false)
+    resolve?.(null)
+  }, [])
+
+  const startRegionCapture = useCallback((): Promise<StudyAttachment | null> => {
+    captureResolve.current?.(null)
+    return new Promise((resolve) => {
+      captureResolve.current = resolve
+      setCapturing(true)
+    })
+  }, [])
+  const startRegionCaptureRef = useRef(startRegionCapture)
+  startRegionCaptureRef.current = startRegionCapture
+  const cancelRegionCaptureRef = useRef(cancelRegionCapture)
+  cancelRegionCaptureRef.current = cancelRegionCapture
+  useEffect(() => () => cancelRegionCaptureRef.current(), [])
+
+  const finishRegionCapture = useCallback(async (drag: PxRect | null) => {
+    const resolve = captureResolve.current
+    captureResolve.current = null
+    setCapturing(false)
+    if (!resolve) return
+    try {
+      const pdf = docRef.current
+      if (!drag || isTinyDrag(drag) || !pdf) return resolve(null)
+      const pages: PageBox[] = Array.from(document.querySelectorAll<HTMLElement>('[data-pdf-page]')).flatMap((el) => {
+        const page = Number(el.dataset.pdfPage)
+        const size = pdf.pages[page]?.size
+        if (!Number.isFinite(page) || !size) return []
+        const b = el.getBoundingClientRect()
+        return [{ page, box: { x: b.left, y: b.top, width: b.width, height: b.height }, pageWidth: size.width }]
+      })
+      const target = pickPage(drag, pages)
+      const area = target && screenToPageRect(drag, target)
+      if (!target || !area || isTinyDrag({ width: area.width * area.scale, height: area.height * area.scale })) {
+        return resolve(null)
+      }
+      const pageObj = pdf.pages[target.page]
+      const eng = engineRef.current
+      // A figure read at a low zoom would be blurry for the model; floor the
+      // scale at 1.5 render px per page unit.
+      const scaleFactor = renderScaleFor(area.width, area.height, Math.max(area.scale, 1.5), window.devicePixelRatio || 1)
+      const blob = await eng
+        .renderPageRect(
+          pdf,
+          pageObj,
+          { origin: { x: area.x, y: area.y }, size: { width: area.width, height: area.height } },
+          { scaleFactor, dpr: 1, imageType: 'image/png', withAnnotations: true }
+        )
+        .toPromise()
+      const imageDataUrl = await new Promise<string>((ok, fail) => {
+        const reader = new FileReader()
+        reader.onload = () => ok(String(reader.result))
+        reader.onerror = () => fail(reader.error)
+        reader.readAsDataURL(blob as Blob)
+      })
+      let text = ''
+      const geo = geometry.current.get(target.page)
+      if (geo) {
+        const spans = glyphSpansInRect(geo.runs, area).map((sp) => ({ page: target.page, from: sp.from, to: sp.to }))
+        try {
+          text = tidyRegionText(await textForSpans(eng, pdf, spans))
+        } catch {
+          text = ''
+        }
+      }
+      const page = target.page + 1
+      resolve({
+        kind: 'region',
+        label: regionLabel(text, page),
+        page,
+        rect: { x: area.x, y: area.y, width: area.width, height: area.height },
+        text: text || undefined,
+        imageDataUrl
+      })
+    } catch {
+      resolve(null)
+    }
+  }, [])
+
   useEffect(() => {
     if (!onDocumentReader) return
     const reader = createPdfDocumentReader({
@@ -656,6 +761,8 @@ function PdfSurface({
       getPageText: (page) => pageTextRef.current(page),
       getCurrentPage: () => currentPageRef.current,
       reveal: (page0, start, end) => revealRangeRef.current(page0, start, end),
+      startRegionCapture: () => startRegionCaptureRef.current(),
+      cancelRegionCapture: () => cancelRegionCaptureRef.current(),
       getFailure: () =>
         docStatusRef.current === 'error'
           ? 'The PDF could not be opened'
@@ -1232,7 +1339,7 @@ function PdfSurface({
       )}
 
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-        <div ref={pinchHostRef} className="h-full min-h-0 min-w-0 flex-1">
+        <div ref={pinchHostRef} className="relative h-full min-h-0 min-w-0 flex-1">
           <Viewport
             documentId={documentId}
             className={`h-full w-full overflow-auto ${
@@ -1246,6 +1353,13 @@ function PdfSurface({
               <Scroller documentId={documentId} renderPage={renderPage} />
             </GlobalPointerProvider>
           </Viewport>
+          {capturing && (
+            <RegionCaptureOverlay
+              onDone={(r) => void finishRegionCapture(r)}
+              onCancel={cancelRegionCapture}
+              scrollHost={pinchHostRef.current?.firstElementChild ?? null}
+            />
+          )}
         </div>
 
       </div>
@@ -1265,6 +1379,88 @@ function PdfSurface({
         />
       )}
     </>
+  )
+}
+
+/** Crosshair over the page area: drag a rectangle, Esc or a tiny drag cancels. */
+function RegionCaptureOverlay({
+  onDone,
+  onCancel,
+  scrollHost
+}: {
+  onDone: (drag: PxRect) => void
+  onCancel: () => void
+  scrollHost: Element | null
+}): React.JSX.Element {
+  const [drag, setDrag] = useState<{ from: { x: number; y: number }; rect: PxRect } | null>(null)
+  const hostRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      onCancel()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [onCancel])
+
+  // The overlay sits above the viewport, so the wheel has to be handed on to
+  // keep the document scrollable while aiming.
+  useEffect(() => {
+    const el = hostRef.current
+    if (!el || !scrollHost) return
+    const onWheel = (e: WheelEvent): void => {
+      e.preventDefault()
+      scrollHost.scrollBy({ left: e.deltaX, top: e.deltaY })
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [scrollHost])
+
+  const bounds = (): DOMRect | undefined => hostRef.current?.getBoundingClientRect()
+
+  return (
+    <div
+      ref={hostRef}
+      data-testid="region-capture-overlay"
+      className="absolute inset-0 z-30 select-none bg-black/10"
+      style={{ cursor: 'crosshair', touchAction: 'none' }}
+      onContextMenu={(e) => e.preventDefault()}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return
+        e.preventDefault()
+        e.currentTarget.setPointerCapture(e.pointerId)
+        setDrag({ from: { x: e.clientX, y: e.clientY }, rect: rectFromPoints(e.clientX, e.clientY, e.clientX, e.clientY) })
+      }}
+      onPointerMove={(e) => {
+        if (drag) setDrag({ from: drag.from, rect: rectFromPoints(drag.from.x, drag.from.y, e.clientX, e.clientY) })
+      }}
+      onPointerUp={(e) => {
+        if (!drag) return
+        const rect = rectFromPoints(drag.from.x, drag.from.y, e.clientX, e.clientY)
+        setDrag(null)
+        if (isTinyDrag(rect)) onCancel()
+        else onDone(rect)
+      }}
+      onPointerCancel={onCancel}
+    >
+      <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-md bg-neutral-900/80 px-2.5 py-1 text-xs text-neutral-100">
+        Drag over a figure or equation. Esc to cancel.
+      </div>
+      {drag && (
+        <div
+          className="pointer-events-none absolute rounded-sm border-[1.5px] border-emerald-500 bg-emerald-500/15"
+          style={{
+            left: drag.rect.x - (bounds()?.left ?? 0),
+            top: drag.rect.y - (bounds()?.top ?? 0),
+            width: drag.rect.width,
+            height: drag.rect.height
+          }}
+        />
+      )}
+    </div>
   )
 }
 

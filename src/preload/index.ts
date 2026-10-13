@@ -209,6 +209,11 @@ const api = {
     // Reads document.body.innerText out of the live WebContentsView — see
     revealQuote: (quote: string, bookmarkId?: string): Promise<'found' | 'not-found' | 'unavailable'> =>
       ipcRenderer.invoke(IPC.WEBPANE_REVEAL_QUOTE, quote, bookmarkId),
+    // Drag a rectangle over the live page; resolves to the PNG and the page
+    // text under it, or null when cancelled (Esc, a tiny drag, navigation).
+    captureRegion: (): Promise<{ imageDataUrl: string; text: string } | null> =>
+      ipcRenderer.invoke(IPC.WEBPANE_CAPTURE_REGION),
+    cancelCapture: (): Promise<void> => ipcRenderer.invoke(IPC.WEBPANE_CANCEL_CAPTURE),
     // main/webpane.ts's getPageText(). Used by lib/useBookmarkText.ts to
     // ground the sidebar chat in the actual rendered page rather than only
     // whatever Karakeep's crawler captured at save time.

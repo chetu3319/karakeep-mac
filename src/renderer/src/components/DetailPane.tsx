@@ -405,6 +405,41 @@ export default function DetailPane({
   // has focus. Whether ⌘F means "find here" or "search the library" depends
   // on whether a reader is showing, which only this component knows.
   const readerOpen = !!bookmark && ((tab === 'pdf' && !!pdfAssetId) || (tab === 'web' && !!url))
+  // ── Region capture ─────────────────────────────────────────────────────
+  // Drag a rectangle over a figure or equation and it becomes an image chip in
+  // Study. On a PDF the crosshair is a React overlay on the pages; on the web
+  // the native view covers this UI, so it lives in the page itself.
+  const [capturing, setCapturing] = useState(false)
+  const captureTokenRef = useRef(0)
+  const cancelCapture = useCallback(() => {
+    captureTokenRef.current++
+    setCapturing(false)
+    pdfReaderRef.current?.cancelRegionCapture()
+    void window.kk.webpane.cancelCapture().catch(() => {})
+  }, [])
+  const startCapture = useCallback(async () => {
+    if (capturing) return cancelCapture()
+    const token = ++captureTokenRef.current
+    setCapturing(true)
+    try {
+      let a: StudyAttachment | null = null
+      if (tab === 'pdf') {
+        a = (await pdfReaderRef.current?.startRegionCapture()) ?? null
+      } else if (tab === 'web') {
+        const r = await window.kk.webpane.captureRegion()
+        if (r) a = { kind: 'region', label: 'Region', rect: { x: 0, y: 0, width: 0, height: 0 }, text: r.text || undefined, imageDataUrl: r.imageDataUrl }
+      }
+      if (a && token === captureTokenRef.current) onStudyAttach(a)
+    } catch {
+      // A failed capture just leaves nothing attached.
+    } finally {
+      if (token === captureTokenRef.current) setCapturing(false)
+    }
+  }, [capturing, tab, cancelCapture, onStudyAttach])
+  // Leaving the tab or bookmark abandons a crosshair that is still up.
+  useEffect(() => cancelCapture, [tab, bookmark?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  const canCapture = tab === 'pdf' ? !!pdfAssetId && !!pdfReader : tab === 'web' && !!url
+
   const [findOpen, setFindOpen] = useState(false)
   const [findFocusSignal, setFindFocusSignal] = useState(0)
   const [findStep, setFindStep] = useState<FindStep | null>(null)
@@ -651,6 +686,22 @@ export default function DetailPane({
           >
             <Icon name="study" size={14} />
             <span>Study</span>
+          </button>
+          <button
+            type="button"
+            data-testid="detail-capture-region"
+            onClick={() => void startCapture()}
+            disabled={!capturing && !canCapture}
+            aria-pressed={capturing}
+            title={capturing ? 'Cancel capture (Esc)' : 'Capture region: drag over a figure or equation to ask about it'}
+            className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition disabled:opacity-40 ${
+              capturing
+                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                : 'text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-neutral-800'
+            }`}
+          >
+            <Icon name="region" size={14} />
+            <span>Capture region</span>
           </button>
           <button
             type="button"

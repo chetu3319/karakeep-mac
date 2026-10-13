@@ -123,3 +123,24 @@ describe('createPdfDocumentReader', () => {
     expect(await ready).toEqual({ pageCount: 4 })
   })
 })
+
+describe('region capture on the reader', () => {
+  const src = (extra: object) => ({
+    getDocument: () => null,
+    hasIndex: () => false,
+    getPageText: async () => '',
+    getCurrentPage: () => 1,
+    getFailure: () => null,
+    ...extra
+  })
+
+  it('hands capture to the pane and resolves null when the pane has none', async () => {
+    const att = { kind: 'region' as const, label: 'Region · p.1', rect: { x: 0, y: 0, width: 1, height: 1 } }
+    const cancel = vi.fn()
+    const live = createPdfDocumentReader(src({ startRegionCapture: async () => att, cancelRegionCapture: cancel }))
+    expect(await live.startRegionCapture()).toBe(att)
+    live.cancelRegionCapture()
+    expect(cancel).toHaveBeenCalled()
+    expect(await createPdfDocumentReader(src({})).startRegionCapture()).toBeNull()
+  })
+})

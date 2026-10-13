@@ -106,6 +106,8 @@ export const IPC = {
   WEBPANE_APPLY_HIGHLIGHTS: 'webpane:apply-highlights', // re-push highlights without re-navigating
   WEBPANE_FOCUS_HIGHLIGHT: 'webpane:focus-highlight', // scroll a highlight into view in the live page
   WEBPANE_REVEAL_QUOTE: 'webpane:reveal-quote', // renderer -> main -> page: scroll to and flash a quote; resolves to found
+  WEBPANE_CAPTURE_REGION: 'webpane:capture-region', // renderer -> main -> page: drag a rectangle; resolves to { imageDataUrl, text } or null
+  WEBPANE_CANCEL_CAPTURE: 'webpane:cancel-capture', // renderer -> main -> page: abandon a capture in progress
   // Lets the sidebar chat ground itself in the live page's actual rendered
   // text (see lib/useBookmarkText.ts) instead of only the crawled snapshot
   // Karakeep stored at save time, which for a link bookmark can be stale or
@@ -132,6 +134,9 @@ export const WEBPANE_IPC = {
   STATUS: 'kk:highlight-status', // webpane -> main: anchored / missing ids
   REVEAL_QUOTE: 'kk:reveal-quote', // main -> webpane: { requestId, quote }
   REVEAL_RESULT: 'kk:reveal-result', // webpane -> main: { requestId, found }
+  CAPTURE_START: 'kk:capture-start', // main -> webpane: { requestId } show the crosshair
+  CAPTURE_CANCEL: 'kk:capture-cancel', // main -> webpane: remove the crosshair
+  CAPTURE_RESULT: 'kk:capture-result', // webpane -> main: { requestId, rect | null, text } rect in viewport CSS px
   STUDY_ATTACH: 'kk:study-attach', // webpane -> main: StudyAttachment (the selection as a chip)
   STUDY_CONTINUE: 'kk:study-continue' // webpane -> main: StudyMessage[] (an inline answer to continue)
 } as const

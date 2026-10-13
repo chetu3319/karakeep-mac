@@ -1,3 +1,4 @@
+import type { StudyAttachment } from '../../../shared/study'
 import type { DocPage } from './studyContext'
 
 /** What Study needs from an open PDF: every page's text, and where the reader is. */
@@ -19,6 +20,14 @@ export interface PdfDocumentReader {
   getPageText(page0: number): Promise<string>
   /** Scrolls to a page (0-based) and, given a character range of its text, flashes it. Never saves anything. */
   reveal(page0: number, start?: number, end?: number): void
+  /**
+   * Lets the user drag a rectangle over a page. Resolves to a region
+   * attachment (image, page, rect, text under it), or null when cancelled
+   * or the capture could not be made. A second call cancels the first.
+   */
+  startRegionCapture(): Promise<StudyAttachment | null>
+  /** Abandons a capture in progress (its promise resolves null). */
+  cancelRegionCapture(): void
 }
 
 /** The live state of a PDF pane, read when it is needed rather than captured. */
@@ -34,6 +43,8 @@ export interface PdfPaneSource {
   getFailure(): string | null
   /** Scroll to a page and flash a character range of its text. */
   reveal?(page0: number, start?: number, end?: number): void
+  startRegionCapture?(): Promise<StudyAttachment | null>
+  cancelRegionCapture?(): void
 }
 
 /**
@@ -118,6 +129,8 @@ export function createPdfDocumentReader(
     },
     getPageText: (page0) => src.getPageText(page0),
     reveal: (page0, start, end) => src.reveal?.(page0, start, end),
+    startRegionCapture: () => src.startRegionCapture?.() ?? Promise.resolve(null),
+    cancelRegionCapture: () => src.cancelRegionCapture?.(),
     dispose() {
       disposed = true
     }

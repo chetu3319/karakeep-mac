@@ -35,6 +35,7 @@ import { IPC, WEBPANE_IPC } from '../shared/ipc'
 import { buildContinueMessages, textAttachment, type InlineMode } from '../shared/inlineAnswer'
 import { findQuote } from '../shared/quoteMatch'
 import { markdownSegments } from '../shared/safeMarkdown'
+import { MAX_REGION_TEXT, isTinyDrag, rectFromPoints, rectsIntersect, type PxRect } from '../shared/regionCapture'
 
 const HIGHLIGHT_CLASS = 'karakeep-hl'
 const OVERLAY_HOST_ID = 'karakeep-hl-overlay'
@@ -1883,6 +1884,132 @@ function karakeepInit(): void {
   }
   window.addEventListener('scroll', queueReposition, true)
   window.addEventListener('resize', queueReposition)
+
+
+  // ───────────────────────── region capture ─────────────────────────
+  // A crosshair the user drags over a figure or equation. The native view
+  // covers the React UI, so this has to live in the page. It is built from
+  // elements and inline styles only (no page or model text ever reaches it),
+  // inside the same closed shadow root as the toolbar. Esc, a drag under 8px
+  // or a navigation cancels; the main process takes the picture, so the layer
+  // is removed first and the rectangle is reported in viewport CSS px.
+
+  let captureLayer: { el: HTMLElement; stop: () => void; requestId: string } | null = null
+
+  function endCapture(): void {
+    if (!captureLayer) return
+    const layer = captureLayer
+    captureLayer = null
+    layer.stop()
+  }
+
+  /** Text of the nodes drawn inside `area`, in document order, bounded. */
+  function textWithin(area: PxRect): string {
+    const root = document.body
+    if (!root) return ''
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+    const range = document.createRange()
+    const parts: string[] = []
+    let length = 0
+    let visited = 0
+    let n: Node | null
+    while ((n = walker.nextNode()) && length < MAX_REGION_TEXT && visited++ < 40000) {
+      const value = n.textContent
+      const parent = n.parentElement
+      if (!value || !value.trim() || !parent) continue
+      if (SKIP_TAGS.has(parent.tagName.toUpperCase()) || parent.closest(`#${OVERLAY_HOST_ID}`)) continue
+      range.selectNodeContents(n)
+      const bounds = range.getBoundingClientRect()
+      if (!rectsIntersect(area, { x: bounds.left, y: bounds.top, width: bounds.width, height: bounds.height })) continue
+      const rects = Array.from(range.getClientRects())
+      if (!rects.some((r) => rectsIntersect(area, { x: r.left, y: r.top, width: r.width, height: r.height }))) continue
+      parts.push(value.trim())
+      length += value.length + 1
+    }
+    return parts.join(' ').replace(/\s+/g, ' ').trim().slice(0, MAX_REGION_TEXT)
+  }
+
+  function startCapture(requestId: string): void {
+    endCapture()
+    closePopover()
+    const { root } = ensureOverlay()
+    const layer = document.createElement('div')
+    layer.style.cssText =
+      'position: fixed; inset: 0; cursor: crosshair; pointer-events: auto; background: rgba(0,0,0,0.12); touch-action: none; user-select: none;'
+    const box = document.createElement('div')
+    box.style.cssText =
+      'position: fixed; display: none; box-sizing: border-box; border: 1.5px solid #10b981; background: rgba(16,185,129,0.14); border-radius: 2px; pointer-events: none;'
+    layer.appendChild(box)
+    root.appendChild(layer)
+
+    let start: { x: number; y: number } | null = null
+    let rect: PxRect | null = null
+
+    const draw = (): void => {
+      if (!rect) return
+      box.style.display = 'block'
+      box.style.left = rect.x + 'px'
+      box.style.top = rect.y + 'px'
+      box.style.width = rect.width + 'px'
+      box.style.height = rect.height + 'px'
+    }
+    const report = (r: PxRect | null): void => {
+      const text = r ? textWithin(r) : ''
+      sendHost(WEBPANE_IPC.CAPTURE_RESULT, { requestId, rect: r, text })
+    }
+    const finish = (r: PxRect | null): void => {
+      endCapture()
+      if (!r) return report(null)
+      // Two frames: the layer is gone from what the compositor shows before
+      // the main process photographs the view.
+      requestAnimationFrame(() => requestAnimationFrame(() => report(r)))
+    }
+    const onDown = (e: PointerEvent): void => {
+      if (e.button !== 0) return
+      e.preventDefault()
+      layer.setPointerCapture?.(e.pointerId)
+      start = { x: e.clientX, y: e.clientY }
+      rect = rectFromPoints(start.x, start.y, e.clientX, e.clientY)
+      draw()
+    }
+    const onMove = (e: PointerEvent): void => {
+      if (!start) return
+      rect = rectFromPoints(start.x, start.y, e.clientX, e.clientY)
+      draw()
+    }
+    const onUp = (e: PointerEvent): void => {
+      if (!start) return
+      rect = rectFromPoints(start.x, start.y, e.clientX, e.clientY)
+      const r = rect
+      start = null
+      finish(isTinyDrag(r) ? null : r)
+    }
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      finish(null)
+    }
+    layer.addEventListener('pointerdown', onDown)
+    layer.addEventListener('pointermove', onMove)
+    layer.addEventListener('pointerup', onUp)
+    layer.addEventListener('pointercancel', () => finish(null))
+    layer.addEventListener('contextmenu', (e) => e.preventDefault())
+    window.addEventListener('keydown', onKey, true)
+    captureLayer = {
+      el: layer,
+      requestId,
+      stop: () => {
+        window.removeEventListener('keydown', onKey, true)
+        layer.remove()
+      }
+    }
+  }
+
+  ipcRenderer.on(WEBPANE_IPC.CAPTURE_START, (_e, req: { requestId?: string }) => {
+    if (typeof req?.requestId === 'string') startCapture(req.requestId)
+  })
+  ipcRenderer.on(WEBPANE_IPC.CAPTURE_CANCEL, () => endCapture())
 
   ipcRenderer.on('kk:apply', (_e, highlights: StoredHighlight[]) => {
     ensureStyles()

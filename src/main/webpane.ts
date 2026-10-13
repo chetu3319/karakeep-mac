@@ -10,9 +10,14 @@ import { IPC, WEBPANE_IPC } from '../shared/ipc'
 import type { WebPaneBounds, WebPaneFindResult, WebPaneState } from '../shared/types'
 import { sanitizeStudyAttachment, sanitizeStudyMessages } from '../shared/studyPayload'
 import { lockPageZoom } from './zoomLock'
+import { MAX_CAPTURE_SIDE, fitLongSide, isTinyDrag, tidyRegionText } from '../shared/regionCapture'
 
 /** Longest a quote reveal waits for the page to exist, load and answer. */
 const REVEAL_BUDGET_MS = 10_000
+/** A crosshair nobody finishes should not hold the pane forever. */
+const CAPTURE_BUDGET_MS = 120_000
+/** Lets the page repaint without the crosshair before it is photographed. */
+const CAPTURE_SETTLE_MS = 90
 const WEBPANE_PRELOAD = join(__dirname, '../preload/webpane.mjs')
 
 export class WebPaneManager {
@@ -22,6 +27,7 @@ export class WebPaneManager {
   private currentBookmarkId: string | null = null
   private pendingHighlights: unknown[] = []
   private pendingReveals = new Map<string, (result: 'found' | 'not-found' | 'unavailable') => void>()
+  private pendingCapture: { requestId: string; finish: (r: { imageDataUrl: string; text: string } | null) => void } | null = null
   private onHighlightEvent: (type: 'created' | 'updated' | 'removed', payload: unknown, bookmarkId: string | null) => void
 
   constructor(
@@ -98,6 +104,7 @@ export class WebPaneManager {
       if (details.isMainFrame && !details.isSameDocument) {
         this.stopFind()
         this.abandonReveals()
+        this.cancelCapture()
       }
     })
     wc.on('page-title-updated', () => pushState())
@@ -138,6 +145,15 @@ export class WebPaneManager {
       const done = this.pendingReveals.get(payload?.requestId)
       if (done) done(payload.found === true ? 'found' : 'not-found')
     })
+    ipcMain.on(
+      WEBPANE_IPC.CAPTURE_RESULT,
+      (e, payload: { requestId?: string; rect?: unknown; text?: unknown } | null) => {
+        if (!fromThisView(e.sender.id)) return
+        const pending = this.pendingCapture
+        if (!pending || pending.requestId !== payload?.requestId) return
+        void this.finishCapture(pending, payload?.rect, payload?.text)
+      }
+    )
     // The page's preload is next to untrusted page code, so these payloads are
     // reduced to the expected fields and capped before the renderer sees them.
     ipcMain.on(WEBPANE_IPC.STUDY_ATTACH, (e, payload: unknown) => {
@@ -249,6 +265,89 @@ export class WebPaneManager {
     })
   }
 
+  /**
+   * Lets the user drag a rectangle over the live page and returns it as a PNG
+   * (long side at most MAX_CAPTURE_SIDE) with the text under it. The crosshair
+   * lives in the page's preload because the native view covers the React UI.
+   * Null when cancelled, abandoned (navigation, destroy, a newer capture) or
+   * the page could not be captured.
+   */
+  async captureRegion(): Promise<{ imageDataUrl: string; text: string } | null> {
+    this.cancelCapture()
+    const wc = this.view && !this.view.webContents.isDestroyed() ? this.view.webContents : null
+    if (!wc || !this.attached || wc.isLoading()) return null
+    const requestId = `cp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    return new Promise((resolve) => {
+      const finish = (r: { imageDataUrl: string; text: string } | null): void => {
+        clearTimeout(timer)
+        if (this.pendingCapture?.requestId === requestId) this.pendingCapture = null
+        resolve(r)
+      }
+      const timer = setTimeout(() => {
+        this.cancelCapture()
+      }, CAPTURE_BUDGET_MS)
+      this.pendingCapture = { requestId, finish }
+      // Keys (Esc) go to whichever view has focus, which must be the page.
+      wc.focus()
+      wc.send(WEBPANE_IPC.CAPTURE_START, { requestId })
+    })
+  }
+
+  /** Removes the crosshair and resolves any waiting capture with null. */
+  cancelCapture(): void {
+    const pending = this.pendingCapture
+    if (!pending) return
+    this.pendingCapture = null
+    pending.finish(null)
+    const wc = this.view
+    if (wc && !wc.webContents.isDestroyed()) wc.webContents.send(WEBPANE_IPC.CAPTURE_CANCEL)
+  }
+
+  private async finishCapture(
+    pending: NonNullable<WebPaneManager['pendingCapture']>,
+    rawRect: unknown,
+    rawText: unknown
+  ): Promise<void> {
+    const wc = this.view && !this.view.webContents.isDestroyed() ? this.view.webContents : null
+    const r = rawRect as { x?: unknown; y?: unknown; width?: unknown; height?: unknown } | null
+    if (!wc || !r || ![r.x, r.y, r.width, r.height].every((n) => typeof n === 'number' && Number.isFinite(n))) {
+      pending.finish(null)
+      return
+    }
+    // The page reports viewport CSS px; capturePage takes the same, in DIP.
+    // Page zoom is pinned at 0, but scale by the factor in case it is not.
+    const zoom = wc.getZoomFactor() || 1
+    const box = {
+      x: Math.round((r.x as number) * zoom),
+      y: Math.round((r.y as number) * zoom),
+      width: Math.max(1, Math.round((r.width as number) * zoom)),
+      height: Math.max(1, Math.round((r.height as number) * zoom))
+    }
+    if (isTinyDrag(box)) {
+      pending.finish(null)
+      return
+    }
+    await new Promise((res) => setTimeout(res, CAPTURE_SETTLE_MS))
+    if (this.pendingCapture !== pending || wc.isDestroyed()) {
+      pending.finish(null)
+      return
+    }
+    try {
+      let image = await wc.capturePage(box)
+      if (this.pendingCapture !== pending) return pending.finish(null)
+      const size = image.getSize()
+      const fit = fitLongSide(size.width, size.height, MAX_CAPTURE_SIDE)
+      if (fit.width !== size.width || fit.height !== size.height) {
+        image = image.resize({ width: fit.width, height: fit.height, quality: 'best' })
+      }
+      if (image.isEmpty()) return pending.finish(null)
+      const text = typeof rawText === 'string' ? tidyRegionText(rawText) : ''
+      pending.finish({ imageDataUrl: `data:image/png;base64,${image.toPNG().toString('base64')}`, text })
+    } catch {
+      pending.finish(null)
+    }
+  }
+
   /** The page the requests were for is going away; nobody should wait out their timers. */
   private abandonReveals(): void {
     for (const finish of Array.from(this.pendingReveals.values())) finish('unavailable')
@@ -314,6 +413,7 @@ export class WebPaneManager {
   }
 
   hide(): void {
+    this.cancelCapture()
     // Guard against every path that can reach this after teardown has
     // started: a 'close'-time destroy() call, or a stray WEBPANE_HIDE /
     // WEBPANE_DESTROY IPC message arriving from a renderer that hasn't
@@ -329,6 +429,7 @@ export class WebPaneManager {
 
   destroy(): void {
     this.abandonReveals()
+    this.cancelCapture()
     if (this.view) {
       this.hide()
       this.attached = false
