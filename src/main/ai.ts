@@ -12,7 +12,7 @@ import { buildPromptPayload } from './aiPrompt'
 type ThinkingLevel = 'low' | 'medium' | 'high'
 
 /**
- * The in-situ modes (Explain/Dejargonify/Define/Math) exist specifically to
+ * The in-situ modes (Explain/Define/Math) exist specifically to
  * answer *without* pulling the reader out of flow — that's the whole design
  * goal of that surface (see BRIEF's product spec). A "high" or even
  * "medium" thinking budget adds seconds of latency before the first token,
@@ -22,7 +22,6 @@ type ThinkingLevel = 'low' | 'medium' | 'high'
 function thinkingLevelFor(mode: AiStreamRequest['mode']): ThinkingLevel {
   switch (mode) {
     case 'micro-explain':
-    case 'micro-dejargon':
     case 'micro-define':
     case 'micro-formula':
     case 'custom':
@@ -36,15 +35,13 @@ function thinkingLevelFor(mode: AiStreamRequest['mode']): ThinkingLevel {
 /**
  * On a thinking model, tokens spent thinking are deducted from the same
  * `maxOutputTokens` budget as the visible answer — they are not a separate
- * allowance. A cap sized only for the answer text (the old 1024 for
- * micro-dejargon) can be entirely consumed by thinking, producing a
+ * allowance. A cap sized only for the answer text (an old 1024 cap) can be entirely consumed by thinking, producing a
  * candidate with zero output text and no error of its own. These numbers
  * leave real headroom for thinking *and* an answer.
  */
 function maxOutputTokensFor(mode: AiStreamRequest['mode']): number {
   switch (mode) {
     case 'micro-explain':
-    case 'micro-dejargon':
     case 'micro-define':
     case 'micro-formula':
     case 'custom':

@@ -363,6 +363,22 @@ export default function DetailPane({
     })
   }, [bookmark, queryClient])
 
+  // The live page's selection toolbar sends "Add to Study" and "Continue in
+  // Study" through main; only the bookmark currently shown may act on them.
+  useEffect(() => {
+    if (!bookmark) return
+    const offAttach = window.kk.webpane.onStudyAttach((p) => {
+      if (p.bookmarkId === bookmark.id) onStudyAttach(p.attachment)
+    })
+    const offContinue = window.kk.webpane.onStudyContinue((p) => {
+      if (p.bookmarkId === bookmark.id) onStudyContinue(p.messages)
+    })
+    return () => {
+      offAttach()
+      offContinue()
+    }
+  }, [bookmark, onStudyAttach, onStudyContinue])
+
   useEffect(() => {
     return window.kk.webpane.onHighlightStatus((payload) => {
       if (!bookmark || payload.bookmarkId !== bookmark.id) return

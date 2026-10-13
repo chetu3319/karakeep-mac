@@ -1,4 +1,4 @@
-import type { StudyAttachment, StudyMessage } from '../../../shared/study'
+import type { StudyAttachment, StudyMessage } from './study'
 
 /** The four quick actions the selection toolbar offers. */
 export type InlineMode = 'micro-explain' | 'micro-define' | 'micro-formula' | 'custom'

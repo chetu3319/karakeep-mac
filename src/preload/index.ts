@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/ipc'
-import type { StudyThread, SyncState } from '../shared/study'
+import type { StudyAttachment, StudyMessage, StudyThread, SyncState } from '../shared/study'
 import type {
   AiStreamChunk,
   AiStreamDone,
@@ -241,6 +241,16 @@ const api = {
       const listener = (_e: unknown, payload: { bookmarkId: string }): void => cb(payload)
       ipcRenderer.on(IPC.WEBPANE_HIGHLIGHTS_CHANGED_EVENT, listener)
       return () => ipcRenderer.removeListener(IPC.WEBPANE_HIGHLIGHTS_CHANGED_EVENT, listener)
+    },
+    onStudyAttach: (cb: (payload: { bookmarkId: string; attachment: StudyAttachment }) => void): (() => void) => {
+      const listener = (_e: unknown, payload: { bookmarkId: string; attachment: StudyAttachment }): void => cb(payload)
+      ipcRenderer.on(IPC.WEBPANE_STUDY_ATTACH_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.WEBPANE_STUDY_ATTACH_EVENT, listener)
+    },
+    onStudyContinue: (cb: (payload: { bookmarkId: string; messages: StudyMessage[] }) => void): (() => void) => {
+      const listener = (_e: unknown, payload: { bookmarkId: string; messages: StudyMessage[] }): void => cb(payload)
+      ipcRenderer.on(IPC.WEBPANE_STUDY_CONTINUE_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.WEBPANE_STUDY_CONTINUE_EVENT, listener)
     },
     onHighlightStatus: (
       cb: (payload: { bookmarkId: string | null; anchored: string[]; missing: string[] }) => void

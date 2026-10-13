@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { ICON_CHECK, ICON_COPY, ICON_NOTE } from '../../../shared/highlightUi'
 import { useAiStream } from '../lib/useAiStream'
 import { renderMarkdown } from '../lib/miniMarkdown'
-import type { InlineMode } from '../lib/inlineAnswer'
+import type { InlineMode } from '../../../shared/inlineAnswer'
 
 export interface InlineAnswerProps {
   mode: InlineMode

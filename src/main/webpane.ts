@@ -8,6 +8,7 @@ import { BrowserWindow, WebContentsView, ipcMain, shell } from 'electron'
 import { join } from 'node:path'
 import { IPC, WEBPANE_IPC } from '../shared/ipc'
 import type { WebPaneBounds, WebPaneFindResult, WebPaneState } from '../shared/types'
+import { sanitizeStudyAttachment, sanitizeStudyMessages } from '../shared/studyPayload'
 import { lockPageZoom } from './zoomLock'
 
 /** Longest a quote reveal waits for the page to exist, load and answer. */
@@ -136,6 +137,28 @@ export class WebPaneManager {
       if (!fromThisView(e.sender.id)) return
       const done = this.pendingReveals.get(payload?.requestId)
       if (done) done(payload.found === true ? 'found' : 'not-found')
+    })
+    // The page's preload is next to untrusted page code, so these payloads are
+    // reduced to the expected fields and capped before the renderer sees them.
+    ipcMain.on(WEBPANE_IPC.STUDY_ATTACH, (e, payload: unknown) => {
+      if (!fromThisView(e.sender.id) || !this.currentBookmarkId) return
+      if (this.win.isDestroyed() || this.win.webContents.isDestroyed()) return
+      const attachment = sanitizeStudyAttachment(payload)
+      if (!attachment) return
+      this.win.webContents.send(IPC.WEBPANE_STUDY_ATTACH_EVENT, {
+        bookmarkId: this.currentBookmarkId,
+        attachment
+      })
+    })
+    ipcMain.on(WEBPANE_IPC.STUDY_CONTINUE, (e, payload: unknown) => {
+      if (!fromThisView(e.sender.id) || !this.currentBookmarkId) return
+      if (this.win.isDestroyed() || this.win.webContents.isDestroyed()) return
+      const messages = sanitizeStudyMessages(payload)
+      if (!messages) return
+      this.win.webContents.send(IPC.WEBPANE_STUDY_CONTINUE_EVENT, {
+        bookmarkId: this.currentBookmarkId,
+        messages
+      })
     })
     ipcMain.on(WEBPANE_IPC.STATUS, (e, payload: { anchored: string[]; missing: string[] }) => {
       if (!fromThisView(e.sender.id)) return

@@ -142,9 +142,6 @@ export function buildPromptPayload(req: AiStreamRequest): {
   let userPrompt = ''
 
   switch (req.mode) {
-    // Dejargonify is folded into Explain: one prompt that asks for plain
-    // language, so the legacy mode id maps to the same instruction.
-    case 'micro-dejargon':
     case 'micro-explain':
       systemInstruction +=
         `\nTask: Explain the selected text strictly in the context of this ${noun}: what it means here, why ${authorNoun} say it, and how it connects to the surrounding argument. Use plain, jargon-free language without losing technical precision. Answer in at most 3 sentences.`

@@ -261,15 +261,11 @@ export interface AuthResult {
 }
 
 // ─────────────────────────── AI Assistant (Gemini) ───────────────────────────
-// The three in-situ modes match the product spec (Explain / Dejargonify /
-// Define) verbatim; `micro-formula` ("Math") is a fourth mode kept because it
-// is genuinely useful for the arxiv/paper use case, even though the spec only
-// names three. `micro-explain` used to *define* a term — it now explains a
-// selection in the document's own argument, and the old defining behaviour
-// moved to the new `micro-define`, so neither label lies about what it does.
+// The in-situ modes are Explain, Define and Math (`micro-formula`); `custom`
+// answers a typed question about a selection, and `study` is the whole-document
+// chat.
 export type AiMode =
   | 'micro-explain'
-  | 'micro-dejargon'
   | 'micro-define'
   | 'micro-formula'
   | 'custom'

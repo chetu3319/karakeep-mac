@@ -116,7 +116,9 @@ export const IPC = {
   WEBPANE_FOUND_EVENT: 'webpane:found', // main -> renderer push: match count + active ordinal
   WEBPANE_STATE_EVENT: 'webpane:state', // main -> renderer push
   WEBPANE_HIGHLIGHTS_CHANGED_EVENT: 'webpane:highlights-changed', // main -> renderer push
-  WEBPANE_HIGHLIGHT_STATUS_EVENT: 'webpane:highlight-status' // main -> renderer push: which highlights anchored
+  WEBPANE_HIGHLIGHT_STATUS_EVENT: 'webpane:highlight-status', // main -> renderer push: which highlights anchored
+  WEBPANE_STUDY_ATTACH_EVENT: 'webpane:study-attach', // main -> renderer push: { bookmarkId, attachment } from the page's toolbar
+  WEBPANE_STUDY_CONTINUE_EVENT: 'webpane:study-continue' // main -> renderer push: { bookmarkId, messages } seeding Study
 } as const
 
 export const WEBPANE_IPC = {
@@ -129,5 +131,7 @@ export const WEBPANE_IPC = {
   ID_ASSIGNED: 'kk:id-assigned', // main -> webpane: client id -> server id
   STATUS: 'kk:highlight-status', // webpane -> main: anchored / missing ids
   REVEAL_QUOTE: 'kk:reveal-quote', // main -> webpane: { requestId, quote }
-  REVEAL_RESULT: 'kk:reveal-result' // webpane -> main: { requestId, found }
+  REVEAL_RESULT: 'kk:reveal-result', // webpane -> main: { requestId, found }
+  STUDY_ATTACH: 'kk:study-attach', // webpane -> main: StudyAttachment (the selection as a chip)
+  STUDY_CONTINUE: 'kk:study-continue' // webpane -> main: StudyMessage[] (an inline answer to continue)
 } as const

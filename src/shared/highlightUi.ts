@@ -265,6 +265,7 @@ export function highlightPopoverStylesheet(): string {
       padding: 0 4px; font-size: 13px; line-height: 1.5; color: rgba(242,242,247,0.94);
       user-select: text; cursor: text; overflow-wrap: anywhere;
     }
+    .kh-ans.kh-ans-plain { white-space: pre-wrap; }
     .kh-ans:focus-visible { outline: 2px solid rgba(255,255,255,0.4); outline-offset: 2px; border-radius: 4px; }
     .kh-ans-error { color: #fca5a5; }
     .kh-caret { display: inline-block; width: 6px; height: 13px; margin-left: 3px; vertical-align: middle; background: #10b981; }

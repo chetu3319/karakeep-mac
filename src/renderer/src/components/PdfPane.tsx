@@ -45,7 +45,7 @@ import { createPdfDocumentReader, type PdfDocumentReader } from '../lib/pdfDocum
 import { useCreateHighlight, useDeleteHighlight, useUpdateHighlight } from '../lib/queries'
 import { useIsDark, usePref } from '../lib/prefs'
 import InlineAnswer from './InlineAnswer'
-import { buildContinueMessages, textAttachment, type InlineMode } from '../lib/inlineAnswer'
+import { buildContinueMessages, textAttachment, type InlineMode } from '../../../shared/inlineAnswer'
 import FindBar, { type FindResult } from './FindBar'
 import type { FindStep } from '../lib/findStep'
 import {

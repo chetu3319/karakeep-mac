@@ -22,17 +22,19 @@ import {
   COPY_CONFIRM_MS,
   DEFAULT_HIGHLIGHT_COLOR,
   HIGHLIGHT_COLORS,
-  ICON_AI,
   ICON_CHECK,
   ICON_COPY,
   ICON_NOTE,
+  ICON_STUDY_ATTACH,
   ICON_TRASH,
   highlightPopoverStylesheet,
   normalizeHighlightColor,
   placePopover
 } from '../shared/highlightUi'
 import { IPC, WEBPANE_IPC } from '../shared/ipc'
+import { buildContinueMessages, textAttachment, type InlineMode } from '../shared/inlineAnswer'
 import { findQuote } from '../shared/quoteMatch'
+import { markdownSegments } from '../shared/safeMarkdown'
 
 const HIGHLIGHT_CLASS = 'karakeep-hl'
 const OVERLAY_HOST_ID = 'karakeep-hl-overlay'
@@ -681,6 +683,8 @@ function karakeepInit(): void {
     el: HTMLElement
     anchor: () => DOMRect | null
     highlightId?: string
+    /** An expanded AI card: it ignores selection changes until dismissed. */
+    sticky?: boolean
   }
 
   let popover: OpenPopover | null = null
@@ -712,6 +716,7 @@ function karakeepInit(): void {
     if (popover.highlightId) {
       for (const el of marksFor(popover.highlightId)) delete el.dataset.khActive
     }
+    if (activeAiHandler) void ipcRenderer.invoke(IPC.AI_STREAM_ABORT, activeAiHandler.requestId)
     activeAiHandler = null
     popover.el.remove()
     popover = null
@@ -863,7 +868,7 @@ function karakeepInit(): void {
       // The textarea and the note reader own their own selection; everywhere
       // else the default is suppressed so clicking the popover doesn't drop
       // the page selection it was opened for.
-      if ((e.target as HTMLElement).closest('.kh-ta, .kh-note-view')) return
+      if ((e.target as HTMLElement).closest('.kh-ta, .kh-note-view, .kh-input, .kh-ans')) return
       e.preventDefault()
       e.stopPropagation()
     })
@@ -883,7 +888,42 @@ function karakeepInit(): void {
     if (rect) placePopover(el, rect)
   }
 
-  /** Popover for a fresh text selection: pick a colour, or add a note. */
+  const QUICK_ACTIONS: { mode: Exclude<InlineMode, 'custom'>; label: string }[] = [
+    { mode: 'micro-explain', label: 'Explain' },
+    { mode: 'micro-define', label: 'Define' },
+    { mode: 'micro-formula', label: 'Math' }
+  ]
+
+  /** Replaces the text of a button's label span (the one that is not the icon). */
+  function setPlainLabel(b: HTMLElement, label: string): void {
+    const span = b.querySelector('span')
+    if (span) span.textContent = label
+  }
+
+  /**
+   * Draws model text into `target` using text nodes and <b> elements only.
+   * This runs inside an untrusted page: never build HTML from model output.
+   */
+  function paintSegments(target: HTMLElement, md: string): void {
+    target.textContent = ''
+    for (const seg of markdownSegments(md)) {
+      if (seg.bold) {
+        const b = document.createElement('b')
+        b.textContent = seg.text
+        target.appendChild(b)
+      } else {
+        target.appendChild(document.createTextNode(seg.text))
+      }
+    }
+  }
+
+  /**
+   * Popover for a fresh text selection. Same toolbar as the PDF reader:
+   * swatches, Note, Copy | Explain, Define, Math, Ask..., Add to Study. An AI
+   * action grows the same card downward with the answer; from then on the card
+   * ignores selection changes and only Esc, a press outside, or an action that
+   * finishes with it closes it.
+   */
   function openSelectionPopover(range: Range): void {
     const el = newPopoverEl()
     const anchor = (): DOMRect | null => {
@@ -895,7 +935,41 @@ function karakeepInit(): void {
       }
     }
 
-    el.appendChild(
+    const selectionText = range.toString().trim()
+    // Computed on first use: the selection and its DOM don't change while the
+    // card is up, and most selections never reach an AI action.
+    let ctx: { surrounding: string; pageText: string } | null = null
+    const context = (): { surrounding: string; pageText: string } =>
+      (ctx ??= { surrounding: computeSurroundingContext(range), pageText: computePageTextAroundSelection(range) })
+
+    let view: { mode: InlineMode; prompt?: string } | null = null
+    let asking = false
+    let inputRow: HTMLElement | null = null
+    let answerWrap: HTMLElement | null = null
+    const modeBtns = new Map<string, HTMLElement>()
+
+    function expand(): void {
+      el.className = 'kh-pop kh-ai-mode'
+      if (popover?.el === el) popover.sticky = true
+    }
+
+    function finish(): void {
+      closePopover()
+      window.getSelection()?.removeAllRanges()
+    }
+
+    function syncToolbar(): void {
+      for (const [mode, btn] of modeBtns) {
+        const on = mode === 'custom' ? asking || view?.mode === 'custom' : view?.mode === mode
+        if (on) btn.dataset.on = '1'
+        else delete btn.dataset.on
+      }
+    }
+
+    const toolbar = document.createElement('div')
+    toolbar.className = 'kh-toolbar'
+
+    toolbar.appendChild(
       makeSwatchRow(null, (color) => {
         const clone = range.cloneRange()
         closePopover()
@@ -906,9 +980,9 @@ function karakeepInit(): void {
 
     const sep = document.createElement('div')
     sep.className = 'kh-sep'
-    el.appendChild(sep)
+    toolbar.appendChild(sep)
 
-    el.appendChild(
+    toolbar.appendChild(
       makeButton('Note', ICON_NOTE, () => {
         const clone = range.cloneRange()
         closePopover()
@@ -918,30 +992,21 @@ function karakeepInit(): void {
     )
 
     // Copy sits right next to Note, same as it does on an existing
-    // highlight's popover — copying is the other thing you'd want to do
-    // with a selection before committing to a colour or a note.
+    // highlight's popover.
     const copyBtn = makeButton(
       'Copy',
       ICON_COPY,
       () => {
         const text = range.toString()
-        // Nothing was actually copied — don't show a confirmation for a
-        // copy that never happened, and don't leave the button stuck on
-        // "Copied" forever since nothing will ever flip it back.
+        // Nothing was actually copied: no confirmation for a copy that never
+        // happened, and nothing to flip back later.
         if (!text) return
         void copyToClipboard(text).catch(() => undefined)
-        // Swap in a check + "Copied" for visible feedback. The selection
-        // and the popover are left alone: copying shouldn't cost the user
-        // their selection any more than it would anywhere else text gets
-        // copied, and closing here used to do exactly that.
         setBtnIcon(copyBtn, ICON_CHECK)
         setBtnLabel(copyBtn, 'Copied')
         ;(copyBtn as HTMLButtonElement).disabled = true
         setTimeout(() => {
-          // Guard against this popover having been replaced or closed in
-          // the meantime (e.g. the user dismissed it, or a new selection
-          // opened a different popover reusing this same closure) — this
-          // timer must only ever touch the button it belongs to.
+          // Only ever touch the button this closure belongs to.
           if (popover?.el !== el) return
           setBtnIcon(copyBtn, ICON_COPY)
           setBtnLabel(copyBtn, 'Copy')
@@ -952,19 +1017,238 @@ function karakeepInit(): void {
       false,
       ['Copy', 'Copied']
     )
-    el.appendChild(copyBtn)
+    toolbar.appendChild(copyBtn)
 
     const sep2 = document.createElement('div')
     sep2.className = 'kh-sep'
-    el.appendChild(sep2)
+    toolbar.appendChild(sep2)
 
-    el.appendChild(
-      makeButton('Ask AI', ICON_AI, () => {
-        const text = range.toString().trim()
-        const clone = range.cloneRange()
-        openAiPopover(clone, text)
-      })
+    for (const a of QUICK_ACTIONS) {
+      const b = makeButton(a.label, '', () => startAnswer(a.mode))
+      modeBtns.set(a.mode, b)
+      toolbar.appendChild(b)
+    }
+    const askBtn = makeButton('Ask…', '', () => {
+      asking = !asking
+      renderAsk()
+      syncToolbar()
+      if (popover?.el === el) reposition()
+    })
+    modeBtns.set('custom', askBtn)
+    toolbar.appendChild(askBtn)
+
+    toolbar.appendChild(
+      makeButton(
+        'Add to Study',
+        ICON_STUDY_ATTACH,
+        () => {
+          if (!selectionText) return
+          sendHost(WEBPANE_IPC.STUDY_ATTACH, textAttachment(selectionText, undefined, context().surrounding))
+          // From the expanded card, attaching finishes with it (like the PDF
+          // reader); from the bare toolbar the selection is left alone.
+          if (popover?.el === el && popover.sticky) finish()
+        },
+        false,
+        true
+      )
     )
+
+    el.appendChild(toolbar)
+
+    function renderAsk(): void {
+      inputRow?.remove()
+      inputRow = null
+      if (!asking) return
+      expand()
+      const row = document.createElement('form')
+      row.className = 'kh-ai-input'
+      const input = document.createElement('input')
+      input.className = 'kh-input'
+      input.type = 'text'
+      input.placeholder = 'Ask about this selection…'
+      input.setAttribute('aria-label', 'Ask about this selection')
+      const go = makeButton('Ask', '', () => submit())
+      go.className = 'kh-btn kh-primary'
+      ;(go as HTMLButtonElement).disabled = true
+      const submit = (): void => {
+        const q = input.value.trim()
+        if (q) startAnswer('custom', q)
+      }
+      row.addEventListener('submit', (e) => {
+        e.preventDefault()
+        submit()
+      })
+      input.addEventListener('input', () => {
+        ;(go as HTMLButtonElement).disabled = !input.value.trim()
+      })
+      // Typing here must not reach the page's own shortcuts. Escape still
+      // bubbles so it dismisses the card.
+      for (const type of ['keydown', 'keyup', 'keypress'] as const) {
+        input.addEventListener(type, (e) => {
+          if ((e as KeyboardEvent).key !== 'Escape') e.stopPropagation()
+        })
+      }
+      row.append(input, go)
+      toolbar.after(row)
+      inputRow = row
+      requestAnimationFrame(() => input.focus())
+    }
+
+    function startAnswer(mode: InlineMode, prompt?: string): void {
+      if (activeAiHandler) void ipcRenderer.invoke(IPC.AI_STREAM_ABORT, activeAiHandler.requestId)
+      activeAiHandler = null
+      view = { mode, prompt }
+      asking = false
+      renderAsk()
+      syncToolbar()
+      expand()
+      answerWrap?.remove()
+
+      let text = ''
+      let streaming = true
+      let error = ''
+      let saveState: 'idle' | 'saving' | 'failed' = 'idle'
+      let copied = false
+      const requestId = `ai-web-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+
+      const wrap = document.createElement('div')
+      wrap.className = 'kh-ans-wrap'
+      const ans = document.createElement('div')
+      ans.className = 'kh-ans kh-ans-plain'
+      ans.tabIndex = 0
+      const foot = document.createElement('div')
+      foot.className = 'kh-ans-foot'
+
+      const copyAns = makeButton('Copy', ICON_COPY, () => {
+        if (!text) return
+        void copyToClipboard(text).catch(() => undefined)
+        copied = true
+        paint()
+        setTimeout(() => {
+          if (popover?.el !== el) return
+          copied = false
+          paint()
+        }, COPY_CONFIRM_MS)
+      })
+      const saveAns = makeButton('Save as note', ICON_NOTE, () => {
+        saveState = 'saving'
+        paint()
+        const clone = range.cloneRange()
+        window.getSelection()?.removeAllRanges()
+        const hl = createHighlight(clone, lastUsedColor, false)
+        if (!hl) {
+          saveState = 'failed'
+          paint()
+          return
+        }
+        setHighlightNote(hl, text)
+        closePopover()
+      })
+      const spacer = document.createElement('div')
+      spacer.className = 'kh-spacer'
+      const stopBtn = makeButton('Stop', '', () => {
+        void ipcRenderer.invoke(IPC.AI_STREAM_ABORT, requestId)
+        if (activeAiHandler?.requestId === requestId) activeAiHandler = null
+        streaming = false
+        paint()
+      })
+      const goBtn = makeButton('Continue in Study', '', () => {
+        sendHost(
+          WEBPANE_IPC.STUDY_CONTINUE,
+          buildContinueMessages({
+            mode,
+            prompt,
+            answer: text,
+            attachment: textAttachment(selectionText, undefined, context().surrounding)
+          })
+        )
+        finish()
+      })
+      goBtn.classList.add('kh-go')
+      const arrow = document.createElement('span')
+      arrow.setAttribute('aria-hidden', 'true')
+      arrow.textContent = '→'
+      goBtn.appendChild(arrow)
+      foot.append(copyAns, saveAns, spacer, stopBtn, goBtn)
+      wrap.append(ans, foot)
+      el.appendChild(wrap)
+      answerWrap = wrap
+
+      function paint(): void {
+        ans.textContent = ''
+        if (error) {
+          const box = document.createElement('div')
+          box.className = 'kh-ans-error'
+          const strong = document.createElement('strong')
+          strong.textContent = 'Could not get an answer'
+          const detail = document.createElement('div')
+          detail.textContent = error
+          box.append(strong, detail)
+          ans.appendChild(box)
+        } else {
+          if (text) paintSegments(ans, text)
+          if (streaming && !text) {
+            const hint = document.createElement('span')
+            hint.className = 'kh-hint'
+            hint.textContent = 'Thinking…'
+            ans.appendChild(hint)
+          }
+          if (streaming && text) {
+            const caret = document.createElement('span')
+            caret.className = 'kh-caret'
+            ans.appendChild(caret)
+          }
+        }
+        const ready = !!text && !streaming && !error
+        ;(copyAns as HTMLButtonElement).disabled = !text
+        setBtnIcon(copyAns, copied ? ICON_CHECK : ICON_COPY)
+        setPlainLabel(copyAns, copied ? 'Copied' : 'Copy')
+        ;(saveAns as HTMLButtonElement).disabled = !ready || saveState === 'saving'
+        setPlainLabel(
+          saveAns,
+          saveState === 'saving' ? 'Saving…' : saveState === 'failed' ? 'Save failed, retry' : 'Save as note'
+        )
+        stopBtn.style.display = streaming ? '' : 'none'
+        ;(goBtn as HTMLButtonElement).disabled = !ready
+        if (popover?.el === el) reposition()
+      }
+
+      activeAiHandler = {
+        requestId,
+        onChunk: (delta) => {
+          text += delta
+          paint()
+        },
+        onDone: (fullText) => {
+          text = fullText
+          streaming = false
+          if (activeAiHandler?.requestId === requestId) activeAiHandler = null
+          paint()
+        },
+        onError: (message) => {
+          error = message
+          streaming = false
+          if (activeAiHandler?.requestId === requestId) activeAiHandler = null
+          paint()
+        }
+      }
+      paint()
+
+      const meta = getPageSourceMetadata()
+      void ipcRenderer.invoke(IPC.AI_STREAM_START, {
+        requestId,
+        mode,
+        ...(prompt ? { prompt } : {}),
+        selectionText,
+        surroundingContext: context().surrounding,
+        pageText: context().pageText,
+        docTitle: document.title,
+        sourceUrl: meta.sourceUrl,
+        siteName: meta.siteName,
+        author: meta.author,
+        docKind: 'article'
+      })
+    }
 
     mountPopover('selection', el, anchor)
   }
@@ -1064,192 +1348,6 @@ function karakeepInit(): void {
       metaContent('meta[property="article:author"]') ||
       metaContent('meta[name="twitter:creator"]')
     return { sourceUrl: location.href, siteName, author }
-  }
-
-  // Strips Markdown syntax down to clean plain text for the vanilla-DOM
-  // popover. This popover renders inside an untrusted third-party page (see
-  // the file header), so it must never use innerHTML on model output —
-  // unlike the two React surfaces (SelectionAiHUD, PageAiDrawer), which can
-  // safely build real elements via lib/miniMarkdown.tsx, this one sticks to
-  // `.textContent` and settles for readable plain text instead of rendered
-  // formatting.
-  function stripMarkdownToPlainText(md: string): string {
-    return md
-      .replace(/```[a-zA-Z0-9]*\n?/g, '')
-      .replace(/```/g, '')
-      .replace(/^#{1,6}\s+/gm, '')
-      .replace(/\*\*([^*]+)\*\*/g, '$1')
-      .replace(/__([^_]+)__/g, '$1')
-      .replace(/\*([^*]+)\*/g, '$1')
-      .replace(/(^|\s)_([^_]+)_(?=\s|$)/g, '$1$2')
-      .replace(/`([^`]+)`/g, '$1')
-      .replace(/^\s*[-*]\s+/gm, '• ')
-  }
-
-  /** In-situ AI Assistant HUD for a web selection: explain, dejargonify, define, math decode, save to note. */
-  function openAiPopover(range: Range, text: string): void {
-    const el = newPopoverEl()
-    el.style.cssText =
-      'display: flex; flex-direction: column; width: 350px; max-height: 380px; padding: 10px; gap: 8px;'
-
-    const anchor = (): DOMRect | null => {
-      try {
-        const r = range.getBoundingClientRect()
-        return r.width || r.height ? r : null
-      } catch {
-        return null
-      }
-    }
-
-    let activeRequestId = `ai-web-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
-    let accumulatedText = ''
-
-    // Header toolbar
-    const header = document.createElement('div')
-    header.className = 'kh-toolbar'
-    header.style.cssText =
-      'border-bottom: 1px solid rgba(255,255,255,0.12); padding-bottom: 6px; margin-bottom: 2px;'
-
-    // Same four modes, same order and labels, as the PDF/React HUD
-    // (SelectionAiHUD.tsx) — Explain / Dejargonify / Define is the exact
-    // spec wording, Math stays as a fourth mode for the paper-reading case.
-    const modes = [
-      { id: 'micro-explain', label: '💡 Explain' },
-      { id: 'micro-dejargon', label: '⚡ Dejargonify' },
-      { id: 'micro-define', label: '📖 Define' },
-      { id: 'micro-formula', label: '🧮 Math' }
-    ]
-
-    // Computed once per popover open rather than per mode switch: the
-    // selection and its surrounding DOM don't change while this popover is
-    // up, so there's no reason to re-walk the DOM on every button click.
-    const surroundingContext = computeSurroundingContext(range)
-    const pageTextAroundSelection = computePageTextAroundSelection(range)
-    const sourceMeta = getPageSourceMetadata()
-
-    const buttons: HTMLElement[] = []
-    function startQuery(mode: string): void {
-      if (activeRequestId) {
-        void ipcRenderer.invoke(IPC.AI_STREAM_ABORT, activeRequestId)
-      }
-      activeRequestId = `ai-web-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
-      accumulatedText = ''
-      body.textContent = 'Thinking with Gemini…'
-      saveBtn.style.display = 'none'
-
-      activeAiHandler = {
-        requestId: activeRequestId,
-        onChunk: (delta) => {
-          if (body.textContent === 'Thinking with Gemini…') body.textContent = ''
-          accumulatedText += delta
-          // .textContent only, never innerHTML — this popover lives inside
-          // the loaded page's own document, which is untrusted content.
-          body.textContent = stripMarkdownToPlainText(accumulatedText)
-          reposition()
-        },
-        onDone: (fullText) => {
-          accumulatedText = fullText
-          body.textContent = stripMarkdownToPlainText(fullText)
-          saveBtn.style.display = 'inline-flex'
-          reposition()
-        },
-        onError: (error) => {
-          body.textContent = `AI Error: ${error}`
-        }
-      }
-
-      void ipcRenderer.invoke(IPC.AI_STREAM_START, {
-        requestId: activeRequestId,
-        mode,
-        selectionText: text,
-        surroundingContext,
-        pageText: pageTextAroundSelection,
-        docTitle: document.title,
-        sourceUrl: sourceMeta.sourceUrl,
-        siteName: sourceMeta.siteName,
-        author: sourceMeta.author,
-        docKind: 'article'
-      })
-    }
-
-    modes.forEach(({ id, label }) => {
-      const b = document.createElement('button')
-      b.className = 'kh-btn'
-      b.style.cssText = 'font-size: 11px; padding: 3px 7px; border-radius: 5px;'
-      b.textContent = label
-      b.addEventListener('click', (e) => {
-        e.preventDefault()
-        e.stopPropagation()
-        buttons.forEach((btn) => (btn.style.background = 'transparent'))
-        b.style.background = 'rgba(16, 185, 129, 0.25)'
-        startQuery(id)
-      })
-      buttons.push(b)
-      header.appendChild(b)
-    })
-    buttons[0].style.background = 'rgba(16, 185, 129, 0.25)'
-
-    const spacer = document.createElement('div')
-    spacer.className = 'kh-spacer'
-    header.appendChild(spacer)
-
-    const closeBtn = makeButton(
-      'Close',
-      'M18 6L6 18M6 6l12 12',
-      () => {
-        if (activeRequestId) void ipcRenderer.invoke(IPC.AI_STREAM_ABORT, activeRequestId)
-        closePopover()
-      },
-      false,
-      true
-    )
-    header.appendChild(closeBtn)
-
-    el.appendChild(header)
-
-    // Selection preview snippet
-    const snippet = document.createElement('div')
-    snippet.style.cssText =
-      'font-size: 11px; font-style: italic; opacity: 0.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 6px; background: rgba(255,255,255,0.06); border-radius: 4px;'
-    snippet.textContent = `"${text.slice(0, 80)}${text.length > 80 ? '…' : ''}"`
-    el.appendChild(snippet)
-
-    // Response body
-    const body = document.createElement('div')
-    body.className = 'kh-note-view'
-    body.style.cssText =
-      'flex: 1; max-height: 190px; font-size: 12px; line-height: 1.5; color: #f2f2f7; white-space: pre-wrap;'
-    body.textContent = 'Thinking with Gemini…'
-    el.appendChild(body)
-
-    // Footer actions
-    const footer = document.createElement('div')
-    footer.className = 'kh-toolbar'
-    footer.style.cssText =
-      'border-top: 1px solid rgba(255,255,255,0.12); padding-top: 6px; margin-top: 2px;'
-
-    const saveBtn = makeButton('Save as Note', ICON_NOTE, () => {
-      const clone = range.cloneRange()
-      closePopover()
-      window.getSelection()?.removeAllRanges()
-      const hl = createHighlight(clone, lastUsedColor, false)
-      if (hl && accumulatedText) setHighlightNote(hl, accumulatedText)
-    })
-    saveBtn.className = 'kh-btn kh-primary'
-    saveBtn.style.cssText = 'font-size: 11px; padding: 3px 8px; font-weight: 500;'
-    saveBtn.style.display = 'none'
-    footer.appendChild(saveBtn)
-
-    const copyBtn = makeButton('Copy', ICON_COPY, () => {
-      if (accumulatedText) void navigator.clipboard?.writeText(accumulatedText)
-    })
-    copyBtn.style.cssText = 'font-size: 11px; padding: 3px 8px;'
-    footer.appendChild(copyBtn)
-
-    el.appendChild(footer)
-
-    mountPopover('selection', el, anchor)
-    startQuery('micro-explain')
   }
 
   /** Popover for an existing highlight: recolour, note, copy, delete. */
@@ -1716,6 +1814,9 @@ function karakeepInit(): void {
   }
 
   function onSelectionSettled(): void {
+    // An expanded AI card keeps its place and its stream whatever the page
+    // selection does; only a dismissal closes it.
+    if (popover?.sticky) return
     const range = currentSelectionRange()
     if (range) {
       openSelectionPopover(range)
