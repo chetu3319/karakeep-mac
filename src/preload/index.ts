@@ -207,6 +207,7 @@ const api = {
     focusHighlight: (highlightId: string): Promise<void> =>
       ipcRenderer.invoke(IPC.WEBPANE_FOCUS_HIGHLIGHT, highlightId),
     // Reads document.body.innerText out of the live WebContentsView — see
+    revealQuote: (quote: string): Promise<boolean> => ipcRenderer.invoke(IPC.WEBPANE_REVEAL_QUOTE, quote),
     // main/webpane.ts's getPageText(). Used by lib/useBookmarkText.ts to
     // ground the sidebar chat in the actual rendered page rather than only
     // whatever Karakeep's crawler captured at save time.

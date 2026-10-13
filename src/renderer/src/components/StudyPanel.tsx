@@ -3,6 +3,7 @@ import type { StudyAttachment, StudyMessage, StudyThread, SyncState } from '../.
 import { parseRefs, refLabel, type AiRef } from '../lib/aiRefs'
 import { renderMarkdown } from '../lib/miniMarkdown'
 import ConfirmDialog from './ConfirmDialog'
+import { type RefQuality } from '../lib/revealRef'
 import Icon from './Icon'
 import SidePanel from './SidePanel'
 
@@ -31,7 +32,14 @@ export interface StudyPanelProps {
   onRemoveAttachment: (index: number) => void
   onRetrySync: () => void
   /** Scrolls the reader to the passage a tag cites. */
-  onRevealRef: (ref: AiRef) => Promise<'exact' | 'approximate' | 'missing'>
+  onRevealRef: (ref: AiRef) => Promise<RefQuality>
+  /**
+   * Checks a reference without moving the reader, for styling its tag once its
+   * turn is done. 'unknown' when the document can't be checked right now (a
+   * web page is only searchable while it is loaded), and the tag stays
+   * clickable until a click finds out.
+   */
+  onResolveRef: (ref: AiRef) => Promise<RefQuality | 'unknown'>
 }
 
 const SUGGESTIONS = [
@@ -67,14 +75,16 @@ function Answer({
   text,
   streaming,
   paged,
-  onRevealRef
+  onRevealRef,
+  onResolveRef
 }: {
   text: string
   streaming: boolean
   paged: boolean
   onRevealRef: StudyPanelProps['onRevealRef']
+  onResolveRef: StudyPanelProps['onResolveRef']
 }): React.JSX.Element {
-  const body = useMemo(() => {
+  const parsed = useMemo(() => {
     const refs: AiRef[] = []
     let source = ''
     for (const seg of parseRefs(text, { streaming })) {
@@ -84,23 +94,77 @@ function Answer({
         source += `⁣R${seg.ref.index}⁣`
       }
     }
-    return renderMarkdown(source, {
-      renderRef: (i) => {
-        const ref = refs[i]
-        if (!ref) return null
-        return (
-          <button
-            type="button"
-            onClick={() => void onRevealRef(ref)}
-            title={ref.quote}
-            className="mx-0.5 inline-block rounded border border-neutral-300 px-1 align-baseline text-[10px] leading-4 text-neutral-500 hover:border-emerald-500 hover:text-emerald-700 dark:border-neutral-700 dark:text-neutral-400 dark:hover:border-emerald-500 dark:hover:text-emerald-400"
-          >
-            {refLabel(ref, paged)}
-          </button>
-        )
+    return { refs, source }
+  }, [text, streaming])
+
+  // How well each tag's passage was found. Component state only: it is cheap
+  // to recompute and describes the document as it is open right now.
+  const [quality, setQuality] = useState<Record<number, RefQuality>>({})
+  const resolveRef = useRef(onResolveRef)
+  resolveRef.current = onResolveRef
+  useEffect(() => {
+    // Once, when the turn is finished: never while it streams, never per render.
+    if (streaming) return
+    let cancelled = false
+    void (async () => {
+      for (const ref of parsed.refs) {
+        if (!ref) continue
+        let q: RefQuality | 'unknown'
+        try {
+          q = await resolveRef.current(ref)
+        } catch {
+          q = 'unknown'
+        }
+        if (cancelled) return
+        if (q !== 'unknown') setQuality((prev) => (prev[ref.index] === q ? prev : { ...prev, [ref.index]: q }))
       }
-    })
-  }, [text, streaming, paged, onRevealRef])
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [parsed, streaming])
+
+  const body = useMemo(
+    () =>
+      renderMarkdown(parsed.source, {
+        renderRef: (i) => {
+          const ref = parsed.refs[i]
+          if (!ref) return null
+          const q = quality[i]
+          const approx = q === 'approximate'
+          const missing = q === 'missing'
+          const title = missing
+            ? "Couldn't find this passage"
+            : approx
+              ? `Jumped to page ${ref.page} — exact passage not found`
+              : ref.quote
+          return (
+            <button
+              type="button"
+              disabled={missing}
+              title={title}
+              onClick={() =>
+                void onRevealRef(ref).then((result) => {
+                  setQuality((prev) => (prev[i] === result ? prev : { ...prev, [i]: result }))
+                })
+              }
+              className={`mx-0.5 inline-block rounded border px-1 align-baseline text-[10px] leading-4 ${
+                missing
+                  ? 'cursor-default border-neutral-200 text-neutral-300 dark:border-neutral-800 dark:text-neutral-600'
+                  : `text-neutral-500 hover:border-emerald-500 hover:text-emerald-700 dark:text-neutral-400 dark:hover:border-emerald-500 dark:hover:text-emerald-400 ${
+                      approx
+                        ? 'border-dashed border-neutral-400 dark:border-neutral-500'
+                        : 'border-neutral-300 dark:border-neutral-700'
+                    }`
+              }`}
+            >
+              {refLabel(ref, paged)}
+            </button>
+          )
+        }
+      }),
+    [parsed, quality, paged, onRevealRef]
+  )
   return <>{body}</>
 }
 
@@ -142,7 +206,8 @@ export default function StudyPanel(props: StudyPanelProps): React.JSX.Element {
     onClear,
     onRemoveAttachment,
     onRetrySync,
-    onRevealRef
+    onRevealRef,
+    onResolveRef
   } = props
   const [input, setInput] = useState('')
   const [confirmClear, setConfirmClear] = useState(false)
@@ -213,7 +278,7 @@ export default function StudyPanel(props: StudyPanelProps): React.JSX.Element {
             <UserTurn key={m.id} message={m} />
           ) : (
             <div key={m.id} className="text-neutral-800 dark:text-neutral-200">
-              <Answer text={m.text} streaming={false} paged={paged} onRevealRef={onRevealRef} />
+              <Answer text={m.text} streaming={false} paged={paged} onRevealRef={onRevealRef} onResolveRef={onResolveRef} />
             </div>
           )
         )}
@@ -221,7 +286,7 @@ export default function StudyPanel(props: StudyPanelProps): React.JSX.Element {
         {streaming && (
           <div className="text-neutral-800 dark:text-neutral-200">
             {streamText ? (
-              <Answer text={streamText} streaming paged={paged} onRevealRef={onRevealRef} />
+              <Answer text={streamText} streaming paged={paged} onRevealRef={onRevealRef} onResolveRef={onResolveRef} />
             ) : (
               <span className="italic text-neutral-400">Reading the document…</span>
             )}

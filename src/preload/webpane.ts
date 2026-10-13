@@ -31,7 +31,8 @@ import {
   normalizeHighlightColor,
   placePopover
 } from '../shared/highlightUi'
-import { IPC } from '../shared/ipc'
+import { IPC, WEBPANE_IPC } from '../shared/ipc'
+import { findQuote } from '../shared/quoteMatch'
 
 const HIGHLIGHT_CLASS = 'karakeep-hl'
 const OVERLAY_HOST_ID = 'karakeep-hl-overlay'
@@ -103,6 +104,17 @@ function getStylesheet(): string {
     }
     .${HIGHLIGHT_CLASS}[data-kh-flash="1"] {
       animation: kh-flash 0.55s ease-in-out 2;
+    }
+    /* Study's "jump to this passage" marker: temporary, never a highlight. */
+    @keyframes kk-ref-flash {
+      0%, 100% { background-color: rgba(255, 224, 102, 0.55); }
+      50%      { background-color: rgba(255, 224, 102, 0.95); }
+    }
+    mark[data-kk-flash] {
+      background-color: rgba(255, 224, 102, 0.75) !important;
+      color: inherit !important;
+      border-radius: 2px;
+      animation: kk-ref-flash 0.6s ease-in-out infinite;
     }
   `
 }
@@ -1578,6 +1590,112 @@ function karakeepInit(): void {
     }
   }
 
+  // ───────────────────────── Study references ─────────────────────────
+
+  const REF_FLASH_MS = 1500
+  let refFlashTimer: ReturnType<typeof setTimeout> | null = null
+
+  function clearRefFlash(): void {
+    if (refFlashTimer) clearTimeout(refFlashTimer)
+    refFlashTimer = null
+    for (const m of Array.from(document.querySelectorAll<HTMLElement>('mark[data-kk-flash]'))) {
+      const parent = m.parentNode
+      if (!parent) continue
+      while (m.firstChild) parent.insertBefore(m.firstChild, m)
+      parent.removeChild(m)
+    }
+  }
+
+  /**
+   * Finds `quote` in the rendered text and returns a Range over it. The page
+   * text is the same text nodes the highlight anchoring walks, joined with a
+   * newline wherever the block changes so "end of one paragraph / start of
+   * the next" reads like whitespace to findQuote rather than gluing words
+   * together. Falls back to the highlight matcher for anything findQuote's
+   * stricter normalisation misses.
+   */
+  function rangeForQuote(quote: string): Range | null {
+    const nodes = collectTextNodes()
+    if (!nodes.length) return null
+    const blockOf = new Map<Element, Element>()
+    const blockFor = (n: Text): Element => {
+      const parent = n.parentElement as Element
+      let b = blockOf.get(parent)
+      if (!b) {
+        b = nearestBlockContainer(n)
+        blockOf.set(parent, b)
+      }
+      return b
+    }
+    let full = ''
+    const entries: { node: Text; start: number }[] = []
+    let prevBlock: Element | null = null
+    for (const n of nodes) {
+      const block = blockFor(n)
+      if (prevBlock && block !== prevBlock) full += '\n'
+      prevBlock = block
+      entries.push({ node: n, start: full.length })
+      full += n.data
+    }
+    const hit = findQuote(full, quote)
+    if (!hit) return locateText(quote)
+    let startNode: Text | null = null
+    let startOffset = 0
+    let endNode: Text | null = null
+    let endOffset = 0
+    for (const e of entries) {
+      const end = e.start + e.node.data.length
+      if (!startNode && end > hit.start) {
+        startNode = e.node
+        startOffset = Math.max(0, hit.start - e.start)
+      }
+      if (e.start < hit.end) {
+        endNode = e.node
+        endOffset = Math.min(e.node.data.length, hit.end - e.start)
+      }
+    }
+    if (!startNode || !endNode) return null
+    try {
+      const range = document.createRange()
+      range.setStart(startNode, startOffset)
+      range.setEnd(endNode, endOffset)
+      return range.collapsed ? null : range
+    } catch {
+      return null
+    }
+  }
+
+  function revealQuote(quote: string): boolean {
+    clearRefFlash()
+    const range = rangeForQuote(quote)
+    if (!range) return false
+    const marks: HTMLElement[] = []
+    for (const node of textNodesIn(range)) {
+      if (!node.isConnected) continue
+      const nr = document.createRange()
+      try {
+        nr.selectNodeContents(node)
+        if (node === range.startContainer) nr.setStart(node, Math.min(range.startOffset, node.data.length))
+        if (node === range.endContainer) nr.setEnd(node, Math.min(range.endOffset, node.data.length))
+      } catch {
+        continue
+      }
+      if (nr.collapsed || !nr.toString().trim()) continue
+      try {
+        const mark = document.createElement('mark')
+        mark.setAttribute('data-kk-flash', '1')
+        nr.surroundContents(mark)
+        marks.push(mark)
+      } catch {
+        // A fragment that straddles a non-text node is skipped; the rest still flashes.
+      }
+    }
+    if (!marks.length) return false
+    marks[0].scrollIntoView({ block: 'center', behavior: 'smooth' })
+    refFlashTimer = setTimeout(clearRefFlash, REF_FLASH_MS)
+    return true
+  }
+
   // ───────────────────────── events ─────────────────────────
 
   let selectionTimer: ReturnType<typeof setTimeout> | null = null
@@ -1669,6 +1787,15 @@ function karakeepInit(): void {
     syncHighlights(highlights)
   })
   ipcRenderer.on('kk:focus', (_e, id: string) => focusHighlight(id))
+  ipcRenderer.on(WEBPANE_IPC.REVEAL_QUOTE, (_e, req: { requestId: string; quote: string }) => {
+    let found = false
+    try {
+      found = typeof req?.quote === 'string' && revealQuote(req.quote)
+    } catch {
+      found = false
+    }
+    sendHost(WEBPANE_IPC.REVEAL_RESULT, { requestId: req?.requestId, found })
+  })
   ipcRenderer.on('kk:id-assigned', (_e, p: { clientId: string; serverId: string }) => {
     adoptServerId(p.clientId, p.serverId)
   })

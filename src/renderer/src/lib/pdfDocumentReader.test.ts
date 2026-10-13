@@ -113,4 +113,13 @@ describe('createPdfDocumentReader', () => {
     state.index = true
     expect(await reader.getDocumentPages(() => {})).toHaveLength(1)
   })
+
+  it('whenReady resolves once the index exists, and gives up after its wait', async () => {
+    const { state, reader } = pane()
+    expect(await reader.whenReady(20)).toBeNull()
+    const ready = reader.whenReady(500)
+    state.doc = { pageCount: 4 }
+    state.index = true
+    expect(await ready).toEqual({ pageCount: 4 })
+  })
 })

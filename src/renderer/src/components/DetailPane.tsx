@@ -9,6 +9,7 @@ import { truncateForContext, useBookmarkText } from '../lib/useBookmarkText'
 import { useStudyThread, type StudySendContext } from '../lib/useStudyThread'
 import { assembleDocument, type DocPage } from '../lib/studyContext'
 import type { AiRef } from '../lib/aiRefs'
+import { locatePdfRef, waitUntil, type RefQuality } from '../lib/revealRef'
 import { displayForBookmark } from '../lib/bookmarkDisplay'
 import { usePref } from '../lib/prefs'
 import { errMessage } from '../lib/errors'
@@ -35,6 +36,9 @@ const EMPTY_WEB_STATE: WebPaneState = {
   canGoForward: false,
   error: null
 }
+
+/** How long a reference click waits for the reader or page before giving up. */
+const REF_READY_MS = 8000
 
 export default function DetailPane({
   bookmark: selected,
@@ -253,8 +257,63 @@ export default function DetailPane({
     },
     [openStudy, study.seed] // eslint-disable-line react-hooks/exhaustive-deps
   )
-  // Task 5 makes references jump; until then a tag only reports it found nothing.
-  const onRevealRef = useCallback(async (_ref: AiRef): Promise<'exact' | 'approximate' | 'missing'> => 'missing', [])
+  // ── Study references ───────────────────────────────────────────────────
+  // PDF: the reader the pane handed up knows every page's text and can scroll
+  // and flash. Web: the quote is matched inside the live page by its preload,
+  // so a web reference can only be checked while the page is loaded; those are
+  // resolved lazily, on click, rather than forcing the Web tab open.
+  const pdfReaderRef = useRef(pdfReader)
+  pdfReaderRef.current = pdfReader
+  const tabRef = useRef(tab)
+  tabRef.current = tab
+
+  const onResolveRef = useCallback(
+    async (ref: AiRef): Promise<RefQuality | 'unknown'> => {
+      if (!pdfAssetId) return 'unknown'
+      const reader = pdfReaderRef.current
+      if (!reader) return 'unknown'
+      const ready = await reader.whenReady(REF_READY_MS)
+      if (!ready) return 'unknown'
+      const found = await locatePdfRef(ref, ready.pageCount, (p) => reader.getPageText(p))
+      return found.quality
+    },
+    [pdfAssetId]
+  )
+
+  const onRevealRef = useCallback(
+    async (ref: AiRef): Promise<RefQuality> => {
+      if (pdfAssetId) {
+        // Preview has no reader to point at, so go to the PDF first.
+        if (tabRef.current !== 'pdf') setTab('pdf')
+        const reader = await waitUntil(() => pdfReaderRef.current, REF_READY_MS)
+        const ready = reader && (await reader.whenReady(REF_READY_MS))
+        if (!reader || !ready) return 'missing'
+        const found = await locatePdfRef(ref, ready.pageCount, (p) => reader.getPageText(p))
+        if (found.quality === 'missing') return 'missing'
+        // An approximate hit goes to the page and flashes nothing.
+        reader.reveal(found.page0, found.start, found.end)
+        return found.quality
+      }
+      if (!url) return 'missing'
+      const switched = tabRef.current !== 'web'
+      if (switched) {
+        setTab('web')
+        // The native view is attached by the Web tab's own effects.
+        const end = Date.now() + REF_READY_MS
+        while (Date.now() < end && !(await window.kk.dev.isPaneAttached())) {
+          await new Promise((r) => setTimeout(r, 100))
+        }
+      }
+      // After a tab switch the page may only just have started loading;
+      // main waits out a load in progress, so a few spaced tries cover the gap.
+      for (let attempt = 0; attempt < (switched ? 5 : 1); attempt++) {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, 600))
+        if (await window.kk.webpane.revealQuote(ref.quote)) return 'exact'
+      }
+      return 'missing'
+    },
+    [pdfAssetId, url]
+  )
 
   // View → Study panel (⌥⌘S) arrives from the app menu, like Find, so it works
   // while the native web view has focus.
@@ -839,6 +898,7 @@ export default function DetailPane({
             onRemoveAttachment={study.removeAttachment}
             onRetrySync={study.retrySync}
             onRevealRef={onRevealRef}
+            onResolveRef={onResolveRef}
           />
         )}
       </div>

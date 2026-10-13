@@ -18,6 +18,7 @@ export class WebPaneManager {
   private win: BrowserWindow
   private currentBookmarkId: string | null = null
   private pendingHighlights: unknown[] = []
+  private pendingReveals = new Map<string, (found: boolean) => void>()
   private onHighlightEvent: (type: 'created' | 'updated' | 'removed', payload: unknown, bookmarkId: string | null) => void
 
   constructor(
@@ -126,6 +127,11 @@ export class WebPaneManager {
       if (!fromThisView(e.sender.id)) return
       if (this.pendingHighlights.length) wc.send(WEBPANE_IPC.APPLY, this.pendingHighlights)
     })
+    ipcMain.on(WEBPANE_IPC.REVEAL_RESULT, (e, payload: { requestId: string; found: boolean }) => {
+      if (!fromThisView(e.sender.id)) return
+      const done = this.pendingReveals.get(payload?.requestId)
+      if (done) done(payload.found === true)
+    })
     ipcMain.on(WEBPANE_IPC.STATUS, (e, payload: { anchored: string[]; missing: string[] }) => {
       if (!fromThisView(e.sender.id)) return
       if (this.win.isDestroyed() || this.win.webContents.isDestroyed()) return
@@ -176,6 +182,33 @@ export class WebPaneManager {
   focusHighlight(highlightId: string): void {
     if (!this.view || this.view.webContents.isDestroyed()) return
     this.view.webContents.send(WEBPANE_IPC.FOCUS, highlightId)
+  }
+
+  /**
+   * Asks the live page to scroll to a quote and flash it. Resolves to whether
+   * the page found it; false if there is no page, it is still loading after a
+   * while, or it does not answer. The page does the matching, so this never
+   * touches its DOM from here.
+   */
+  async revealQuote(quote: string): Promise<boolean> {
+    if (!this.view || this.view.webContents.isDestroyed()) return false
+    const wc = this.view.webContents
+    const loadDeadline = Date.now() + 8000
+    while (wc.isLoading() && !wc.isDestroyed() && Date.now() < loadDeadline) {
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    if (wc.isDestroyed()) return false
+    const requestId = `rq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    return new Promise<boolean>((resolve) => {
+      const finish = (found: boolean): void => {
+        clearTimeout(timer)
+        this.pendingReveals.delete(requestId)
+        resolve(found)
+      }
+      const timer = setTimeout(() => finish(false), 3000)
+      this.pendingReveals.set(requestId, finish)
+      wc.send(WEBPANE_IPC.REVEAL_QUOTE, { requestId, quote })
+    })
   }
 
   /**

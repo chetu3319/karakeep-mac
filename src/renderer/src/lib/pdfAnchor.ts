@@ -183,7 +183,7 @@ export async function resolveAnchor(
 }
 
 /** Page numbers ordered by distance from `from`: 3, 2, 4, 1, 5, ... */
-function pagesByDistance(from: number, total: number): number[] {
+export function pagesByDistance(from: number, total: number): number[] {
   const out: number[] = []
   for (let d = 0; d < total; d++) {
     if (from - d >= 0) out.push(from - d)

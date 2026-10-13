@@ -118,6 +118,9 @@ interface PlacedHighlight {
 
 export type { PdfDocumentReader }
 
+/** How long a Study reference flash stays on the page. */
+const REF_FLASH_MS = 1500
+
 export interface PdfPaneProps {
   assetId: string
   fileName: string
@@ -381,6 +384,13 @@ function PdfSurface({
   const [activeId, setActiveId] = useState<string | null>(null)
   const lastCreatedId = useRef<string | null>(null)
   const [flashId, setFlashId] = useState<string | null>(null)
+  // A passage Study is pointing at. Drawn like a focused highlight but never
+  // stored: it is cleared after FLASH_MS and nothing is sent to the server.
+  const [refFlash, setRefFlash] = useState<{ page: number; from: number; to: number } | null>(null)
+  const refFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => {
+    if (refFlashTimer.current) clearTimeout(refFlashTimer.current)
+  }, [])
 
   // ── Text index ────────────────────────────────────────────────────────────
   // One pass over the document's geometry, which gives both the glyph counts
@@ -616,6 +626,29 @@ function PdfSurface({
   docStatusRef.current = docState?.status
   const docRef = useRef(doc)
   docRef.current = doc
+  const scrollRef = useRef(scroll)
+  scrollRef.current = scroll
+
+  const revealRange = useCallback((page0: number, start?: number, end?: number) => {
+    const geo = geometry.current.get(page0)
+    const hasRange = start !== undefined && end !== undefined && end > start
+    const rect = hasRange && geo ? rectsWithinSlice(geo, start, end - 1)[0] : undefined
+    scrollRef.current?.scrollToPage({
+      pageNumber: page0 + 1,
+      pageCoordinates: rect ? { x: rect.origin.x, y: rect.origin.y } : undefined,
+      behavior: 'smooth',
+      alignY: 30
+    })
+    if (refFlashTimer.current) clearTimeout(refFlashTimer.current)
+    if (!hasRange) {
+      setRefFlash(null)
+      return
+    }
+    setRefFlash({ page: page0, from: start, to: end - 1 })
+    refFlashTimer.current = setTimeout(() => setRefFlash(null), REF_FLASH_MS)
+  }, [])
+  const revealRangeRef = useRef(revealRange)
+  revealRangeRef.current = revealRange
 
   useEffect(() => {
     if (!onDocumentReader) return
@@ -624,6 +657,7 @@ function PdfSurface({
       hasIndex: () => !!indexRef.current,
       getPageText: (page) => pageTextRef.current(page),
       getCurrentPage: () => currentPageRef.current,
+      reveal: (page0, start, end) => revealRangeRef.current(page0, start, end),
       getFailure: () =>
         docStatusRef.current === 'error'
           ? 'The PDF could not be opened'
@@ -1027,6 +1061,7 @@ function PdfSurface({
         geometry={geometry.current}
         activeId={activeId}
         flashId={flashId}
+        refFlash={refFlash}
         noteDraftFor={noteDraftFor}
         night={night}
         onActivate={(id) => {
@@ -1061,6 +1096,7 @@ function PdfSurface({
       placed,
       activeId,
       flashId,
+      refFlash,
       noteDraftFor,
       night,
       updateHighlight,
@@ -1224,6 +1260,7 @@ interface PdfPageProps {
   geometry: Map<number, PdfPageGeometry>
   activeId: string | null
   flashId: string | null
+  refFlash: { page: number; from: number; to: number } | null
   noteDraftFor: string | null
   /** Inverts the page bitmap and re-blends highlights for dark reading. */
   night: boolean
@@ -1246,6 +1283,7 @@ function PdfPage({
   geometry,
   activeId,
   flashId,
+  refFlash,
   noteDraftFor,
   night,
   onActivate,
@@ -1272,6 +1310,11 @@ function PdfPage({
         )
     )
   }, [geo, placed, pageIndex])
+
+  const refFlashRects = useMemo(
+    () => (geo && refFlash && refFlash.page === pageIndex ? rectsWithinSlice(geo, refFlash.from, refFlash.to) : []),
+    [geo, refFlash, pageIndex]
+  )
 
   // Only the page the highlight starts on draws its popover. `placed` is
   // document-wide, so without this every mounted page rendered one — and the
@@ -1372,6 +1415,29 @@ function PdfPage({
           />
         ))}
       </div>
+
+      {/* A passage Study pointed at: yellow and pulsing like a focused
+          highlight, but only an overlay — it is not a highlight. */}
+      {refFlashRects.length > 0 && (
+        <div className="pointer-events-none absolute inset-0" data-kk-ref-flash>
+          {refFlashRects.map((rect, i) => (
+            <div
+              key={i}
+              className="animate-pulse"
+              style={{
+                position: 'absolute',
+                left: rect.origin.x * scale,
+                top: rect.origin.y * scale,
+                width: rect.size.width * scale,
+                height: rect.size.height * scale,
+                backgroundColor: '#FFE066',
+                opacity: night ? 0.34 : 0.6,
+                mixBlendMode: night ? 'screen' : 'multiply'
+              }}
+            />
+          ))}
+        </div>
+      )}
 
       {/* Find matches: all in a pale yellow, the current one in orange so it
           reads as "you are here". Under the text layer, like the stored

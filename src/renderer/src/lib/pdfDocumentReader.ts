@@ -10,6 +10,15 @@ export interface PdfDocumentReader {
   getDocumentPages(onProgress: (done: number, total: number) => void): Promise<DocPage[]>
   /** 1-based page the reader is on. */
   getCurrentPage(): number
+  /**
+   * Resolves with the page count once the document is open and its text index
+   * exists, or null if that does not happen within `timeoutMs` (or never can).
+   */
+  whenReady(timeoutMs: number): Promise<{ pageCount: number } | null>
+  /** Text of one page, 0-based (empty until the text index exists). */
+  getPageText(page0: number): Promise<string>
+  /** Scrolls to a page (0-based) and, given a character range of its text, flashes it. Never saves anything. */
+  reveal(page0: number, start?: number, end?: number): void
 }
 
 /** The live state of a PDF pane, read when it is needed rather than captured. */
@@ -23,6 +32,8 @@ export interface PdfPaneSource {
   getCurrentPage(): number
   /** Why the document can never be read (it failed to open, or its text index failed), or null. */
   getFailure(): string | null
+  /** Scroll to a page and flash a character range of its text. */
+  reveal?(page0: number, start?: number, end?: number): void
 }
 
 /**
@@ -95,6 +106,18 @@ export function createPdfDocumentReader(
       return promise
     },
     getCurrentPage: () => src.getCurrentPage(),
+    async whenReady(wait) {
+      const end = Date.now() + wait
+      for (;;) {
+        if (disposed || src.getFailure()) return null
+        const doc = src.getDocument()
+        if (doc && src.hasIndex()) return { pageCount: doc.pageCount }
+        if (Date.now() >= end) return null
+        await new Promise((r) => setTimeout(r, pollMs))
+      }
+    },
+    getPageText: (page0) => src.getPageText(page0),
+    reveal: (page0, start, end) => src.reveal?.(page0, start, end),
     dispose() {
       disposed = true
     }
