@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildPromptPayload } from './aiPrompt'
+import { MAX_TOTAL_IMAGE_CHARS, buildPromptPayload } from './aiPrompt'
 import type { AiStreamRequest } from '../shared/types'
 import type { StudyMessage } from '../shared/study'
 
@@ -67,6 +67,14 @@ describe('buildPromptPayload study', () => {
     const { contents } = buildPromptPayload({ ...base, studyMessages: msgs })
     expect(inlineParts(contents)).toEqual([0, 0, 1, 1, 1, 1])
     expect(JSON.stringify(contents[0])).toContain('Figure 1')
+  })
+
+  it('drops the oldest images first when the total would be too large', () => {
+    const big = `data:image/png;base64,${'A'.repeat(Math.floor(MAX_TOTAL_IMAGE_CHARS * 0.4))}`
+    const msgs: StudyMessage[] = [0, 1, 2].map((i) => userMsg(`u${i}`, `q${i}`, big))
+    const { contents } = buildPromptPayload({ ...base, studyMessages: msgs })
+    // three images do not fit; the two newest are within the cap
+    expect(inlineParts(contents)).toEqual([0, 1, 1])
   })
 
   it('adds the reader page to the last user turn only', () => {

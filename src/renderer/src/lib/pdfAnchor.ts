@@ -172,10 +172,12 @@ export async function resolveAnchor(
   const hintPage = direct[0]?.page ?? 0
   for (const page of pagesByDistance(hintPage, index.pageStarts.length)) {
     const text = await pageText(page)
-    const at = indexOfNormalized(text, quote)
-    if (at < 0) continue
-    const globalStart = index.pageStarts[page] + at
-    const spans = spansForRange(index, globalStart, globalStart + quote.length)
+    const hit = locateQuote(text, quote)
+    if (!hit) continue
+    const globalStart = index.pageStarts[page]
+    // The hit's own end, not the quote's length: a match that skipped a
+    // hyphenated line break or a ligature is longer or shorter than the quote.
+    const spans = spansForRange(index, globalStart + hit.start, globalStart + hit.end)
     if (spans.length > 0) return { spans, quality: 'relocated' }
   }
 
@@ -193,11 +195,14 @@ export function pagesByDistance(from: number, total: number): number[] {
 }
 
 /**
- * Quote search that reports the offset in the *original* string, so the hit
- * can be turned back into glyph indices. One matcher, shared with Study's
- * references (see `findQuote`): it also copes with hyphenated line breaks,
- * ligatures and curly quotes, which PDF text is full of.
+ * Where `quote` sits in a page's text, as offsets into the original string. An
+ * exact (case-sensitive) occurrence wins over a looser match that happens to
+ * come earlier; only then does the tolerant matcher shared with Study's
+ * references (see `findQuote`) run, which copes with hyphenated line breaks,
+ * ligatures, curly quotes and case, all of which PDF text is full of.
  */
-function indexOfNormalized(haystack: string, needle: string): number {
-  return findQuote(haystack, needle)?.start ?? -1
+export function locateQuote(text: string, quote: string): { start: number; end: number } | null {
+  const exact = text.indexOf(quote)
+  if (exact >= 0) return { start: exact, end: exact + quote.length }
+  return findQuote(text, quote)
 }

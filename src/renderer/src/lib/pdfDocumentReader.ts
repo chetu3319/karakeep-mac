@@ -3,6 +3,8 @@ import type { DocPage } from './studyContext'
 
 /** What Study needs from an open PDF: every page's text, and where the reader is. */
 export interface PdfDocumentReader {
+  /** The asset this reader serves. A result from a reader for another asset is not this document's. */
+  readonly assetId: string
   /**
    * Text of every page, 1-based. Extracted once per document and then served
    * from memory; `onProgress` is called as pages finish. Rejects if the pane
@@ -39,6 +41,8 @@ export interface PdfPaneSource {
   /** Text of one page, 0-based. */
   getPageText(page: number): Promise<string>
   getCurrentPage(): number
+  /** How far the text index has got, or null when it is not being built. */
+  getIndexProgress?(): { done: number; total: number } | null
   /** Why the document can never be read (it failed to open, or its text index failed), or null. */
   getFailure(): string | null
   /** Scroll to a page and flash a character range of its text. */
@@ -53,22 +57,35 @@ export interface PdfPaneSource {
  * for the document and then the text index instead of failing; if the pane's
  * document is swapped part-way it starts over on the new one. `dispose`
  * abandons any read still waiting. A read that can never finish (the PDF
- * failed to open or to index, or nothing happened within `timeoutMs`) rejects
- * so the caller can carry on without document text.
+ * failed to open or to index, or made no progress for `timeoutMs`) rejects so
+ * the caller can carry on without document text. The clock restarts whenever
+ * the document appears or the index advances, so a long PDF that is steadily
+ * being read is never cut off.
  */
 export function createPdfDocumentReader(
   src: PdfPaneSource,
-  { pollMs = 50, timeoutMs = 60_000 }: { pollMs?: number; timeoutMs?: number } = {}
+  { assetId = '', pollMs = 50, timeoutMs = 60_000 }: { assetId?: string; pollMs?: number; timeoutMs?: number } = {}
 ): PdfDocumentReader & { dispose(): void } {
   let disposed = false
   let memo: { promise: Promise<DocPage[]>; listeners: Set<(done: number, total: number) => void> } | null = null
 
+  // Changes whenever the pane makes headway: the document opens or is swapped,
+  // or another page is indexed.
+  const progressState = (): string => `${src.getDocument() ? 1 : 0}:${src.getIndexProgress?.()?.done ?? -1}`
+
   const waitFor = async (ready: () => boolean, since: number): Promise<void> => {
+    let clock = since
+    let seen = progressState()
     while (!ready()) {
       if (disposed) throw new Error('The PDF pane was closed')
       const failure = src.getFailure()
       if (failure) throw new Error(failure)
-      if (Date.now() - since > timeoutMs) throw new Error('Timed out waiting for the PDF')
+      const now = progressState()
+      if (now !== seen) {
+        seen = now
+        clock = Date.now()
+      }
+      if (Date.now() - clock > timeoutMs) throw new Error('Timed out waiting for the PDF')
       await new Promise((r) => setTimeout(r, pollMs))
     }
   }
@@ -96,6 +113,7 @@ export function createPdfDocumentReader(
   }
 
   return {
+    assetId,
     getDocumentPages(onProgress) {
       if (memo) {
         memo.listeners.add(onProgress)

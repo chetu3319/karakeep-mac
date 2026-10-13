@@ -104,6 +104,72 @@ describe('createPdfDocumentReader', () => {
     }
   })
 
+  it('keeps waiting while the index makes steady progress past the timeout', async () => {
+    vi.useFakeTimers()
+    try {
+      const state = { doc: { pageCount: 1 } as { pageCount: number } | null, done: 0, indexed: false }
+      const reader = createPdfDocumentReader(
+        {
+          getDocument: () => state.doc,
+          hasIndex: () => state.indexed,
+          getIndexProgress: () => ({ done: state.done, total: 100 }),
+          getPageText: async () => 'x',
+          getCurrentPage: () => 1,
+          getFailure: () => null
+        },
+        { pollMs: 50, timeoutMs: 1000 }
+      )
+      const pending = reader.getDocumentPages(() => {})
+      let outcome = 'pending'
+      pending.then(
+        () => (outcome = 'ok'),
+        () => (outcome = 'rejected')
+      )
+      // 3s of wall time, a page indexed every 500ms: more than the timeout in total.
+      for (let i = 0; i < 6; i++) {
+        await vi.advanceTimersByTimeAsync(500)
+        state.done++
+      }
+      expect(outcome).toBe('pending')
+      state.indexed = true
+      await vi.advanceTimersByTimeAsync(100)
+      expect(outcome).toBe('ok')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('rejects when index progress stalls', async () => {
+    vi.useFakeTimers()
+    try {
+      const doc = { pageCount: 5 }
+      const reader = createPdfDocumentReader(
+        {
+          getDocument: () => doc,
+          hasIndex: () => false,
+          getIndexProgress: () => ({ done: 7, total: 100 }),
+          getPageText: async () => '',
+          getCurrentPage: () => 1,
+          getFailure: () => null
+        },
+        { pollMs: 50, timeoutMs: 1000 }
+      )
+      const assertion = expect(reader.getDocumentPages(() => {})).rejects.toThrow('Timed out')
+      await vi.advanceTimersByTimeAsync(1300)
+      await assertion
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('carries the asset it serves', () => {
+    const r = createPdfDocumentReader(
+      { getDocument: () => null, hasIndex: () => false, getPageText: async () => '', getCurrentPage: () => 1, getFailure: () => null },
+      { assetId: 'asset-1' }
+    )
+    expect(r.assetId).toBe('asset-1')
+  })
+
   it('tries again after a failed read', async () => {
     const { state, reader } = pane()
     state.failure = 'broken'

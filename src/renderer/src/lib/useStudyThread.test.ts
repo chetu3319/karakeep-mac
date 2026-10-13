@@ -159,4 +159,28 @@ describe('useStudyThread', () => {
     await waitFor(() => expect(requests).toHaveLength(2))
     expect(requests[1].studyMessages?.map((m) => `${m.role}:${m.text}`)).toEqual(['user:second'])
   })
+
+  it('keeps a seeded exchange that arrives while an answer streams', async () => {
+    disk.A = thread('A', 'old q', 'old a')
+    const h = mount('A')
+    await waitFor(() => expect(h.result.current.ready).toBe(true))
+    act(() => h.result.current.send('new q', ctx()))
+    await waitFor(() => expect(requests).toHaveLength(1))
+    const seeded = thread('S', 'seed q', 'seed a').messages
+    act(() => h.result.current.seed(seeded))
+    act(() => done({ requestId: requests[0].requestId, fullText: 'answer' }))
+    await waitFor(() => expect(texts(disk.A)).toEqual(['old q', 'old a', 'new q', 'answer', 'seed q', 'seed a']))
+    expect(texts(h.result.current.thread)).toEqual(['old q', 'old a', 'new q', 'answer', 'seed q', 'seed a'])
+  })
+
+  it('still adds a seeded exchange when the streaming request fails', async () => {
+    disk.A = thread('A', 'old q', 'old a')
+    const h = mount('A')
+    await waitFor(() => expect(h.result.current.ready).toBe(true))
+    act(() => h.result.current.send('new q', ctx()))
+    await waitFor(() => expect(requests).toHaveLength(1))
+    act(() => h.result.current.seed(thread('S', 'seed q', 'seed a').messages))
+    act(() => failed({ requestId: requests[0].requestId, error: 'boom' }))
+    await waitFor(() => expect(texts(disk.A)).toEqual(['old q', 'old a', 'new q', 'seed q', 'seed a']))
+  })
 })

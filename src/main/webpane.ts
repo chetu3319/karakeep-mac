@@ -37,6 +37,8 @@ export class WebPaneManager {
   private preloadReady = false
   private pendingHighlights: unknown[] = []
   private pendingReveals = new Map<string, (result: 'found' | 'not-found' | 'unavailable') => void>()
+  /** Bumped by every cancel, so a capture still waiting for the preload can tell it was called off. */
+  private captureGeneration = 0
   private pendingCapture: { requestId: string; finish: (r: RegionCaptureResult) => void } | null = null
   private onHighlightEvent: (type: 'created' | 'updated' | 'removed', payload: unknown, bookmarkId: string | null) => void
 
@@ -298,6 +300,7 @@ export class WebPaneManager {
    */
   async captureRegion(): Promise<RegionCaptureResult> {
     this.cancelCapture()
+    const generation = this.captureGeneration
     const live = (): Electron.WebContents | null =>
       this.view && !this.view.webContents.isDestroyed() ? this.view.webContents : null
     if (!live() || !this.attached) return { error: 'Open the Web tab to capture a region.' }
@@ -306,6 +309,8 @@ export class WebPaneManager {
     // the preload rather than refusing on isLoading().
     const readyBy = Date.now() + CAPTURE_READY_MS
     while (!this.preloadReady && live() && Date.now() < readyBy) await new Promise((r) => setTimeout(r, 50))
+    // Cancelled (or superseded) while waiting: no crosshair, no error.
+    if (generation !== this.captureGeneration) return null
     const wc = live()
     if (!wc || !this.attached) return { error: 'Open the Web tab to capture a region.' }
     if (!this.preloadReady) return { error: 'This page is not ready yet. Try again in a moment.' }
@@ -328,6 +333,7 @@ export class WebPaneManager {
 
   /** Removes the crosshair and resolves any waiting capture with null. */
   cancelCapture(): void {
+    this.captureGeneration++
     const pending = this.pendingCapture
     if (!pending) return
     this.pendingCapture = null

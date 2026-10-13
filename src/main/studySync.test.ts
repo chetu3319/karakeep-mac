@@ -91,7 +91,9 @@ describe('studySync', () => {
     await sync.save(thread('2026-01-01T00:00:00Z'), 'Doc')
     await sync.flush('b1')
     expect(states.at(-1)).toBe('failed')
-    expect(f.api.detachAssetFromBookmark).not.toHaveBeenCalled()
+    // the old backup is untouched; only the new, unattached upload is cleaned up
+    expect(f.api.detachAssetFromBookmark).not.toHaveBeenCalledWith('b1', 'old')
+    expect(f.api.detachAssetFromBookmark).toHaveBeenCalledWith('b1', 'new')
     expect(await store.load('b1')).not.toBeNull()
     // the next flush retries
     await sync.flush('b1')
@@ -105,6 +107,16 @@ describe('studySync', () => {
     await store.save(thread('2026-01-01T00:00:00Z', 'local'))
     const got = await sync.open('b1')
     expect(got?.messages[0].text).toBe('remote')
+  })
+
+  it('open stores a remote thread under the requested bookmark even if the file names another', async () => {
+    const remote = { ...thread('2026-02-01T00:00:00Z', 'remote'), bookmarkId: 'other' }
+    const f = fakeApi({ remote: renderStudyHtml(remote, 'Doc'), oldAssets: ['old'] })
+    const { sync, store } = make(f)
+    const got = await sync.open('b1')
+    expect(got?.bookmarkId).toBe('b1')
+    expect((await store.load('b1'))?.messages[0].text).toBe('remote')
+    expect(await store.load('other')).toBeNull()
   })
 
   it('open keeps local, flags newer-version and blocks pushes for a v2 remote', async () => {

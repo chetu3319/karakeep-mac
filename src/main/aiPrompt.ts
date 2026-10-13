@@ -8,6 +8,8 @@ export type GeminiContent = { role: 'user' | 'model'; parts: GeminiPart[] }
 
 /** Only this many of the most recent image-bearing user turns keep their pixels. */
 const MAX_IMAGE_TURNS = 4
+/** Upper bound on the base64 characters of inline images in one request (about 9MB of pixels). */
+export const MAX_TOTAL_IMAGE_CHARS = 12_000_000
 
 const STUDY_INSTRUCTIONS = [
   'You are a careful study partner embedded in a document reader. The reader is working through the document below and asks you questions about it. Answer from the document, be direct and rigorous, and use short paragraphs or bullets where they help. Avoid filler.',
@@ -51,6 +53,23 @@ function studyContents(req: AiStreamRequest): GeminiContent[] {
   for (let i = messages.length - 1; i >= 0 && keepImages.size < MAX_IMAGE_TURNS; i--) {
     if (hasImage(messages[i])) keepImages.add(i)
   }
+  // However many images survive, they must fit one request: drop the oldest
+  // pictures first until the total is under the cap. Keys are "turn:attachment".
+  const inlineOf = (m: StudyMessage): Array<{ j: number; size: number }> =>
+    (m.attachments ?? []).flatMap((a, j) =>
+      a.kind === 'region' && a.imageDataUrl ? [{ j, size: a.imageDataUrl.length }] : []
+    )
+  const images = [...keepImages]
+    .sort((a, b) => a - b)
+    .flatMap((i) => inlineOf(messages[i]).map((x) => ({ key: `${i}:${x.j}`, size: x.size })))
+  let total = images.reduce((n, x) => n + x.size, 0)
+  const dropped = new Set<string>()
+  for (const x of images) {
+    if (total <= MAX_TOTAL_IMAGE_CHARS) break
+    dropped.add(x.key)
+    total -= x.size
+  }
+
   let lastUser = -1
   messages.forEach((m, i) => {
     if (m.role === 'user') lastUser = i
@@ -65,8 +84,8 @@ function studyContents(req: AiStreamRequest): GeminiContent[] {
 
     const parts: GeminiPart[] = [{ text: lines.join('\n') }]
     if (keepImages.has(i)) {
-      for (const a of m.attachments ?? []) {
-        if (a.kind !== 'region' || !a.imageDataUrl) continue
+      for (const [j, a] of (m.attachments ?? []).entries()) {
+        if (a.kind !== 'region' || !a.imageDataUrl || dropped.has(`${i}:${j}`)) continue
         const inline = dataUrlToInline(a.imageDataUrl)
         if (inline) parts.push({ inlineData: inline })
       }

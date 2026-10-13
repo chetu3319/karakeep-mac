@@ -109,7 +109,16 @@ export function createStudySync(deps: StudySyncDeps): {
         mimeType: 'text/html',
         fileName: STUDY_FILE_NAME
       })
-      await api.attachAssetToBookmark(bookmarkId, uploaded.assetId)
+      try {
+        await api.attachAssetToBookmark(bookmarkId, uploaded.assetId)
+      } catch (err) {
+        // Karakeep has no call that deletes an asset that was never attached
+        // (detaching is what deletes it), so an upload orphaned here cannot
+        // be removed for certain. If the attach did land and only its reply
+        // was lost, detaching clears it; otherwise this is a harmless no-op.
+        await api.detachAssetFromBookmark(bookmarkId, uploaded.assetId).catch(() => {})
+        throw err
+      }
       verified.get(bookmarkId)?.add(uploaded.assetId)
       for (const id of older) {
         await api.detachAssetFromBookmark(bookmarkId, id)
@@ -141,8 +150,11 @@ export function createStudySync(deps: StudySyncDeps): {
         const remote = await pull(bookmarkId)
         if (blocked.has(bookmarkId)) return local
         if (remote && (!local || Date.parse(remote.updatedAt) > Date.parse(local.updatedAt))) {
-          await store.save(remote)
-          return remote
+          // The file is trusted for its content, not for which bookmark it
+          // claims: it is saved under (and returned for) the one asked for.
+          const adopted = { ...remote, bookmarkId }
+          await store.save(adopted)
+          return adopted
         }
         // The local chat is ahead of (or missing from) Karakeep, e.g. the app
         // quit before the last push: back it up now.

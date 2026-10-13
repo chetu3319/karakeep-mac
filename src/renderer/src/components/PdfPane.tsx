@@ -43,6 +43,7 @@ import type { Highlight } from '../../../shared/types'
 import type { StudyAttachment, StudyMessage } from '../../../shared/study'
 import { createPdfDocumentReader, type PdfDocumentReader } from '../lib/pdfDocumentReader'
 import {
+  encodedTooLarge,
   glyphSpansInRect,
   isTinyDrag,
   pickPage,
@@ -624,6 +625,8 @@ function PdfSurface({
   // memoised per document so closing and reopening the panel costs nothing.
   const indexRef = useRef(index)
   indexRef.current = index
+  const indexingRef = useRef(indexing)
+  indexingRef.current = indexing
   const pageTextRef = useRef(pageText)
   pageTextRef.current = pageText
   const currentPageRef = useRef(scrollState.currentPage)
@@ -723,12 +726,34 @@ function PdfSurface({
           { scaleFactor, dpr: 1, imageType: 'image/png', withAnnotations: true }
         )
         .toPromise()
-      const imageDataUrl = await new Promise<string>((ok, fail) => {
-        const reader = new FileReader()
-        reader.onload = () => ok(String(reader.result))
-        reader.onerror = () => fail(reader.error)
-        reader.readAsDataURL(blob as Blob)
-      })
+      const toDataUrl = (b: Blob): Promise<string> =>
+        new Promise<string>((ok, fail) => {
+          const reader = new FileReader()
+          reader.onload = () => ok(String(reader.result))
+          reader.onerror = () => fail(reader.error)
+          reader.readAsDataURL(b)
+        })
+      let imageDataUrl = await toDataUrl(blob as Blob)
+      // A dense figure can make an enormous PNG: JPEG first, then smaller,
+      // the same ladder the web capture uses.
+      if (encodedTooLarge(imageDataUrl)) {
+        const bitmap = await createImageBitmap(blob as Blob)
+        let w = bitmap.width
+        let h = bitmap.height
+        const canvas = document.createElement('canvas')
+        for (let i = 0; i < 4 && encodedTooLarge(imageDataUrl); i++) {
+          if (i > 0) {
+            w = Math.max(1, Math.round(w / 1.5))
+            h = Math.max(1, Math.round(h / 1.5))
+          }
+          canvas.width = w
+          canvas.height = h
+          canvas.getContext('2d')?.drawImage(bitmap, 0, 0, w, h)
+          imageDataUrl = canvas.toDataURL('image/jpeg', 0.85)
+        }
+        bitmap.close()
+        if (encodedTooLarge(imageDataUrl)) return resolve(null)
+      }
       let text = ''
       const geo = geometry.current.get(target.page)
       if (geo) {
@@ -755,27 +780,33 @@ function PdfSurface({
 
   useEffect(() => {
     if (!onDocumentReader) return
-    const reader = createPdfDocumentReader({
-      getDocument: () => docRef.current,
-      hasIndex: () => !!indexRef.current,
-      getPageText: (page) => pageTextRef.current(page),
-      getCurrentPage: () => currentPageRef.current,
-      reveal: (page0, start, end) => revealRangeRef.current(page0, start, end),
-      startRegionCapture: () => startRegionCaptureRef.current(),
-      cancelRegionCapture: () => cancelRegionCaptureRef.current(),
-      getFailure: () =>
-        docStatusRef.current === 'error'
-          ? 'The PDF could not be opened'
-          : indexFailedRef.current
-            ? 'The PDF text could not be read'
-            : null
-    })
+    // One reader per asset, so a result from the previous document's reader
+    // is recognisable by its assetId and never taken for this one's.
+    const reader = createPdfDocumentReader(
+      {
+        getIndexProgress: () => indexingRef.current,
+        getDocument: () => docRef.current,
+        hasIndex: () => !!indexRef.current,
+        getPageText: (page) => pageTextRef.current(page),
+        getCurrentPage: () => currentPageRef.current,
+        reveal: (page0, start, end) => revealRangeRef.current(page0, start, end),
+        startRegionCapture: () => startRegionCaptureRef.current(),
+        cancelRegionCapture: () => cancelRegionCaptureRef.current(),
+        getFailure: () =>
+          docStatusRef.current === 'error'
+            ? 'The PDF could not be opened'
+            : indexFailedRef.current
+              ? 'The PDF text could not be read'
+              : null
+      },
+      { assetId }
+    )
     onDocumentReader(reader)
     return () => {
       reader.dispose()
       onDocumentReader(null)
     }
-  }, [onDocumentReader])
+  }, [onDocumentReader, assetId])
 
   // What the selection toolbar's AI actions work from. Unlike a highlight this
   // never clears the selection: the toolbar is attached to it, so the answer

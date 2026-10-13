@@ -35,6 +35,12 @@ interface Inflight {
   ctx: StudySendContext
   /** Already asked again with half the document. */
   retried: boolean
+  /**
+   * Messages seeded ("Continue in Study") while this request was in flight.
+   * They belong after the answer, so they wait here and are appended by
+   * whichever way the request ends. The array is shared across resends.
+   */
+  late: StudyMessage[]
 }
 
 const newId = (): string => `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -104,6 +110,24 @@ export function useStudyThread(
     void window.kk.study.save(stripForPersistence(next), docTitleRef.current)
   }, [])
 
+  // A request that ends without an answer still owes its late seeds a place
+  // in the chat: they are added after the unanswered question.
+  const releaseLate = useCallback(
+    (sent: Inflight): void => {
+      if (!sent.late.length) return
+      const visible = bookmarkIdRef.current === sent.bookmarkId
+      const base = (visible ? threadRef.current : null) ?? sent.base
+      const next: StudyThread = {
+        ...base,
+        updatedAt: new Date().toISOString(),
+        messages: [...base.messages, ...sent.late]
+      }
+      if (visible) setThread(next)
+      persist(next)
+    },
+    [persist]
+  )
+
   const { streaming, text, error, errorCode, startStream, abortStream } = useAiStream({
     onDone: (fullText) => {
       const sent = inflight.current
@@ -113,7 +137,7 @@ export function useStudyThread(
       const finished: StudyThread = {
         ...sent.base,
         updatedAt: answer.createdAt,
-        messages: [...sent.base.messages, answer]
+        messages: [...sent.base.messages, answer, ...sent.late]
       }
       if (bookmarkIdRef.current === sent.bookmarkId) setThread(finished)
       setStreamFor(null)
@@ -157,7 +181,8 @@ export function useStudyThread(
         let next = loaded
         const seeds = seedQueue.current
         seedQueue.current = []
-        if (seeds.length) {
+        const inFlightHere = inflight.current?.bookmarkId === bookmarkId
+        if (seeds.length && !inFlightHere) {
           next = { ...(next ?? emptyThread(bookmarkId)), updatedAt: new Date().toISOString() }
           next = { ...next, messages: [...next.messages, ...seeds] }
           persist(next)
@@ -166,7 +191,13 @@ export function useStudyThread(
         // and came back) is newer than what is on disk: its base already
         // holds the question that is being answered.
         const live = inflight.current
-        setThread(live && live.bookmarkId === bookmarkId ? live.base : next)
+        if (live && live.bookmarkId === bookmarkId) {
+          // Seeds queued while the panel was closed follow the live answer too.
+          live.late.push(...seeds)
+          setThread(live.base)
+        } else {
+          setThread(next)
+        }
         setReady(true)
       })
     return () => {
@@ -228,7 +259,7 @@ export function useStudyThread(
       }
       setThread(base)
       setPending([])
-      dispatch({ bookmarkId: id, base, ctx, retried: false })
+      dispatch({ bookmarkId: id, base, ctx, retried: false, late: [] })
     },
     [dispatch, pending, streaming]
   )
@@ -253,6 +284,7 @@ export function useStudyThread(
       return
     }
     inflight.current = null
+    releaseLate(sent)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [error, errorCode, streaming, dispatch])
 
@@ -262,16 +294,18 @@ export function useStudyThread(
       const current = threadRef.current
       if (!id || !current || streaming) return
       if (current.messages[current.messages.length - 1]?.role !== 'user') return
-      dispatch({ bookmarkId: id, base: current, ctx, retried: false })
+      dispatch({ bookmarkId: id, base: current, ctx, retried: false, late: [] })
     },
     [dispatch, streaming]
   )
 
   const stop = useCallback((): void => {
     abortStream()
+    const sent = inflight.current
     inflight.current = null
     setStreamFor(null)
-  }, [abortStream])
+    if (sent) releaseLate(sent)
+  }, [abortStream, releaseLate])
 
   const clear = useCallback(async (): Promise<void> => {
     const id = bookmarkIdRef.current
@@ -296,6 +330,13 @@ export function useStudyThread(
       if (loadedFor.current !== id) {
         // The panel is still opening: add them once the saved chat is read.
         seedQueue.current = [...seedQueue.current, ...messages]
+        return
+      }
+      const live = inflight.current
+      if (live && live.bookmarkId === id) {
+        // An answer is on its way and will be written over the thread as it
+        // stands now; the seeded exchange goes after it.
+        live.late.push(...messages)
         return
       }
       const base = threadRef.current ?? emptyThread(id)

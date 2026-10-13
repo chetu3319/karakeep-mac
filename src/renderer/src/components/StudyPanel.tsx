@@ -111,6 +111,33 @@ function Answer({
   // Tags whose click is still being worked out; repeat clicks are ignored.
   const [pending, setPending] = useState<Set<number>>(new Set())
   const pendingRef = useRef(new Set<number>())
+  // Tags whose click found the page not ready (the web page was still
+  // loading): they say so for a moment so the click is not silently lost.
+  const [notReady, setNotReady] = useState<Set<number>>(new Set())
+  const notReadyTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>())
+  useEffect(
+    () => () => {
+      notReadyTimers.current.forEach((t) => clearTimeout(t))
+    },
+    []
+  )
+  function flagNotReady(i: number): void {
+    const timers = notReadyTimers.current
+    const prev = timers.get(i)
+    if (prev) clearTimeout(prev)
+    setNotReady((p) => new Set(p).add(i))
+    timers.set(
+      i,
+      setTimeout(() => {
+        timers.delete(i)
+        setNotReady((p) => {
+          const next = new Set(p)
+          next.delete(i)
+          return next
+        })
+      }, 2500)
+    )
+  }
   useEffect(() => {
     // When the turn is finished: never while it streams, never per render. It
     // runs again only when the document source changes, and then only for tags
@@ -145,12 +172,16 @@ function Answer({
           const approx = q === 'approximate'
           const missing = q === 'missing'
           const busy = pending.has(i)
-          const title = missing
+          const unready = notReady.has(i)
+          const title = unready
+            ? 'Page not ready — try again'
+            : missing
             ? "Couldn't find this passage"
             : approx
               ? `Jumped to page ${ref.page} — exact passage not found`
               : ref.quote
           return (
+            <>
             <button
               type="button"
               disabled={missing}
@@ -163,6 +194,7 @@ function Answer({
                 void onRevealRef(ref)
                   .catch((): RevealResult => 'unavailable')
                   .then((result) => {
+                    if (result === 'unavailable') flagNotReady(i)
                     const next = applyRevealResult(qualityRef.current[i], result)
                     if (next) setQuality((prev) => (prev[i] === next ? prev : { ...prev, [i]: next }))
                   })
@@ -185,10 +217,16 @@ function Answer({
             >
               {refLabel(ref, paged)}
             </button>
+            {unready && (
+              <span role="status" className="mr-0.5 text-[10px] text-amber-600 dark:text-amber-400">
+                Page not ready — try again
+              </span>
+            )}
+            </>
           )
         }
       }),
-    [parsed, quality, pending, paged, onRevealRef]
+    [parsed, quality, pending, notReady, paged, onRevealRef]
   )
   return <>{body}</>
 }

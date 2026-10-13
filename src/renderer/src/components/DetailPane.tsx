@@ -22,6 +22,7 @@ import PdfPane, { type PdfDocumentReader } from './PdfPane'
 import TagEditor from './TagEditor'
 import WebPane from './WebPane'
 import StudyPanel from './StudyPanel'
+import { useStudyPdfPages } from '../lib/useStudyPdfPages'
 import SidePanel from './SidePanel'
 import { STUDY_BUDGET_CHARS, isStudyAsset, type StudyAttachment, type StudyMessage } from '../../../shared/study'
 import { TRAFFIC_LIGHT_INSET } from './TitlebarRow'
@@ -161,31 +162,14 @@ export default function DetailPane({
 
   // A PDF's text only exists inside the PDF pane, which is mounted for the
   // PDF tab's bookmark whichever tab is showing.
-  const [studyPages, setStudyPages] = useState<{ bookmarkId: string; assetId: string; pages: DocPage[] } | null>(null)
-  const [studyProgress, setStudyProgress] = useState<{ done: number; total: number } | null>(null)
-  useEffect(() => {
-    if (!studyOpen || !bookmark || !pdfAssetId || !pdfReader) return
-    const id = bookmark.id
-    let cancelled = false
-    setStudyProgress(null)
+  const { pages: studyPageList, progress: studyProgress } = useStudyPdfPages(
+    studyOpen && !!bookmark && !!pdfAssetId,
+    bookmark?.id ?? null,
+    pdfAssetId,
     pdfReader
-      .getDocumentPages((done, total) => {
-        if (!cancelled) setStudyProgress({ done, total })
-      })
-      .then((pages) => {
-        if (!cancelled) setStudyPages({ bookmarkId: id, assetId: pdfAssetId, pages })
-      })
-      // An unreadable PDF still opens Study, answering from the title.
-      .catch(() => {
-        if (!cancelled) setStudyPages({ bookmarkId: id, assetId: pdfAssetId, pages: [] })
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [studyOpen, bookmark?.id, pdfAssetId, pdfReader]) // eslint-disable-line react-hooks/exhaustive-deps
+  )
 
   const studyIsPdf = !!pdfAssetId
-  const studyPageList = studyPages && studyPages.bookmarkId === bookmark?.id && studyPages.assetId === pdfAssetId ? studyPages.pages : null
   const studyText = studyIsPdf ? null : (bookmarkText.data?.text ?? '')
   const studyDocReady = studyIsPdf ? studyPageList !== null : !bookmarkText.isPending
   const studyHasText = studyIsPdf
