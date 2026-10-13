@@ -585,6 +585,8 @@ function PdfSurface({
       // or anywhere else with actual selectable text — already has native
       // copy support; don't steal the shortcut from it.
       if (document.getSelection()?.toString()) return
+      // Likewise a focused input (the Ask… field): copy means its own text.
+      if ((e.target as Element | null)?.closest?.('input, textarea, [contenteditable]')) return
       const scope = selection.forDocument(documentId)
       if (!scope.getState().selection) return
       e.preventDefault()
@@ -706,7 +708,23 @@ function PdfSurface({
     [selection, index, doc, documentId, engine, pageText]
   )
 
-  const closeSelectionMenu = useCallback((): void => {
+  // The open AI card lives here, not in the selection menu. The selection
+  // plugin unmounts and re-mounts its menu as the viewport scrolls (and drops
+  // it entirely when the selection leaves the visible pages); state held in
+  // the menu would die with it, taking the in-flight answer along. Held at
+  // this level the card survives, anchored to the captured page + rect, the
+  // way the old floating HUD was. Only an explicit dismissal clears it.
+  const [aiCard, setAiCard] = useState<AiCardState | null>(null)
+  useEffect(() => {
+    setAiCard(null)
+  }, [documentId])
+  useEffect(() => {
+    // Opening an existing highlight replaces the card.
+    if (activeId) setAiCard(null)
+  }, [activeId])
+
+  const closeAiCard = useCallback((): void => {
+    setAiCard(null)
     selection?.forDocument(documentId).clear()
   }, [selection, documentId])
 
@@ -720,8 +738,29 @@ function PdfSurface({
         text: cap.selectionText,
         note
       })
+      setAiCard(null)
       selection?.forDocument(documentId).clear()
       setActiveId(created.id)
+    },
+    [createHighlight, bookmarkId, selection, documentId]
+  )
+
+  // A swatch or Note pressed in the card highlights the captured range, which
+  // does not depend on the live selection still existing.
+  const createFromCard = useCallback(
+    async (cap: SelectionCapture, color: string, withNote: boolean): Promise<void> => {
+      const created = await createHighlight.mutateAsync({
+        bookmarkId,
+        startOffset: cap.startOffset,
+        endOffset: cap.endOffset,
+        color,
+        text: cap.selectionText
+      })
+      setAiCard(null)
+      selection?.forDocument(documentId).clear()
+      lastCreatedId.current = created.id
+      setActiveId(created.id)
+      if (withNote) setNoteDraftFor(created.id)
     },
     [createHighlight, bookmarkId, selection, documentId]
   )
@@ -1061,13 +1100,9 @@ function PdfSurface({
         onCreate={createFromSelection}
         onCopy={copyFromSelection}
         onCapture={captureSelection}
-        onCloseMenu={closeSelectionMenu}
-        onSaveAiNote={saveAiAsHighlight}
+        onOpenCard={setAiCard}
+        cardOpen={!!aiCard}
         onStudyAttach={onStudyAttach}
-        onStudyContinue={onStudyContinue}
-        docTitle={title || fileName}
-        sourceUrl={sourceUrl}
-        author={author}
       />
     ),
     [
@@ -1085,14 +1120,8 @@ function PdfSurface({
       createFromSelection,
       copyFromSelection,
       captureSelection,
-      closeSelectionMenu,
-      saveAiAsHighlight,
-      onStudyAttach,
-      onStudyContinue,
-      title,
-      fileName,
-      sourceUrl,
-      author
+      aiCard,
+      onStudyAttach
     ]
   )
 
@@ -1220,8 +1249,40 @@ function PdfSurface({
         </div>
 
       </div>
+
+      {aiCard && (
+        <AiCard
+          card={aiCard}
+          onChange={setAiCard}
+          onClose={closeAiCard}
+          onCreate={(color, withNote) => createFromCard(aiCard.cap, color, withNote)}
+          onSaveAiNote={(note) => saveAiAsHighlight(aiCard.cap, note)}
+          onStudyAttach={onStudyAttach}
+          onStudyContinue={onStudyContinue}
+          docTitle={title || fileName}
+          sourceUrl={sourceUrl}
+          author={author}
+        />
+      )}
     </>
   )
+}
+
+/** The expanded AI card: the captured selection plus what is being shown for it. */
+interface AiCardState {
+  cap: SelectionCapture
+  /** Where the card is anchored: page-relative rect on `pageIndex`. */
+  rect: Rect
+  pageIndex: number
+  view: { mode: InlineMode; prompt?: string } | null
+  asking: boolean
+}
+
+function anchorForPageRect(pageIndex: number, rect: Rect): DOMRect | null {
+  const pageEl = document.querySelector(`[data-pdf-page="${pageIndex}"]`)
+  if (!pageEl) return null
+  const box = pageEl.getBoundingClientRect()
+  return new DOMRect(box.left + rect.origin.x, box.top + rect.origin.y, rect.size.width, rect.size.height)
 }
 
 /** What the toolbar's AI actions read from the live selection (see captureSelection). */
@@ -1256,13 +1317,9 @@ interface PdfPageProps {
   onCreate: (color: string, withNote: boolean) => Promise<string | null>
   onCopy: () => Promise<boolean>
   onCapture: (pageIndex: number) => Promise<SelectionCapture | null>
-  onCloseMenu: () => void
-  onSaveAiNote: (cap: SelectionCapture, note: string) => Promise<void>
+  onOpenCard: (card: AiCardState) => void
+  cardOpen: boolean
   onStudyAttach?: (attachment: StudyAttachment) => void
-  onStudyContinue?: (messages: StudyMessage[]) => void
-  docTitle: string
-  sourceUrl?: string
-  author?: string
 }
 
 function PdfPage({
@@ -1285,13 +1342,9 @@ function PdfPage({
   onCreate,
   onCopy,
   onCapture,
-  onCloseMenu,
-  onSaveAiNote,
-  onStudyAttach,
-  onStudyContinue,
-  docTitle,
-  sourceUrl,
-  author
+  onOpenCard,
+  cardOpen,
+  onStudyAttach
 }: PdfPageProps): React.JSX.Element {
   const geo = geometry.get(pageIndex)
 
@@ -1467,13 +1520,9 @@ function PdfPage({
               onCreate={onCreate}
               onCopy={onCopy}
               onCapture={() => onCapture(pageIndex)}
-              onClose={onCloseMenu}
-              onSaveAiNote={onSaveAiNote}
+              onOpenCard={onOpenCard}
+              cardOpen={cardOpen}
               onStudyAttach={onStudyAttach}
-              onStudyContinue={onStudyContinue}
-              docTitle={docTitle}
-              sourceUrl={sourceUrl}
-              author={author}
             />
           ) : null
         }
@@ -1555,8 +1604,15 @@ function FloatingPopover({
     }
     window.addEventListener('scroll', queue, true)
     window.addEventListener('resize', queue)
+    // The popover also changes size on its own: a streamed answer grows the
+    // card from a child that FloatingPopover never re-renders for. Re-place
+    // whenever the box changes so it neither slides over the selection nor
+    // pushes its footer off-screen.
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(queue)
+    if (el.current) ro?.observe(el.current)
     return () => {
       if (frame) cancelAnimationFrame(frame)
+      ro?.disconnect()
       window.removeEventListener('scroll', queue, true)
       window.removeEventListener('resize', queue)
     }
@@ -1712,17 +1768,178 @@ const QUICK_ACTIONS: { mode: Exclude<InlineMode, 'custom'>; label: string }[] = 
 ]
 
 /**
- * Colour swatches, then the quick AI actions (Explain / Define / Math / Ask…)
- * and "Add to Study", shown against a live text selection. Choosing an action
- * grows an answer under the same toolbar, in the same card.
+ * The toolbar row shared by the selection menu and the expanded AI card:
+ * colours, Note, Copy, then Explain / Define / Math / Ask… and Add to Study.
+ */
+function SelectionToolbar({
+  busy,
+  activeMode,
+  asking,
+  onSwatch,
+  onNote,
+  onCopy,
+  onMode,
+  onAsk,
+  onAttach
+}: {
+  busy: boolean
+  activeMode: InlineMode | null
+  asking: boolean
+  onSwatch: (color: string) => void
+  onNote: () => void
+  onCopy: () => Promise<boolean>
+  onMode: (mode: Exclude<InlineMode, 'custom'>) => void
+  onAsk: () => void
+  onAttach?: () => void
+}): React.JSX.Element {
+  // Copying leaves the selection and menu alone (see copyFromSelection). This
+  // flag only drives the button's "Copied" label and reverts itself after
+  // COPY_CONFIRM_MS; the cleanup matters if the menu unmounts mid-confirmation.
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(false), COPY_CONFIRM_MS)
+    return () => clearTimeout(timer)
+  }, [copied])
+
+  return (
+    <div className="kh-toolbar">
+      <SwatchRow active={null} disabled={busy} onPick={onSwatch} />
+      <div className="kh-sep" />
+      <PopButton label="Note" icon={ICON_NOTE} disabled={busy} onClick={onNote} data-kk-note="" />
+      {/* Copy sits right next to Note, mirroring where it lands on an
+          existing highlight's popover (HighlightPopover below). */}
+      <PopButton
+        label={copied ? 'Copied' : 'Copy'}
+        reserveLabels={['Copy', 'Copied']}
+        icon={copied ? ICON_CHECK : ICON_COPY}
+        disabled={busy || copied}
+        onClick={() => {
+          void (async () => {
+            // Only confirm if the copy actually happened.
+            if (await onCopy()) setCopied(true)
+          })()
+        }}
+        data-kk-copy=""
+      />
+      <div className="kh-sep" />
+      {QUICK_ACTIONS.map((a) => (
+        <PopButton
+          key={a.mode}
+          label={a.label}
+          disabled={busy}
+          data-on={activeMode === a.mode ? '1' : undefined}
+          onClick={() => onMode(a.mode)}
+          data-kk-ai-mode={a.mode}
+        />
+      ))}
+      <PopButton
+        label="Ask…"
+        disabled={busy}
+        data-on={asking || activeMode === 'custom' ? '1' : undefined}
+        onClick={onAsk}
+        data-kk-ai-mode="custom"
+      />
+      {onAttach && (
+        <PopButton
+          label="Add to Study"
+          icon={ICON_STUDY_ATTACH}
+          iconOnly
+          disabled={busy}
+          onClick={onAttach}
+          data-kk-study-attach=""
+        />
+      )}
+    </div>
+  )
+}
+
+/**
+ * The plain toolbar shown against a live text selection. Choosing an AI
+ * action hands over to the AiCard (held by PdfSurface, so it outlives this
+ * menu); while that card is open this menu steps aside.
  */
 function SelectionMenu({
   rect,
   pageIndex,
+  cardOpen,
   onCreate,
   onCopy,
   onCapture,
+  onOpenCard,
+  onStudyAttach
+}: {
+  rect: Rect
+  pageIndex: number
+  cardOpen: boolean
+  onCreate: (color: string, withNote: boolean) => Promise<string | null>
+  onCopy?: () => Promise<boolean>
+  onCapture: () => Promise<SelectionCapture | null>
+  onOpenCard: (card: AiCardState) => void
+  onStudyAttach?: (attachment: StudyAttachment) => void
+}): React.JSX.Element | null {
+  const [busy, setBusy] = useState(false)
+
+  // `rect` is page-relative and already scaled; the popover is placed in
+  // viewport coordinates, so it needs the page's own position added.
+  const anchor = useCallback(
+    (): DOMRect | null => anchorForPageRect(pageIndex, rect),
+    [rect, pageIndex]
+  )
+
+  const guard = async (fn: () => Promise<void>): Promise<void> => {
+    setBusy(true)
+    try {
+      await fn()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const open = (view: AiCardState['view'], asking: boolean): Promise<void> =>
+    guard(async () => {
+      const cap = await onCapture()
+      if (cap) onOpenCard({ cap, rect, pageIndex, view, asking })
+    })
+
+  if (cardOpen) return null
+
+  return (
+    <FloatingPopover anchor={anchor}>
+      <SelectionToolbar
+        busy={busy}
+        activeMode={null}
+        asking={false}
+        onSwatch={(color) => void guard(async () => void (await onCreate(color, false)))}
+        onNote={() => void guard(async () => void (await onCreate(DEFAULT_HIGHLIGHT_COLOR, true)))}
+        onCopy={async () => (await onCopy?.()) ?? false}
+        onMode={(mode) => void open({ mode }, false)}
+        onAsk={() => void open(null, true)}
+        onAttach={
+          onStudyAttach
+            ? () =>
+                void guard(async () => {
+                  const cap = await onCapture()
+                  if (cap) onStudyAttach(textAttachment(cap.selectionText, cap.page, cap.surroundingContext))
+                })
+            : undefined
+        }
+      />
+    </FloatingPopover>
+  )
+}
+
+/**
+ * The toolbar grown into an answer card. It is anchored to the page and rect
+ * captured when it opened (like the floating HUD it replaced), so it keeps
+ * its place and its stream when the selection plugin remounts or drops the
+ * in-page menu. Esc, a press outside, or Continue closes it.
+ */
+function AiCard({
+  card,
+  onChange,
   onClose,
+  onCreate,
   onSaveAiNote,
   onStudyAttach,
   onStudyContinue,
@@ -1730,174 +1947,62 @@ function SelectionMenu({
   sourceUrl,
   author
 }: {
-  rect: Rect
-  pageIndex: number
-  onCreate: (color: string, withNote: boolean) => Promise<string | null>
-  onCopy?: () => Promise<boolean>
-  onCapture: () => Promise<SelectionCapture | null>
+  card: AiCardState
+  onChange: (card: AiCardState) => void
   onClose: () => void
-  onSaveAiNote: (cap: SelectionCapture, note: string) => Promise<void>
+  onCreate: (color: string, withNote: boolean) => Promise<void>
+  onSaveAiNote: (note: string) => Promise<void>
   onStudyAttach?: (attachment: StudyAttachment) => void
   onStudyContinue?: (messages: StudyMessage[]) => void
   docTitle: string
   sourceUrl?: string
   author?: string
 }): React.JSX.Element {
+  const { cap, view, asking } = card
   const [busy, setBusy] = useState(false)
-  // Copying no longer clears the selection or closes the menu (see
-  // copyFromSelection above) — the selection is left alone, exactly as it
-  // would be after any other copy. This flag only drives the button's own
-  // "Copied" label, and reverts itself after COPY_CONFIRM_MS below so the
-  // button is clickable again without the user having to reopen the menu.
-  const [copied, setCopied] = useState(false)
-  // The open answer, if any. `cap` is what the selection said when the action
-  // was chosen; it is held here so Save and Continue use the very text the
-  // answer was written about. Asking… shows its input first and only starts
-  // a request on submit.
-  const [answer, setAnswer] = useState<{ mode: InlineMode; prompt?: string; cap: SelectionCapture } | null>(null)
-  const [asking, setAsking] = useState<SelectionCapture | null>(null)
   const [question, setQuestion] = useState('')
+  const anchor = useCallback(
+    (): DOMRect | null => anchorForPageRect(card.pageIndex, card.rect),
+    [card.pageIndex, card.rect]
+  )
+  const attachment = textAttachment(cap.selectionText, cap.page, cap.surroundingContext)
 
-  // Revert "Copied" back to "Copy" after COPY_CONFIRM_MS. The cleanup here
-  // matters: if the popover unmounts mid-confirmation (the user dismissed it
-  // before the timer fired), there is no `copied` state left to set.
-  useEffect(() => {
-    if (!copied) return
-    const timer = setTimeout(() => setCopied(false), COPY_CONFIRM_MS)
-    return () => clearTimeout(timer)
-  }, [copied])
-
-  // `rect` is page-relative and already scaled; the popover is placed in
-  // viewport coordinates, so it needs the page's own position added.
-  const anchor = useCallback((): DOMRect | null => {
-    const pageEl = document.querySelector(`[data-pdf-page="${pageIndex}"]`)
-    if (!pageEl) return null
-    const box = pageEl.getBoundingClientRect()
-    return new DOMRect(
-      box.left + rect.origin.x,
-      box.top + rect.origin.y,
-      rect.size.width,
-      rect.size.height
-    )
-  }, [rect, pageIndex])
-
-  const run = async (color: string, withNote: boolean): Promise<void> => {
+  const guard = async (fn: () => Promise<void>): Promise<void> => {
     setBusy(true)
     try {
-      await onCreate(color, withNote)
+      await fn()
     } finally {
       setBusy(false)
     }
   }
-
-  const pickMode = async (mode: Exclude<InlineMode, 'custom'>): Promise<void> => {
-    setBusy(true)
-    try {
-      const cap = await onCapture()
-      if (!cap) return
-      setAsking(null)
-      setAnswer({ mode, cap })
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const pickAsk = async (): Promise<void> => {
-    if (asking) {
-      setAsking(null)
-      return
-    }
-    setBusy(true)
-    try {
-      const cap = await onCapture()
-      if (!cap) return
-      setAnswer(null)
-      setAsking(cap)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const attach = async (): Promise<void> => {
-    setBusy(true)
-    try {
-      const cap = answer?.cap ?? asking ?? (await onCapture())
-      if (!cap) return
-      onStudyAttach?.(textAttachment(cap.selectionText, cap.page, cap.surroundingContext))
-      onClose()
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const expanded = !!answer || !!asking
 
   return (
-    // Esc or a press outside closes the toolbar — but only once it has grown
-    // an answer. Before that the menu behaves exactly as it always has: it
-    // lives and dies with the selection.
-    <FloatingPopover
-      anchor={anchor}
-      className={expanded ? 'kh-ai-mode' : undefined}
-      onDismiss={expanded ? onClose : undefined}
-    >
-      <div className="kh-toolbar">
-        <SwatchRow active={null} disabled={busy} onPick={(color) => void run(color, false)} />
-        <div className="kh-sep" />
-        <PopButton
-          label="Note"
-          icon={ICON_NOTE}
-          disabled={busy}
-          onClick={() => void run(DEFAULT_HIGHLIGHT_COLOR, true)}
-          data-kk-note=""
-        />
-        {/* Copy sits right next to Note, mirroring where it lands on an
-            existing highlight's popover (HighlightPopover below). */}
-        <PopButton
-          label={copied ? 'Copied' : 'Copy'}
-          reserveLabels={['Copy', 'Copied']}
-          icon={copied ? ICON_CHECK : ICON_COPY}
-          disabled={busy || copied}
-          onClick={() => {
-            void (async () => {
-              // Only confirm if the copy actually happened — otherwise the
-              // button would be stuck showing "Copied" for a copy that never
-              // reached the clipboard (e.g. an empty selection).
-              const ok = (await onCopy?.()) ?? false
-              if (ok) setCopied(true)
-            })()
-          }}
-          data-kk-copy=""
-        />
-        <div className="kh-sep" />
-        {QUICK_ACTIONS.map((a) => (
-          <PopButton
-            key={a.mode}
-            label={a.label}
-            disabled={busy}
-            data-on={answer?.mode === a.mode ? '1' : undefined}
-            onClick={() => void pickMode(a.mode)}
-            data-kk-ai-mode={a.mode}
-          />
-        ))}
-        <PopButton
-          label="Ask…"
-          disabled={busy}
-          data-on={asking || answer?.mode === 'custom' ? '1' : undefined}
-          onClick={() => void pickAsk()}
-          data-kk-ai-mode="custom"
-        />
-        {onStudyAttach && (
-          <PopButton
-            label="Add to Study"
-            icon={ICON_STUDY_ATTACH}
-            iconOnly
-            disabled={busy}
-            onClick={() => void attach()}
-            data-kk-study-attach=""
-          />
-        )}
-      </div>
+    <FloatingPopover anchor={anchor} className="kh-ai-mode" onDismiss={onClose}>
+      <SelectionToolbar
+        busy={busy}
+        activeMode={view?.mode ?? null}
+        asking={asking}
+        onSwatch={(color) => void guard(() => onCreate(color, false))}
+        onNote={() => void guard(() => onCreate(DEFAULT_HIGHLIGHT_COLOR, true))}
+        onCopy={async () => {
+          try {
+            await navigator.clipboard.writeText(cap.selectionText)
+            return true
+          } catch {
+            return false
+          }
+        }}
+        onMode={(mode) => onChange({ ...card, view: { mode }, asking: false })}
+        onAsk={() => onChange({ ...card, asking: !asking })}
+        onAttach={
+          onStudyAttach
+            ? () => {
+                onStudyAttach(attachment)
+                onClose()
+              }
+            : undefined
+        }
+      />
 
       {asking && (
         <form
@@ -1906,8 +2011,7 @@ function SelectionMenu({
             e.preventDefault()
             const q = question.trim()
             if (!q) return
-            setAnswer({ mode: 'custom', prompt: q, cap: asking })
-            setAsking(null)
+            onChange({ ...card, view: { mode: 'custom', prompt: q }, asking: false })
           }}
         >
           <input
@@ -1924,30 +2028,29 @@ function SelectionMenu({
         </form>
       )}
 
-      {answer && (
+      {view && (
         <InlineAnswer
-          key={`${answer.mode}:${answer.prompt ?? ''}`}
-          mode={answer.mode}
-          prompt={answer.prompt}
-          selectionText={answer.cap.selectionText}
-          surroundingContext={answer.cap.surroundingContext}
-          pageText={answer.cap.pageText}
+          key={`${view.mode}:${view.prompt ?? ''}`}
+          mode={view.mode}
+          prompt={view.prompt}
+          selectionText={cap.selectionText}
+          surroundingContext={cap.surroundingContext}
+          pageText={cap.pageText}
           docTitle={docTitle}
           docKind="pdf"
           sourceUrl={sourceUrl}
           author={author}
-          onSaveAsNote={(text) => onSaveAiNote(answer.cap, text)}
-          onContinue={(text) => {
-            onStudyContinue?.(
-              buildContinueMessages({
-                mode: answer.mode,
-                prompt: answer.prompt,
-                answer: text,
-                attachment: textAttachment(answer.cap.selectionText, answer.cap.page, answer.cap.surroundingContext)
-              })
-            )
-            onClose()
-          }}
+          onSaveAsNote={onSaveAiNote}
+          onContinue={
+            onStudyContinue
+              ? (text) => {
+                  onStudyContinue(
+                    buildContinueMessages({ mode: view.mode, prompt: view.prompt, answer: text, attachment })
+                  )
+                  onClose()
+                }
+              : undefined
+          }
         />
       )}
     </FloatingPopover>

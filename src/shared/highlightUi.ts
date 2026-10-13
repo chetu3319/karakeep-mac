@@ -243,7 +243,12 @@ export function highlightPopoverStylesheet(): string {
     .kh-hint { font-size: 11px; color: rgba(242,242,247,0.45); }
 
     /* Quick AI answer: the selection toolbar grows an answer under it. */
-    .kh-pop.kh-ai-mode { flex-direction: column; align-items: stretch; gap: 6px; padding: 5px; width: 360px; }
+    /* The card is as wide as its (no-wrap) toolbar, never narrower; the answer
+       and input rows take width 0 + min-width 100% so long text wraps inside
+       that width instead of widening the card. */
+    .kh-pop.kh-ai-mode { flex-direction: column; align-items: stretch; gap: 6px; padding: 5px; width: fit-content; min-width: 360px; }
+    .kh-pop.kh-ai-mode > * { width: 0; min-width: 100%; }
+    .kh-pop.kh-ai-mode > .kh-toolbar { width: auto; min-width: 0; }
     .kh-btn[data-on="1"] { background: rgba(16,185,129,0.22); color: #6ee7b7; }
     .kh-ai-input { display: flex; gap: 6px; align-items: center; padding: 2px 4px 4px; }
     .kh-input {

@@ -16,7 +16,8 @@ export interface InlineAnswerProps {
   sourceUrl?: string
   author?: string
   onSaveAsNote(text: string): Promise<void>
-  onContinue(answer: string): void
+  /** Omit to hide "Continue in Study" (no Study to continue in). */
+  onContinue?(answer: string): void
 }
 
 function LineIcon({ path }: { path: string }): React.JSX.Element {
@@ -122,10 +123,12 @@ export default function InlineAnswer({
             <span>Stop</span>
           </button>
         )}
-        <button type="button" className="kh-btn kh-go" disabled={!ready} onClick={() => onContinue(text)}>
-          <span>Continue in Study</span>
-          <span aria-hidden="true">→</span>
-        </button>
+        {onContinue && (
+          <button type="button" className="kh-btn kh-go" disabled={!ready} onClick={() => onContinue(text)}>
+            <span>Continue in Study</span>
+            <span aria-hidden="true">→</span>
+          </button>
+        )}
       </div>
     </div>
   )
