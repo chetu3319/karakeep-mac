@@ -77,7 +77,7 @@ describe('studySync', () => {
   })
 
   it('pushes upload, attach, then detach of the old asset', async () => {
-    const f = fakeApi({ oldAssets: ['old'] })
+    const f = fakeApi({ remote: renderStudyHtml(thread('2025-01-01T00:00:00Z', 'old'), 'Doc'), oldAssets: ['old'] })
     const { sync } = make(f)
     await sync.save(thread('2026-01-01T00:00:00Z'), 'Doc')
     await sync.flush('b1')
@@ -144,5 +144,68 @@ describe('studySync', () => {
     expect(f.calls).toEqual(['detach:o1', 'detach:o2'])
     await vi.advanceTimersByTimeAsync(5000)
     expect(f.api.uploadAsset).not.toHaveBeenCalled()
+  })
+
+  it('save before open with a newer-schema remote never uploads or detaches', async () => {
+    const f = fakeApi({ remote: renderStudyHtml(thread('2027-01-01T00:00:00Z', 'r', 2), 'Doc'), oldAssets: ['old'] })
+    const { sync, states } = make(f)
+    await sync.save(thread('2026-01-01T00:00:00Z'), 'Doc')
+    await sync.flush('b1')
+    expect(f.api.uploadAsset).not.toHaveBeenCalled()
+    expect(f.api.detachAssetFromBookmark).not.toHaveBeenCalled()
+    expect(states.at(-1)).toBe('newer-version')
+  })
+
+  it('when the pull fails the push fails and detaches nothing', async () => {
+    const f = fakeApi({ oldAssets: ['old'] })
+    f.api.getBookmark.mockRejectedValue(new Error('offline'))
+    const { sync, states } = make(f)
+    await sync.save(thread('2026-01-01T00:00:00Z'), 'Doc')
+    await sync.flush('b1')
+    expect(states.at(-1)).toBe('failed')
+    expect(f.api.uploadAsset).not.toHaveBeenCalled()
+    expect(f.api.detachAssetFromBookmark).not.toHaveBeenCalled()
+  })
+
+  it('never detaches a Study file that did not parse', async () => {
+    const f = fakeApi({ remote: '<html>garbage</html>', oldAssets: ['junk'] })
+    const { sync } = make(f)
+    await sync.save(thread('2026-01-01T00:00:00Z'), 'Doc')
+    await sync.flush('b1')
+    expect(f.calls).toEqual(['upload', 'attach'])
+  })
+
+  it('open schedules a push when the local chat is newer than the remote', async () => {
+    const f = fakeApi({ remote: renderStudyHtml(thread('2026-01-01T00:00:00Z', 'old'), 'Doc'), oldAssets: ['old'] })
+    const { sync, store, states } = make(f)
+    await store.save(thread('2026-02-01T00:00:00Z', 'local'))
+    await sync.open('b1')
+    expect(states.at(-1)).toBe('pending')
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => expect(states.at(-1)).toBe('saved'))
+    expect(f.calls).toEqual(['upload', 'attach', 'detach:old'])
+  })
+
+  it('flushAll pushes every dirty chat', async () => {
+    const f = fakeApi()
+    const { sync } = make(f)
+    await sync.save(thread('2026-01-01T00:00:00Z'), 'Doc')
+    await sync.flushAll()
+    expect(f.api.uploadAsset).toHaveBeenCalledTimes(1)
+  })
+
+  it('open picks the remote file with the highest updatedAt', async () => {
+    const f = fakeApi({ oldAssets: ['a', 'b'] })
+    f.api.getAssetText
+      .mockResolvedValueOnce(renderStudyHtml(thread('2026-03-01T00:00:00Z', 'newest'), 'Doc'))
+      .mockResolvedValueOnce(renderStudyHtml(thread('2026-01-01T00:00:00Z', 'older'), 'Doc'))
+    const { sync } = make(f)
+    expect((await sync.open('b1'))?.messages[0].text).toBe('newest')
+  })
+
+  it('concurrent store saves of one chat both resolve and leave a parseable file', async () => {
+    const store = createStudyStore(dir)
+    await Promise.all(Array.from({ length: 10 }, (_, i) => store.save(thread('2026-01-01T00:00:00Z', `m${i}`))))
+    expect((await store.load('b1'))?.messages).toHaveLength(1)
   })
 })

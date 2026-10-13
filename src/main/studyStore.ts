@@ -8,6 +8,8 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { stripForPersistence, type StudyThread } from '../shared/study'
 
+let tmpCounter = 0
+
 export function createStudyStore(dir: string): {
   load(bookmarkId: string): Promise<StudyThread | null>
   save(thread: StudyThread): Promise<void>
@@ -31,9 +33,16 @@ export function createStudyStore(dir: string): {
       const file = fileFor(thread.bookmarkId)
       // Write beside the target then rename, so a crash mid-write can never
       // leave a half-written chat in place of a good one.
-      const tmp = `${file}.${process.pid}.tmp`
-      await writeFile(tmp, JSON.stringify(stripForPersistence(thread)), 'utf8')
-      await rename(tmp, file)
+      // The name is unique per write so overlapping saves of one chat cannot
+      // rename each other's file out from under them.
+      const tmp = `${file}.${process.pid}.${++tmpCounter}.tmp`
+      try {
+        await writeFile(tmp, JSON.stringify(stripForPersistence(thread)), 'utf8')
+        await rename(tmp, file)
+      } catch (err) {
+        await rm(tmp, { force: true })
+        throw err
+      }
     },
     async remove(bookmarkId) {
       await rm(fileFor(bookmarkId), { force: true })

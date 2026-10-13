@@ -25,6 +25,8 @@ export function createStudySync(deps: StudySyncDeps): {
   open(bookmarkId: string): Promise<StudyThread | null>
   save(thread: StudyThread, docTitle: string): Promise<void>
   flush(bookmarkId: string): Promise<void>
+  /** Pushes every chat with unsynced changes now (used on quit). */
+  flushAll(): Promise<void>
   clear(bookmarkId: string): Promise<void>
 } {
   const { api, store, debounceMs, onState } = deps
@@ -36,6 +38,9 @@ export function createStudySync(deps: StudySyncDeps): {
   // Bookmarks whose latest local save has not reached Karakeep yet.
   const dirty = new Set<string>()
   const running = new Map<string, Promise<void>>()
+  // Remote Study files confirmed to parse as ours-or-older. Only these are
+  // ever detached: a file we could not read may be someone else's data.
+  const verified = new Map<string, Set<string>>()
 
   function cancelTimer(bookmarkId: string): void {
     const t = timers.get(bookmarkId)
@@ -48,6 +53,40 @@ export function createStudySync(deps: StudySyncDeps): {
     return bookmark.assets.filter(isStudyAsset).map((a) => a.id)
   }
 
+  /**
+   * Reads the remote Study files once per bookmark. Throws when Karakeep
+   * cannot be read (so nothing is marked pulled and a later call retries).
+   * Returns the newest readable remote thread, or null.
+   */
+  async function pull(bookmarkId: string): Promise<StudyThread | null> {
+    const ids = await studyAssets(bookmarkId)
+    let best: StudyThread | null = null
+    const ok = new Set<string>()
+    for (const id of ids) {
+      const parsed = parseStudyHtml(await api.getAssetText(id))
+      if (parsed.status === 'newer') blocked.add(bookmarkId)
+      else if (parsed.status === 'ok') {
+        ok.add(id)
+        if (!best || Date.parse(parsed.thread.updatedAt) > Date.parse(best.updatedAt)) best = parsed.thread
+      }
+    }
+    verified.set(bookmarkId, ok)
+    pulled.add(bookmarkId)
+    if (blocked.has(bookmarkId)) onState(bookmarkId, 'newer-version')
+    return best
+  }
+
+  function schedule(id: string): void {
+    cancelTimer(id)
+    timers.set(
+      id,
+      setTimeout(() => {
+        timers.delete(id)
+        void push(id)
+      }, debounceMs)
+    )
+  }
+
   async function pushOnce(bookmarkId: string): Promise<void> {
     if (blocked.has(bookmarkId) || !dirty.has(bookmarkId)) return
     const thread = await store.load(bookmarkId)
@@ -56,9 +95,13 @@ export function createStudySync(deps: StudySyncDeps): {
       return
     }
     try {
+      // Never push over a remote we have not looked at: it may be written by
+      // a newer version of the app.
+      if (!pulled.has(bookmarkId)) await pull(bookmarkId)
+      if (blocked.has(bookmarkId)) return
       // Upload, attach, and only then detach the older files: if any step
       // fails the previous backup is still there, and the next save retries.
-      const older = await studyAssets(bookmarkId)
+      const older = (await studyAssets(bookmarkId)).filter((id) => verified.get(bookmarkId)?.has(id))
       const html = renderStudyHtml(thread, titles.get(bookmarkId) ?? '')
       const data = new TextEncoder().encode(html)
       const uploaded = await api.uploadAsset({
@@ -67,7 +110,11 @@ export function createStudySync(deps: StudySyncDeps): {
         fileName: STUDY_FILE_NAME
       })
       await api.attachAssetToBookmark(bookmarkId, uploaded.assetId)
-      for (const id of older) await api.detachAssetFromBookmark(bookmarkId, id)
+      verified.get(bookmarkId)?.add(uploaded.assetId)
+      for (const id of older) {
+        await api.detachAssetFromBookmark(bookmarkId, id)
+        verified.get(bookmarkId)?.delete(id)
+      }
       // Only forget the pending push if nothing newer was saved meanwhile.
       const latest = await store.load(bookmarkId)
       if (latest && latest.updatedAt === thread.updatedAt) dirty.delete(bookmarkId)
@@ -91,19 +138,18 @@ export function createStudySync(deps: StudySyncDeps): {
       const local = await store.load(bookmarkId)
       if (pulled.has(bookmarkId)) return local
       try {
-        const ids = await studyAssets(bookmarkId)
-        pulled.add(bookmarkId)
-        if (ids.length === 0) return local
-        const parsed = parseStudyHtml(await api.getAssetText(ids[ids.length - 1]))
-        if (parsed.status === 'newer') {
-          blocked.add(bookmarkId)
-          onState(bookmarkId, 'newer-version')
-          return local
+        const remote = await pull(bookmarkId)
+        if (blocked.has(bookmarkId)) return local
+        if (remote && (!local || Date.parse(remote.updatedAt) > Date.parse(local.updatedAt))) {
+          await store.save(remote)
+          return remote
         }
-        if (parsed.status === 'invalid') return local
-        if (!local || Date.parse(parsed.thread.updatedAt) > Date.parse(local.updatedAt)) {
-          await store.save(parsed.thread)
-          return parsed.thread
+        // The local chat is ahead of (or missing from) Karakeep, e.g. the app
+        // quit before the last push: back it up now.
+        if (local && (!remote || Date.parse(local.updatedAt) > Date.parse(remote.updatedAt))) {
+          dirty.add(bookmarkId)
+          onState(bookmarkId, 'pending')
+          schedule(bookmarkId)
         }
         return local
       } catch {
@@ -123,14 +169,7 @@ export function createStudySync(deps: StudySyncDeps): {
       }
       dirty.add(id)
       onState(id, 'pending')
-      cancelTimer(id)
-      timers.set(
-        id,
-        setTimeout(() => {
-          timers.delete(id)
-          void push(id)
-        }, debounceMs)
-      )
+      schedule(id)
     },
 
     async flush(bookmarkId) {
@@ -138,8 +177,15 @@ export function createStudySync(deps: StudySyncDeps): {
       await push(bookmarkId)
     },
 
+    async flushAll() {
+      await Promise.all([...dirty].map((id) => this.flush(id)))
+    },
+
     async clear(bookmarkId) {
       cancelTimer(bookmarkId)
+      pulled.delete(bookmarkId)
+      blocked.delete(bookmarkId)
+      verified.delete(bookmarkId)
       dirty.delete(bookmarkId)
       titles.delete(bookmarkId)
       await running.get(bookmarkId)

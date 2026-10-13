@@ -236,6 +236,16 @@ function registerIpc(): void {
       mainWindow?.webContents.send(IPC.STUDY_SYNC_STATE_EVENT, { bookmarkId, state })
     }
   })
+  // Give pending chat backups a few seconds to reach Karakeep before quitting.
+  let quitFlushed = false
+  app.on('before-quit', (e) => {
+    if (quitFlushed) return
+    e.preventDefault()
+    quitFlushed = true
+    void Promise.race([studySync.flushAll().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]).then(() =>
+      app.quit()
+    )
+  })
   ipcMain.handle(IPC.STUDY_OPEN, (_e, bookmarkId: string) => studySync.open(bookmarkId))
   ipcMain.handle(IPC.STUDY_SAVE, (_e, thread: StudyThread, docTitle: string) => studySync.save(thread, docTitle))
   ipcMain.handle(IPC.STUDY_FLUSH, (_e, bookmarkId: string) => studySync.flush(bookmarkId))
