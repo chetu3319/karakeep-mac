@@ -148,7 +148,13 @@ export interface PdfPaneProps {
 
 export default function PdfPane(props: PdfPaneProps): React.JSX.Element {
   const { assetId, fileName, title } = props
-  const [buffer, setBuffer] = useState<ArrayBuffer | null>(null)
+  // The bytes are kept with the asset they belong to. Switching bookmarks
+  // renders once with the new `assetId` before the effect below can clear
+  // anything, and handing that render the previous document's bytes mounted
+  // the viewer under an id its registry had never opened: <Viewport> threw
+  // "Viewport state not found" and blanked the whole window.
+  const [loaded, setLoaded] = useState<{ assetId: string; buffer: ArrayBuffer } | null>(null)
+  const buffer = loaded?.assetId === assetId ? loaded.buffer : null
   const [loadError, setLoadError] = useState<string | null>(null)
   const { engine, isLoading: engineLoading, error: engineError } = usePdfiumEngine({
     // Absolute, deliberately. The worker engine runs from a blob: URL, and a
@@ -168,12 +174,11 @@ export default function PdfPane(props: PdfPaneProps): React.JSX.Element {
 
   useEffect(() => {
     let cancelled = false
-    setBuffer(null)
     setLoadError(null)
     window.kk.assets
       .getBytes(assetId)
       .then((bytes) => {
-        if (!cancelled) setBuffer(bytes)
+        if (!cancelled) setLoaded({ assetId, buffer: bytes })
       })
       .catch((err: Error) => {
         if (!cancelled) setLoadError(err.message || 'Could not download this PDF')
@@ -220,7 +225,9 @@ export default function PdfPane(props: PdfPaneProps): React.JSX.Element {
 
   return (
     <div className="flex h-full flex-col bg-neutral-100 dark:bg-neutral-950">
-      <EmbedPDF engine={engine as PdfEngine} plugins={plugins}>
+      {/* Keyed so each document gets a fresh plugin registry rather than
+          the previous one's state. */}
+      <EmbedPDF key={assetId} engine={engine as PdfEngine} plugins={plugins}>
         <PdfSurface {...props} engine={engine as PdfEngine} />
       </EmbedPDF>
     </div>
