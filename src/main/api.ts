@@ -319,6 +319,13 @@ export class KarakeepApiClient {
   //   GET /lists.
   // - GET /bookmarks?archived=&favourited= both filter server-side. Omitting
   //   `archived` returns archived and unarchived rows mixed together.
+  //
+  // Re-probed 2026-10-12 for Study's attached file (scratch bookmark, deleted
+  // afterwards): POST /assets with text/html 200 (json/markdown/plain are
+  // rejected); POST /bookmarks/{id}/assets { id, assetType: 'userUploaded' }
+  // 201; DELETE /bookmarks/{id}/assets/{assetId} 204 and the asset itself is
+  // deleted (GET 404). Deleting the whole bookmark also removes an attached
+  // asset (GET /api/assets/{id} 404), so nothing is orphaned.
 
   async createBookmark(data: CreateBookmarkInput): Promise<Bookmark> {
     const res = await this.request<unknown>('/bookmarks', { method: 'POST', body: data })
@@ -399,6 +406,24 @@ export class KarakeepApiClient {
       method: 'DELETE',
       body: { tags: tagNames.map((tagName) => ({ tagName })) }
     })
+  }
+
+  /** Attaches an uploaded asset to a bookmark as a user file (not its main content). */
+  async attachAssetToBookmark(bookmarkId: string, assetId: string): Promise<void> {
+    await this.request<unknown>(`/bookmarks/${bookmarkId}/assets`, {
+      method: 'POST',
+      body: { id: assetId, assetType: 'userUploaded' }
+    })
+  }
+
+  /** Detaches an attached asset; the server also deletes the asset itself. */
+  async detachAssetFromBookmark(bookmarkId: string, assetId: string): Promise<void> {
+    await this.request<unknown>(`/bookmarks/${bookmarkId}/assets/${assetId}`, { method: 'DELETE' })
+  }
+
+  /** Fetch a raw asset and decode it as UTF-8 text. */
+  async getAssetText(assetId: string): Promise<string> {
+    return new TextDecoder('utf-8').decode(await this.getAssetBytes(assetId))
   }
 
   /** Fetch a raw asset (image, screenshot, etc.) and return it as a data URL. */

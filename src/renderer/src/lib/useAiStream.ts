@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { StudyMessage } from '../../../shared/study'
 import type { AiChatMessage, AiMode, AiStreamChunk, AiStreamDone, AiStreamError, AiStreamRequest } from '../../../shared/types'
 
 export interface StartStreamOptions {
@@ -13,6 +14,11 @@ export interface StartStreamOptions {
   siteName?: string
   author?: string
   docKind?: 'pdf' | 'article' | 'note'
+  // Study mode
+  documentText?: string
+  studyMessages?: StudyMessage[]
+  currentPage?: number
+  paged?: boolean
 }
 
 export function useAiStream(options?: {
@@ -22,6 +28,7 @@ export function useAiStream(options?: {
   const [streaming, setStreaming] = useState(false)
   const [text, setText] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [errorCode, setErrorCode] = useState<'too-large' | null>(null)
   const activeRequestIdRef = useRef<string | null>(null)
   const callbacksRef = useRef(options)
   callbacksRef.current = options
@@ -38,6 +45,7 @@ export function useAiStream(options?: {
     abortStream()
     setText('')
     setError(null)
+    setErrorCode(null)
   }, [abortStream])
 
   useEffect(() => {
@@ -61,6 +69,7 @@ export function useAiStream(options?: {
         setStreaming(false)
         activeRequestIdRef.current = null
         setError(err.error)
+        setErrorCode(err.code ?? null)
         callbacksRef.current?.onError?.(err.error)
       }
     })
@@ -83,6 +92,7 @@ export function useAiStream(options?: {
       setStreaming(true)
       setText('')
       setError(null)
+      setErrorCode(null)
 
       const request: AiStreamRequest = {
         requestId: reqId,
@@ -112,6 +122,7 @@ export function useAiStream(options?: {
     streaming,
     text,
     error,
+    errorCode,
     startStream,
     abortStream,
     reset,

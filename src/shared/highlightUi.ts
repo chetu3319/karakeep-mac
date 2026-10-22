@@ -57,6 +57,9 @@ export function normalizeHighlightColor(color?: string | null): HighlightColorNa
 export const ICON_NOTE = 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'
 export const ICON_COPY = 'M9 9h10v10H9zM5 15H4V4h11v1'
 export const ICON_TRASH = 'M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14'
+/** Paperclip: "Add to Study" attaches the selection to the next question. */
+export const ICON_STUDY_ATTACH =
+  'M20 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8'
 export const ICON_CHECK = 'M5 13l4 4L19 7'
 export const ICON_AI = 'M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83'
 
@@ -238,6 +241,38 @@ export function highlightPopoverStylesheet(): string {
     .kh-row { display: flex; align-items: center; gap: 6px; }
     .kh-row .kh-spacer { flex: 1 1 auto; }
     .kh-hint { font-size: 11px; color: rgba(242,242,247,0.45); }
+
+    /* Quick AI answer: the selection toolbar grows an answer under it. */
+    /* The card is as wide as its (no-wrap) toolbar, never narrower; the answer
+       and input rows take width 0 + min-width 100% so long text wraps inside
+       that width instead of widening the card. */
+    .kh-pop.kh-ai-mode { flex-direction: column; align-items: stretch; gap: 6px; padding: 5px; width: fit-content; min-width: 360px; }
+    .kh-pop.kh-ai-mode > * { width: 0; min-width: 100%; }
+    .kh-pop.kh-ai-mode > .kh-toolbar { width: auto; min-width: 0; }
+    .kh-btn[data-on="1"] { background: rgba(16,185,129,0.22); color: #6ee7b7; }
+    .kh-ai-input { display: flex; gap: 6px; align-items: center; padding: 2px 4px 4px; }
+    .kh-input {
+      all: unset; box-sizing: border-box; flex: 1 1 auto; min-width: 0;
+      padding: 6px 9px; border-radius: 8px;
+      background: rgba(255,255,255,0.08); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.14);
+      color: #f2f2f7; font: inherit; user-select: text;
+    }
+    .kh-input:focus { box-shadow: inset 0 0 0 1px rgba(16,185,129,0.7); }
+    .kh-input::placeholder { color: rgba(242,242,247,0.4); }
+    .kh-ans-wrap { display: flex; flex-direction: column; gap: 6px; padding: 0 4px 2px; border-top: 1px solid rgba(255,255,255,0.12); padding-top: 8px; }
+    .kh-ans {
+      max-height: 220px; overflow-y: auto; overscroll-behavior: contain;
+      padding: 0 4px; font-size: 13px; line-height: 1.5; color: rgba(242,242,247,0.94);
+      user-select: text; cursor: text; overflow-wrap: anywhere;
+    }
+    .kh-ans.kh-ans-plain { white-space: pre-wrap; }
+    .kh-ans:focus-visible { outline: 2px solid rgba(255,255,255,0.4); outline-offset: 2px; border-radius: 4px; }
+    .kh-ans-error { color: #fca5a5; }
+    .kh-caret { display: inline-block; width: 6px; height: 13px; margin-left: 3px; vertical-align: middle; background: #10b981; }
+    .kh-ans-foot { display: flex; align-items: center; gap: 2px; margin: 0 -2px; }
+    .kh-ans-foot .kh-spacer { flex: 1 1 auto; }
+    .kh-ans-foot .kh-btn { font-size: 12px; padding: 4px 8px; }
+    .kh-btn.kh-go { color: #6ee7b7; font-weight: 500; }
     .kh-primary { background: #0a84ff; }
     .kh-primary:hover { background: #339cff; }
   `

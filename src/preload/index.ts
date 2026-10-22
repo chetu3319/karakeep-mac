@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/ipc'
+import type { StudyAttachment, StudyMessage, StudyThread, SyncState } from '../shared/study'
 import type {
   AiStreamChunk,
   AiStreamDone,
@@ -131,6 +132,18 @@ const api = {
       }
     }
   })(),
+  study: {
+    open: (bookmarkId: string): Promise<StudyThread | null> => ipcRenderer.invoke(IPC.STUDY_OPEN, bookmarkId),
+    save: (thread: StudyThread, docTitle: string): Promise<void> =>
+      ipcRenderer.invoke(IPC.STUDY_SAVE, thread, docTitle),
+    flush: (bookmarkId: string): Promise<void> => ipcRenderer.invoke(IPC.STUDY_FLUSH, bookmarkId),
+    clear: (bookmarkId: string): Promise<void> => ipcRenderer.invoke(IPC.STUDY_CLEAR, bookmarkId),
+    onSyncState: (cb: (e: { bookmarkId: string; state: SyncState }) => void): (() => void) => {
+      const listener = (_e: unknown, payload: { bookmarkId: string; state: SyncState }): void => cb(payload)
+      ipcRenderer.on(IPC.STUDY_SYNC_STATE_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.STUDY_SYNC_STATE_EVENT, listener)
+    }
+  },
   window: {
     minimize: (): void => ipcRenderer.send(IPC.WINDOW_MINIMIZE),
     maximize: (): void => ipcRenderer.send(IPC.WINDOW_MAXIMIZE),
@@ -149,6 +162,11 @@ const api = {
       const listener = (): void => cb()
       ipcRenderer.on(IPC.MENU_TOGGLE_FOCUS_MODE_EVENT, listener)
       return () => ipcRenderer.removeListener(IPC.MENU_TOGGLE_FOCUS_MODE_EVENT, listener)
+    },
+    onToggleStudy: (cb: () => void): (() => void) => {
+      const listener = (): void => cb()
+      ipcRenderer.on(IPC.MENU_TOGGLE_STUDY_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.MENU_TOGGLE_STUDY_EVENT, listener)
     },
     onNewBookmark: (cb: () => void): (() => void) => {
       const listener = (): void => cb()
@@ -189,6 +207,13 @@ const api = {
     focusHighlight: (highlightId: string): Promise<void> =>
       ipcRenderer.invoke(IPC.WEBPANE_FOCUS_HIGHLIGHT, highlightId),
     // Reads document.body.innerText out of the live WebContentsView — see
+    revealQuote: (quote: string, bookmarkId?: string): Promise<'found' | 'not-found' | 'unavailable'> =>
+      ipcRenderer.invoke(IPC.WEBPANE_REVEAL_QUOTE, quote, bookmarkId),
+    // Drag a rectangle over the live page; resolves to the PNG and the page
+    // text under it, or null when cancelled (Esc, a tiny drag, navigation).
+    captureRegion: (): Promise<{ imageDataUrl: string; text: string } | { error: string } | null> =>
+      ipcRenderer.invoke(IPC.WEBPANE_CAPTURE_REGION),
+    cancelCapture: (): Promise<void> => ipcRenderer.invoke(IPC.WEBPANE_CANCEL_CAPTURE),
     // main/webpane.ts's getPageText(). Used by lib/useBookmarkText.ts to
     // ground the sidebar chat in the actual rendered page rather than only
     // whatever Karakeep's crawler captured at save time.
@@ -221,6 +246,16 @@ const api = {
       const listener = (_e: unknown, payload: { bookmarkId: string }): void => cb(payload)
       ipcRenderer.on(IPC.WEBPANE_HIGHLIGHTS_CHANGED_EVENT, listener)
       return () => ipcRenderer.removeListener(IPC.WEBPANE_HIGHLIGHTS_CHANGED_EVENT, listener)
+    },
+    onStudyAttach: (cb: (payload: { bookmarkId: string; attachment: StudyAttachment }) => void): (() => void) => {
+      const listener = (_e: unknown, payload: { bookmarkId: string; attachment: StudyAttachment }): void => cb(payload)
+      ipcRenderer.on(IPC.WEBPANE_STUDY_ATTACH_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.WEBPANE_STUDY_ATTACH_EVENT, listener)
+    },
+    onStudyContinue: (cb: (payload: { bookmarkId: string; messages: StudyMessage[] }) => void): (() => void) => {
+      const listener = (_e: unknown, payload: { bookmarkId: string; messages: StudyMessage[] }): void => cb(payload)
+      ipcRenderer.on(IPC.WEBPANE_STUDY_CONTINUE_EVENT, listener)
+      return () => ipcRenderer.removeListener(IPC.WEBPANE_STUDY_CONTINUE_EVENT, listener)
     },
     onHighlightStatus: (
       cb: (payload: { bookmarkId: string | null; anchored: string[]; missing: string[] }) => void

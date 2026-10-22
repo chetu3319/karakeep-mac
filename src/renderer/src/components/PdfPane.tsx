@@ -33,15 +33,32 @@ import {
   ICON_CHECK,
   ICON_COPY,
   ICON_NOTE,
+  ICON_STUDY_ATTACH,
   ICON_TRASH,
   hexForColor,
   highlightPopoverStylesheet,
   placePopover
 } from '../../../shared/highlightUi'
-import type { AiMode, Highlight } from '../../../shared/types'
+import type { Highlight } from '../../../shared/types'
+import type { StudyAttachment, StudyMessage } from '../../../shared/study'
+import { createPdfDocumentReader, type PdfDocumentReader } from '../lib/pdfDocumentReader'
+import {
+  encodedTooLarge,
+  glyphSpansInRect,
+  isTinyDrag,
+  pickPage,
+  rectFromPoints,
+  regionLabel,
+  renderScaleFor,
+  screenToPageRect,
+  tidyRegionText,
+  type PageBox,
+  type PxRect
+} from '../../../shared/regionCapture'
 import { useCreateHighlight, useDeleteHighlight, useUpdateHighlight } from '../lib/queries'
 import { useIsDark, usePref } from '../lib/prefs'
-import SelectionAiHUD from './SelectionAiHUD'
+import InlineAnswer from './InlineAnswer'
+import { buildContinueMessages, textAttachment, type InlineMode } from '../../../shared/inlineAnswer'
 import FindBar, { type FindResult } from './FindBar'
 import type { FindStep } from '../lib/findStep'
 import {
@@ -114,6 +131,13 @@ interface PlacedHighlight {
   quality: AnchorQuality
 }
 
+export type { PdfDocumentReader }
+
+/** How long a Study reference flash stays on the page. */
+const REF_FLASH_MS = 1500
+/** Time a smooth scroll to a nearby page is given before the flash starts. */
+const REF_SCROLL_MS = 350
+
 export interface PdfPaneProps {
   assetId: string
   fileName: string
@@ -129,16 +153,15 @@ export interface PdfPaneProps {
   sourceUrl?: string
   author?: string
   /**
-   * The Co-Pilot is one control in the detail pane's utility bar, and the
-   * drawer itself is rendered *there* for every kind of bookmark — docked
-   * to the window's edge rather than inside this pane, so it doesn't start
-   * below the PDF's own toolbar while the web version starts above it.
-   * This pane's only job is to keep the chat grounded in the page that is
-   * actually on screen: while the drawer is open it reports the current
-   * page's text and label upward.
+   * Study reads the whole document through this: the pane hands up a reader
+   * once it is mounted and takes it back (null) when it goes away. The
+   * reader serves whichever document the pane currently has open.
    */
-  aiDrawerOpen?: boolean
-  onAiContextChange?: (context: { scopeLabel: string; pageText: string }) => void
+  onDocumentReader?: (reader: PdfDocumentReader | null) => void
+  /** Attach a selection or region to the Study panel's next question. Wired up by the selection tools. */
+  onStudyAttach?: (attachment: StudyAttachment) => void
+  /** Open Study with an exchange already in it ("Continue in Study"). */
+  onStudyContinue?: (messages: StudyMessage[]) => void
   /** Find bar state is owned by the detail pane, which routes the menu's ⌘F/⌘G to it. */
   findOpen: boolean
   findFocusSignal: number
@@ -267,8 +290,9 @@ function PdfSurface({
   onAnchorStatus,
   sourceUrl,
   author,
-  aiDrawerOpen = false,
-  onAiContextChange,
+  onDocumentReader,
+  onStudyAttach,
+  onStudyContinue,
   findOpen,
   findFocusSignal,
   findStep,
@@ -404,6 +428,9 @@ function PdfSurface({
   const deleteHighlight = useDeleteHighlight()
 
   const [index, setIndex] = useState<PageIndex | null>(null)
+  const [indexFailed, setIndexFailed] = useState(false)
+  const indexFailedRef = useRef(false)
+  indexFailedRef.current = indexFailed
   const [indexing, setIndexing] = useState<{ done: number; total: number } | null>(null)
   const geometry = useRef<Map<number, PdfPageGeometry>>(new Map())
   const pageTextCache = useRef<Map<number, string>>(new Map())
@@ -411,6 +438,13 @@ function PdfSurface({
   const [activeId, setActiveId] = useState<string | null>(null)
   const lastCreatedId = useRef<string | null>(null)
   const [flashId, setFlashId] = useState<string | null>(null)
+  // A passage Study is pointing at. Drawn like a focused highlight but never
+  // stored: it is cleared after FLASH_MS and nothing is sent to the server.
+  const [refFlash, setRefFlash] = useState<{ page: number; from: number; to: number } | null>(null)
+  const refFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => {
+    if (refFlashTimer.current) clearTimeout(refFlashTimer.current)
+  }, [])
 
   // ── Text index ────────────────────────────────────────────────────────────
   // One pass over the document's geometry, which gives both the glyph counts
@@ -419,6 +453,7 @@ function PdfSurface({
     if (!doc) return
     let cancelled = false
     setIndex(null)
+    setIndexFailed(false)
     setIndexing({ done: 0, total: doc.pages.length })
     geometry.current = new Map()
     pageTextCache.current = new Map()
@@ -433,7 +468,10 @@ function PdfSurface({
         setIndexing(null)
       })
       .catch(() => {
-        if (!cancelled) setIndexing(null)
+        if (!cancelled) {
+          setIndexing(null)
+          setIndexFailed(true)
+        }
       })
 
     return () => {
@@ -595,6 +633,8 @@ function PdfSurface({
       // or anywhere else with actual selectable text — already has native
       // copy support; don't steal the shortcut from it.
       if (document.getSelection()?.toString()) return
+      // Likewise a focused input (the Ask… field): copy means its own text.
+      if ((e.target as Element | null)?.closest?.('input, textarea, [contenteditable]')) return
       const scope = selection.forDocument(documentId)
       if (!scope.getState().selection) return
       e.preventDefault()
@@ -606,20 +646,6 @@ function PdfSurface({
 
   const [noteDraftFor, setNoteDraftFor] = useState<string | null>(null)
 
-  // ── AI in-situ and page-level assistant state ───────────────────────────
-  interface AiSelectionState {
-    anchorRect: Rect
-    pageIndex: number
-    selectionText: string
-    surroundingContext: string
-    pageText: string
-    startOffset: number
-    endOffset: number
-    initialMode: AiMode
-  }
-
-  const [aiSelectionState, setAiSelectionState] = useState<AiSelectionState | null>(null)
-
   // Night mode is a reading preference, not a theme: someone may want a dark
   // app around a paper-white PDF (colour-accurate figures) or a dark PDF in a
   // light app. 'auto' keeps the common case free — it follows the theme until
@@ -627,41 +653,208 @@ function PdfSurface({
   const [nightPref, setNightPref] = usePref<NightPref>('pdfNight', 'auto')
   const isDark = useIsDark()
   const night = nightPref === 'auto' ? isDark : nightPref === 'on'
-  const [currentPageText, setCurrentPageText] = useState('')
 
-  // The drawer used to fetch the page text once, at the moment it was
-  // opened, and never again — so scrolling from page 1 to page 7 left the
-  // header still claiming "page 7" (scopeLabel reads scrollState.currentPage
-  // live) while the model underneath was still grounded in page 1's text.
-  // Debounced on a timer rather than firing per scroll-page-changed event:
-  // a fast scroll through several pages should only cost one re-fetch, at
-  // wherever the reader actually lands.
-  useEffect(() => {
-    if (!aiDrawerOpen || !doc || !index) return
-    const page = Math.max(0, scrollState.currentPage - 1)
-    const timer = setTimeout(() => {
-      void pageText(page).then((t) => setCurrentPageText(t))
-    }, 400)
-    return () => clearTimeout(timer)
-  }, [aiDrawerOpen, doc, index, scrollState.currentPage, pageText])
+  // ── Whole-document text for Study ───────────────────────────────────────
+  // Extraction waits for the text index (pageText is empty until it exists),
+  // reuses the per-page cache the highlight anchoring already fills, and is
+  // memoised per document so closing and reopening the panel costs nothing.
+  const indexRef = useRef(index)
+  indexRef.current = index
+  const indexingRef = useRef(indexing)
+  indexingRef.current = indexing
+  const pageTextRef = useRef(pageText)
+  pageTextRef.current = pageText
+  const currentPageRef = useRef(scrollState.currentPage)
+  currentPageRef.current = scrollState.currentPage
+  const docStatusRef = useRef(docState?.status)
+  docStatusRef.current = docState?.status
+  const docRef = useRef(doc)
+  docRef.current = doc
+  const scrollRef = useRef(scroll)
+  scrollRef.current = scroll
 
-  // Hand that context to whoever is rendering the drawer. Kept as its own
-  // effect so the label updates the moment the page changes, without
-  // waiting on the text fetch above.
-  useEffect(() => {
-    if (!aiDrawerOpen) return
-    onAiContextChange?.({
-      scopeLabel: `page ${scrollState.currentPage} of ${totalPages || '—'}`,
-      pageText: currentPageText
+  const revealRange = useCallback((page0: number, start?: number, end?: number) => {
+    const geo = geometry.current.get(page0)
+    const hasRange = start !== undefined && end !== undefined && end > start
+    const rect = hasRange && geo ? rectsWithinSlice(geo, start, end - 1)[0] : undefined
+    // A distant page would be gone before a smooth scroll arrives, so jump
+    // there at once; a near one glides, and the flash starts as it lands.
+    const far = Math.abs(page0 + 1 - currentPageRef.current) > 2
+    scrollRef.current?.scrollToPage({
+      pageNumber: page0 + 1,
+      pageCoordinates: rect ? { x: rect.origin.x, y: rect.origin.y } : undefined,
+      behavior: far ? 'instant' : 'smooth',
+      alignY: 30
     })
-  }, [aiDrawerOpen, currentPageText, scrollState.currentPage, totalPages, onAiContextChange])
+    if (refFlashTimer.current) clearTimeout(refFlashTimer.current)
+    setRefFlash(null)
+    if (!hasRange) return
+    const delay = far ? 50 : REF_SCROLL_MS
+    refFlashTimer.current = setTimeout(() => {
+      setRefFlash({ page: page0, from: start, to: end - 1 })
+      refFlashTimer.current = setTimeout(() => setRefFlash(null), REF_FLASH_MS)
+    }, delay)
+  }, [])
+  const revealRangeRef = useRef(revealRange)
+  revealRangeRef.current = revealRange
 
-  const askAiFromSelection = useCallback(
-    async (rect: Rect, pageIndex: number, mode: AiMode = 'micro-explain') => {
-      if (!selection || !index || !doc) return
+  // ── Region capture ──────────────────────────────────────────────────────
+  // The user drags a rectangle over a figure or equation. The drag is in
+  // client pixels; it is mapped onto the page it covers most, rendered by the
+  // engine (sharp for the display, long side capped) and read for text from
+  // the page geometry that anchoring already caches.
+  const [capturing, setCapturing] = useState(false)
+  const captureResolve = useRef<((a: StudyAttachment | null) => void) | null>(null)
+  const engineRef = useRef(engine)
+  engineRef.current = engine
+
+  const cancelRegionCapture = useCallback(() => {
+    const resolve = captureResolve.current
+    captureResolve.current = null
+    setCapturing(false)
+    resolve?.(null)
+  }, [])
+
+  const startRegionCapture = useCallback((): Promise<StudyAttachment | null> => {
+    captureResolve.current?.(null)
+    return new Promise((resolve) => {
+      captureResolve.current = resolve
+      setCapturing(true)
+    })
+  }, [])
+  const startRegionCaptureRef = useRef(startRegionCapture)
+  startRegionCaptureRef.current = startRegionCapture
+  const cancelRegionCaptureRef = useRef(cancelRegionCapture)
+  cancelRegionCaptureRef.current = cancelRegionCapture
+  useEffect(() => () => cancelRegionCaptureRef.current(), [])
+
+  const finishRegionCapture = useCallback(async (drag: PxRect | null) => {
+    const resolve = captureResolve.current
+    captureResolve.current = null
+    setCapturing(false)
+    if (!resolve) return
+    try {
+      const pdf = docRef.current
+      if (!drag || isTinyDrag(drag) || !pdf) return resolve(null)
+      const pages: PageBox[] = Array.from(document.querySelectorAll<HTMLElement>('[data-pdf-page]')).flatMap((el) => {
+        const page = Number(el.dataset.pdfPage)
+        const size = pdf.pages[page]?.size
+        if (!Number.isFinite(page) || !size) return []
+        const b = el.getBoundingClientRect()
+        return [{ page, box: { x: b.left, y: b.top, width: b.width, height: b.height }, pageWidth: size.width }]
+      })
+      const target = pickPage(drag, pages)
+      const area = target && screenToPageRect(drag, target)
+      if (!target || !area || isTinyDrag({ width: area.width * area.scale, height: area.height * area.scale })) {
+        return resolve(null)
+      }
+      const pageObj = pdf.pages[target.page]
+      const eng = engineRef.current
+      // A figure read at a low zoom would be blurry for the model; floor the
+      // scale at 1.5 render px per page unit.
+      const scaleFactor = renderScaleFor(area.width, area.height, Math.max(area.scale, 1.5), window.devicePixelRatio || 1)
+      const blob = await eng
+        .renderPageRect(
+          pdf,
+          pageObj,
+          { origin: { x: area.x, y: area.y }, size: { width: area.width, height: area.height } },
+          { scaleFactor, dpr: 1, imageType: 'image/png', withAnnotations: true }
+        )
+        .toPromise()
+      const toDataUrl = (b: Blob): Promise<string> =>
+        new Promise<string>((ok, fail) => {
+          const reader = new FileReader()
+          reader.onload = () => ok(String(reader.result))
+          reader.onerror = () => fail(reader.error)
+          reader.readAsDataURL(b)
+        })
+      let imageDataUrl = await toDataUrl(blob as Blob)
+      // A dense figure can make an enormous PNG: JPEG first, then smaller,
+      // the same ladder the web capture uses.
+      if (encodedTooLarge(imageDataUrl)) {
+        const bitmap = await createImageBitmap(blob as Blob)
+        let w = bitmap.width
+        let h = bitmap.height
+        const canvas = document.createElement('canvas')
+        for (let i = 0; i < 4 && encodedTooLarge(imageDataUrl); i++) {
+          if (i > 0) {
+            w = Math.max(1, Math.round(w / 1.5))
+            h = Math.max(1, Math.round(h / 1.5))
+          }
+          canvas.width = w
+          canvas.height = h
+          canvas.getContext('2d')?.drawImage(bitmap, 0, 0, w, h)
+          imageDataUrl = canvas.toDataURL('image/jpeg', 0.85)
+        }
+        bitmap.close()
+        if (encodedTooLarge(imageDataUrl)) return resolve(null)
+      }
+      let text = ''
+      const geo = geometry.current.get(target.page)
+      if (geo) {
+        const spans = glyphSpansInRect(geo.runs, area).map((sp) => ({ page: target.page, from: sp.from, to: sp.to }))
+        try {
+          text = tidyRegionText(await textForSpans(eng, pdf, spans))
+        } catch {
+          text = ''
+        }
+      }
+      const page = target.page + 1
+      resolve({
+        kind: 'region',
+        label: regionLabel(text, page),
+        page,
+        rect: { x: area.x, y: area.y, width: area.width, height: area.height },
+        text: text || undefined,
+        imageDataUrl
+      })
+    } catch {
+      resolve(null)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!onDocumentReader) return
+    // One reader per asset, so a result from the previous document's reader
+    // is recognisable by its assetId and never taken for this one's.
+    const reader = createPdfDocumentReader(
+      {
+        getIndexProgress: () => indexingRef.current,
+        getDocument: () => docRef.current,
+        hasIndex: () => !!indexRef.current,
+        getPageText: (page) => pageTextRef.current(page),
+        getCurrentPage: () => currentPageRef.current,
+        reveal: (page0, start, end) => revealRangeRef.current(page0, start, end),
+        startRegionCapture: () => startRegionCaptureRef.current(),
+        cancelRegionCapture: () => cancelRegionCaptureRef.current(),
+        getFailure: () =>
+          docStatusRef.current === 'error'
+            ? 'The PDF could not be opened'
+            : indexFailedRef.current
+              ? 'The PDF text could not be read'
+              : null
+      },
+      { assetId }
+    )
+    onDocumentReader(reader)
+    return () => {
+      reader.dispose()
+      onDocumentReader(null)
+    }
+  }, [onDocumentReader, assetId])
+
+  // What the selection toolbar's AI actions work from. Unlike a highlight this
+  // never clears the selection: the toolbar is attached to it, so the answer
+  // has to render inside the same menu while the selection stays alive.
+  // Everything the actions need (text, context, offsets, page) is captured
+  // here once and held by the menu, so a later selection change cannot
+  // desync a save from the text the answer was about.
+  const captureSelection = useCallback(
+    async (pageIndex: number): Promise<SelectionCapture | null> => {
+      if (!selection || !index || !doc) return null
       const scope = selection.forDocument(documentId)
       const range = scope.getState().selection
-      if (!range) return
+      if (!range) return null
 
       const a = toGlobal(index, range.start.page, range.start.index)
       const b = toGlobal(index, range.end.page, range.end.index)
@@ -669,54 +862,81 @@ function PdfSurface({
       const end = Math.max(a, b) + 1
 
       const text = (await textForSpans(engine, doc, spansForRange(index, start, end))).trim()
-      if (!text) return
+      if (!text) return null
 
       const ctxStart = Math.max(0, start - 200)
       const ctxEnd = Math.min(index.total, end + 200)
       const surrounding = (await textForSpans(engine, doc, spansForRange(index, ctxStart, ctxEnd))).trim()
       const pageContent = await pageText(pageIndex)
 
-      scope.clear()
-      setAiSelectionState({
-        anchorRect: rect,
-        pageIndex,
+      return {
         selectionText: text,
         surroundingContext: surrounding,
         pageText: pageContent,
         startOffset: start,
         endOffset: end,
-        initialMode: mode
-      })
+        page: range.start.page + 1
+      }
     },
     [selection, index, doc, documentId, engine, pageText]
   )
 
-  const handleSaveAiAsHighlight = async (note: string): Promise<void> => {
-    if (!aiSelectionState) return
-    const created = await createHighlight.mutateAsync({
-      bookmarkId,
-      startOffset: aiSelectionState.startOffset,
-      endOffset: aiSelectionState.endOffset,
-      color: DEFAULT_HIGHLIGHT_COLOR,
-      text: aiSelectionState.selectionText,
-      note
-    })
-    setAiSelectionState(null)
-    setActiveId(created.id)
-  }
+  // The open AI card lives here, not in the selection menu. The selection
+  // plugin unmounts and re-mounts its menu as the viewport scrolls (and drops
+  // it entirely when the selection leaves the visible pages); state held in
+  // the menu would die with it, taking the in-flight answer along. Held at
+  // this level the card survives, anchored to the captured page + rect, the
+  // way the old floating HUD was. Only an explicit dismissal clears it.
+  const [aiCard, setAiCard] = useState<AiCardState | null>(null)
+  useEffect(() => {
+    setAiCard(null)
+  }, [documentId])
+  useEffect(() => {
+    // Opening an existing highlight replaces the card.
+    if (activeId) setAiCard(null)
+  }, [activeId])
 
-  const aiHudAnchor = useCallback((): DOMRect | null => {
-    if (!aiSelectionState) return null
-    const pageEl = document.querySelector(`[data-pdf-page="${aiSelectionState.pageIndex}"]`)
-    if (!pageEl) return null
-    const box = pageEl.getBoundingClientRect()
-    return new DOMRect(
-      box.left + aiSelectionState.anchorRect.origin.x,
-      box.top + aiSelectionState.anchorRect.origin.y,
-      aiSelectionState.anchorRect.size.width,
-      aiSelectionState.anchorRect.size.height
-    )
-  }, [aiSelectionState])
+  const closeAiCard = useCallback((): void => {
+    setAiCard(null)
+    selection?.forDocument(documentId).clear()
+  }, [selection, documentId])
+
+  const saveAiAsHighlight = useCallback(
+    async (cap: SelectionCapture, note: string): Promise<void> => {
+      const created = await createHighlight.mutateAsync({
+        bookmarkId,
+        startOffset: cap.startOffset,
+        endOffset: cap.endOffset,
+        color: DEFAULT_HIGHLIGHT_COLOR,
+        text: cap.selectionText,
+        note
+      })
+      setAiCard(null)
+      selection?.forDocument(documentId).clear()
+      setActiveId(created.id)
+    },
+    [createHighlight, bookmarkId, selection, documentId]
+  )
+
+  // A swatch or Note pressed in the card highlights the captured range, which
+  // does not depend on the live selection still existing.
+  const createFromCard = useCallback(
+    async (cap: SelectionCapture, color: string, withNote: boolean): Promise<void> => {
+      const created = await createHighlight.mutateAsync({
+        bookmarkId,
+        startOffset: cap.startOffset,
+        endOffset: cap.endOffset,
+        color,
+        text: cap.selectionText
+      })
+      setAiCard(null)
+      selection?.forDocument(documentId).clear()
+      lastCreatedId.current = created.id
+      setActiveId(created.id)
+      if (withNote) setNoteDraftFor(created.id)
+    },
+    [createHighlight, bookmarkId, selection, documentId]
+  )
 
   // Dev smoke only: announce readiness, and on request drive the exact path a
   // user drives — select text in the page, then create a highlight from it.
@@ -844,16 +1064,14 @@ function PdfSurface({
           window.kk.dev.notifyPdfHighlighted('')
           return
         }
-        // Ask AI, driven the same way a user would: a real click on the
-        // toolbar's "Ask AI" button, on the selection the drag above made.
-        // This is the flow-preserving in-situ HUD (SelectionAiHUD.tsx) — the
-        // surface that a `pointer-events: none` host with no opt-in on the
-        // panel makes entirely unclickable, and that the click-through then
-        // dismisses via the outside-click handler. Both would show up here:
-        // a HUD that never reflects a mode change, or one that vanishes.
-        const askAiBtn = document.querySelector<HTMLElement>('[data-kk-ai]')
+        // Quick AI, driven the same way a user would: a real click on the
+        // toolbar's Explain button, on the selection the drag above made.
+        // The answer opens inside the same toolbar card; the toolbar must
+        // stay put (no click-through dismissal) and the selection must
+        // survive so the swatch flow below still works.
+        const askAiBtn = document.querySelector<HTMLElement>('[data-kk-ai-mode="micro-explain"]')
         if (!askAiBtn) {
-          console.error('[smoke-pdf] selection toolbar has no Ask AI button')
+          console.error('[smoke-pdf] selection toolbar has no Explain button')
         } else {
           const askAiBox = askAiBtn.getBoundingClientRect()
           await window.kk.dev.realClickOnPdf({
@@ -861,46 +1079,29 @@ function PdfSurface({
             y: askAiBox.top + askAiBox.height / 2
           })
           await new Promise((r2) => setTimeout(r2, 400))
-          const hud = document.querySelector<HTMLElement>('[data-kk-ai-hud]')
-          if (!hud) {
-            console.error('[smoke-pdf] AI HUD did not open after clicking Ask AI')
+          const card = document.querySelector<HTMLElement>('[data-kk-inline-answer]')
+          if (!card) {
+            console.error('[smoke-pdf] inline answer did not open after clicking Explain')
           } else {
-            const cs = getComputedStyle(hud)
-            console.log(`[smoke-pdf] AI HUD opened; computed pointer-events=${cs.pointerEvents}`)
+            const cs = getComputedStyle(card)
+            console.log(`[smoke-pdf] inline answer opened; computed pointer-events=${cs.pointerEvents}`)
             if (cs.pointerEvents === 'none') {
-              console.error('[smoke-pdf] AI HUD panel is not hit-testable (pointer-events: none) — every control in it is dead')
-            }
-            const dejargon = hud.querySelector<HTMLElement>('[data-kk-ai-mode="micro-dejargon"]')
-            if (!dejargon) {
-              console.error('[smoke-pdf] AI HUD has no Dejargonify tab to click')
-            } else {
-              const db = dejargon.getBoundingClientRect()
-              await window.kk.dev.realClickOnPdf({ x: db.left + db.width / 2, y: db.top + db.height / 2 })
-              await new Promise((r2) => setTimeout(r2, 400))
-              const stillThere = document.querySelector<HTMLElement>('[data-kk-ai-hud]')
-              if (!stillThere) {
-                console.error('[smoke-pdf] AI HUD vanished after clicking a mode tab — the click-through/dismiss bug')
-              } else {
-                const active = stillThere.querySelector<HTMLElement>('[data-kk-ai-mode="micro-dejargon"]')
-                const isActive = active?.className.includes('bg-emerald-100')
-                if (isActive) console.log('[smoke-pdf] AI HUD stayed open and the Dejargonify tab became active — click landed')
-                else console.error('[smoke-pdf] AI HUD stayed open but the Dejargonify tab never became active — click did not land')
-              }
+              console.error('[smoke-pdf] inline answer is not hit-testable (pointer-events: none)')
             }
           }
-          // Dismiss the HUD the way a user would (Escape) and confirm it
-          // actually closes, then restore the selection for the swatch flow
-          // below — the HUD's askAiFromSelection cleared it when it opened.
+          // Dismiss the way a user would (Escape) and confirm it closes,
+          // then restore the selection for the swatch flow below — closing
+          // the toolbar clears the selection.
           document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
           await new Promise((r2) => setTimeout(r2, 250))
-          if (document.querySelector('[data-kk-ai-hud]')) {
-            console.error('[smoke-pdf] AI HUD did not dismiss on Escape')
+          if (document.querySelector('[data-kk-inline-answer]')) {
+            console.error('[smoke-pdf] inline answer did not dismiss on Escape')
           } else {
-            console.log('[smoke-pdf] AI HUD dismissed on Escape')
+            console.log('[smoke-pdf] inline answer dismissed on Escape')
           }
           // KK_SMOKE_AI_ONLY stops here, before the swatch click below ever
           // runs — that click creates a highlight, and this mode exists to
-          // verify the AI HUD against a bookmark that write-testing isn't
+          // verify the inline answer against a bookmark that write-testing isn't
           // scoped to.
           if (window.kk.dev.smokeAiOnly) {
             console.log('[smoke-pdf] KK_SMOKE_AI_ONLY=1 — stopping before highlight creation')
@@ -1045,6 +1246,7 @@ function PdfSurface({
         geometry={geometry.current}
         activeId={activeId}
         flashId={flashId}
+        refFlash={refFlash}
         noteDraftFor={noteDraftFor}
         night={night}
         onActivate={(id) => {
@@ -1069,8 +1271,11 @@ function PdfSurface({
           await deleteHighlight.mutateAsync({ id, bookmarkId })
         }}
         onCreate={createFromSelection}
-        onAskAi={askAiFromSelection}
         onCopy={copyFromSelection}
+        onCapture={captureSelection}
+        onOpenCard={setAiCard}
+        cardOpen={!!aiCard}
+        onStudyAttach={onStudyAttach}
       />
     ),
     [
@@ -1079,14 +1284,17 @@ function PdfSurface({
       placed,
       activeId,
       flashId,
+      refFlash,
       noteDraftFor,
       night,
       updateHighlight,
       deleteHighlight,
       bookmarkId,
       createFromSelection,
-      askAiFromSelection,
-      copyFromSelection
+      copyFromSelection,
+      captureSelection,
+      aiCard,
+      onStudyAttach
     ]
   )
 
@@ -1197,7 +1405,7 @@ function PdfSurface({
       )}
 
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-        <div ref={pinchHostRef} className="h-full min-h-0 min-w-0 flex-1">
+        <div ref={pinchHostRef} className="relative h-full min-h-0 min-w-0 flex-1">
           <Viewport
             documentId={documentId}
             className={`h-full w-full overflow-auto ${
@@ -1211,27 +1419,143 @@ function PdfSurface({
               <Scroller documentId={documentId} renderPage={renderPage} />
             </GlobalPointerProvider>
           </Viewport>
+          {capturing && (
+            <RegionCaptureOverlay
+              onDone={(r) => void finishRegionCapture(r)}
+              onCancel={cancelRegionCapture}
+              scrollHost={pinchHostRef.current?.firstElementChild ?? null}
+            />
+          )}
         </div>
 
       </div>
 
-      {aiSelectionState && (
-        <SelectionAiHUD
-          anchor={aiHudAnchor}
-          selectionText={aiSelectionState.selectionText}
-          surroundingContext={aiSelectionState.surroundingContext}
-          pageText={aiSelectionState.pageText}
+      {aiCard && (
+        <AiCard
+          card={aiCard}
+          onChange={setAiCard}
+          onClose={closeAiCard}
+          onCreate={(color, withNote) => createFromCard(aiCard.cap, color, withNote)}
+          onSaveAiNote={(note) => saveAiAsHighlight(aiCard.cap, note)}
+          onStudyAttach={onStudyAttach}
+          onStudyContinue={onStudyContinue}
           docTitle={title || fileName}
-          initialMode={aiSelectionState.initialMode}
-          onDismiss={() => setAiSelectionState(null)}
           sourceUrl={sourceUrl}
           author={author}
-          docKind="pdf"
-          onSaveAsHighlight={handleSaveAiAsHighlight}
         />
       )}
     </>
   )
+}
+
+/** Crosshair over the page area: drag a rectangle, Esc or a tiny drag cancels. */
+function RegionCaptureOverlay({
+  onDone,
+  onCancel,
+  scrollHost
+}: {
+  onDone: (drag: PxRect) => void
+  onCancel: () => void
+  scrollHost: Element | null
+}): React.JSX.Element {
+  const [drag, setDrag] = useState<{ from: { x: number; y: number }; rect: PxRect } | null>(null)
+  const hostRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      onCancel()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [onCancel])
+
+  // The overlay sits above the viewport, so the wheel has to be handed on to
+  // keep the document scrollable while aiming.
+  useEffect(() => {
+    const el = hostRef.current
+    if (!el || !scrollHost) return
+    const onWheel = (e: WheelEvent): void => {
+      e.preventDefault()
+      scrollHost.scrollBy({ left: e.deltaX, top: e.deltaY })
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [scrollHost])
+
+  const bounds = (): DOMRect | undefined => hostRef.current?.getBoundingClientRect()
+
+  return (
+    <div
+      ref={hostRef}
+      data-testid="region-capture-overlay"
+      className="absolute inset-0 z-30 select-none bg-black/10"
+      style={{ cursor: 'crosshair', touchAction: 'none' }}
+      onContextMenu={(e) => e.preventDefault()}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return
+        e.preventDefault()
+        e.currentTarget.setPointerCapture(e.pointerId)
+        setDrag({ from: { x: e.clientX, y: e.clientY }, rect: rectFromPoints(e.clientX, e.clientY, e.clientX, e.clientY) })
+      }}
+      onPointerMove={(e) => {
+        if (drag) setDrag({ from: drag.from, rect: rectFromPoints(drag.from.x, drag.from.y, e.clientX, e.clientY) })
+      }}
+      onPointerUp={(e) => {
+        if (!drag) return
+        const rect = rectFromPoints(drag.from.x, drag.from.y, e.clientX, e.clientY)
+        setDrag(null)
+        if (isTinyDrag(rect)) onCancel()
+        else onDone(rect)
+      }}
+      onPointerCancel={onCancel}
+    >
+      <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-md bg-neutral-900/80 px-2.5 py-1 text-xs text-neutral-100">
+        Drag over a figure or equation. Esc to cancel.
+      </div>
+      {drag && (
+        <div
+          className="pointer-events-none absolute rounded-sm border-[1.5px] border-emerald-500 bg-emerald-500/15"
+          style={{
+            left: drag.rect.x - (bounds()?.left ?? 0),
+            top: drag.rect.y - (bounds()?.top ?? 0),
+            width: drag.rect.width,
+            height: drag.rect.height
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+/** The expanded AI card: the captured selection plus what is being shown for it. */
+interface AiCardState {
+  cap: SelectionCapture
+  /** Where the card is anchored: page-relative rect on `pageIndex`. */
+  rect: Rect
+  pageIndex: number
+  view: { mode: InlineMode; prompt?: string } | null
+  asking: boolean
+}
+
+function anchorForPageRect(pageIndex: number, rect: Rect): DOMRect | null {
+  const pageEl = document.querySelector(`[data-pdf-page="${pageIndex}"]`)
+  if (!pageEl) return null
+  const box = pageEl.getBoundingClientRect()
+  return new DOMRect(box.left + rect.origin.x, box.top + rect.origin.y, rect.size.width, rect.size.height)
+}
+
+/** What the toolbar's AI actions read from the live selection (see captureSelection). */
+interface SelectionCapture {
+  selectionText: string
+  surroundingContext: string
+  pageText: string
+  startOffset: number
+  endOffset: number
+  /** 1-based, the page the selection starts on. */
+  page: number
 }
 
 interface PdfPageProps {
@@ -1242,6 +1566,7 @@ interface PdfPageProps {
   geometry: Map<number, PdfPageGeometry>
   activeId: string | null
   flashId: string | null
+  refFlash: { page: number; from: number; to: number } | null
   noteDraftFor: string | null
   /** Inverts the page bitmap and re-blends highlights for dark reading. */
   night: boolean
@@ -1252,8 +1577,11 @@ interface PdfPageProps {
   onRecolor: (id: string, color: string) => Promise<void>
   onDelete: (id: string) => Promise<void>
   onCreate: (color: string, withNote: boolean) => Promise<string | null>
-  onAskAi: (rect: Rect, pageIndex: number, mode?: AiMode) => void
   onCopy: () => Promise<boolean>
+  onCapture: (pageIndex: number) => Promise<SelectionCapture | null>
+  onOpenCard: (card: AiCardState) => void
+  cardOpen: boolean
+  onStudyAttach?: (attachment: StudyAttachment) => void
 }
 
 function PdfPage({
@@ -1264,6 +1592,7 @@ function PdfPage({
   geometry,
   activeId,
   flashId,
+  refFlash,
   noteDraftFor,
   night,
   onActivate,
@@ -1273,8 +1602,11 @@ function PdfPage({
   onRecolor,
   onDelete,
   onCreate,
-  onAskAi,
-  onCopy
+  onCopy,
+  onCapture,
+  onOpenCard,
+  cardOpen,
+  onStudyAttach
 }: PdfPageProps): React.JSX.Element {
   const geo = geometry.get(pageIndex)
 
@@ -1290,6 +1622,11 @@ function PdfPage({
         )
     )
   }, [geo, placed, pageIndex])
+
+  const refFlashRects = useMemo(
+    () => (geo && refFlash && refFlash.page === pageIndex ? rectsWithinSlice(geo, refFlash.from, refFlash.to) : []),
+    [geo, refFlash, pageIndex]
+  )
 
   // Only the page the highlight starts on draws its popover. `placed` is
   // document-wide, so without this every mounted page rendered one — and the
@@ -1391,6 +1728,29 @@ function PdfPage({
         ))}
       </div>
 
+      {/* A passage Study pointed at: yellow and pulsing like a focused
+          highlight, but only an overlay — it is not a highlight. */}
+      {refFlashRects.length > 0 && (
+        <div className="pointer-events-none absolute inset-0" data-kk-ref-flash>
+          {refFlashRects.map((rect, i) => (
+            <div
+              key={i}
+              className="animate-pulse"
+              style={{
+                position: 'absolute',
+                left: rect.origin.x * scale,
+                top: rect.origin.y * scale,
+                width: rect.size.width * scale,
+                height: rect.size.height * scale,
+                backgroundColor: '#FFE066',
+                opacity: night ? 0.34 : 0.6,
+                mixBlendMode: night ? 'screen' : 'multiply'
+              }}
+            />
+          ))}
+        </div>
+      )}
+
       {/* Find matches: all in a pale yellow, the current one in orange so it
           reads as "you are here". Under the text layer, like the stored
           highlights, so selecting text still works over a match. */}
@@ -1420,8 +1780,11 @@ function PdfPage({
               rect={menu.rect}
               pageIndex={pageIndex}
               onCreate={onCreate}
-              onAskAi={(mode) => onAskAi(menu.rect, pageIndex, mode)}
               onCopy={onCopy}
+              onCapture={() => onCapture(pageIndex)}
+              onOpenCard={onOpenCard}
+              cardOpen={cardOpen}
+              onStudyAttach={onStudyAttach}
             />
           ) : null
         }
@@ -1503,8 +1866,15 @@ function FloatingPopover({
     }
     window.addEventListener('scroll', queue, true)
     window.addEventListener('resize', queue)
+    // The popover also changes size on its own: a streamed answer grows the
+    // card from a child that FloatingPopover never re-renders for. Re-place
+    // whenever the box changes so it neither slides over the selection nor
+    // pushes its footer off-screen.
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(queue)
+    if (el.current) ro?.observe(el.current)
     return () => {
       if (frame) cancelAnimationFrame(frame)
+      ro?.disconnect()
       window.removeEventListener('scroll', queue, true)
       window.removeEventListener('resize', queue)
     }
@@ -1541,7 +1911,7 @@ function FloatingPopover({
       onPointerDown={(e) => {
         // Don't let a press on the toolbar drop the selection it was opened
         // for — except in the fields that own their own selection.
-        if (!(e.target as HTMLElement).closest('.kh-ta, .kh-note-view')) e.preventDefault()
+        if (!(e.target as HTMLElement).closest('.kh-ta, .kh-note-view, .kh-input, .kh-ans')) e.preventDefault()
       }}
     >
       {children}
@@ -1653,71 +2023,50 @@ function SwatchRow({
   )
 }
 
-/** Colour swatches + "Note" + "Copy" + "Ask AI", shown against a live text selection. */
-function SelectionMenu({
-  rect,
-  pageIndex,
-  onCreate,
-  onAskAi,
-  onCopy
-}: {
-  rect: Rect
-  pageIndex: number
-  onCreate: (color: string, withNote: boolean) => Promise<string | null>
-  onAskAi?: (mode?: AiMode) => void
-  onCopy?: () => Promise<boolean>
-}): React.JSX.Element {
-  const [busy, setBusy] = useState(false)
-  // Copying no longer clears the selection or closes the menu (see
-  // copyFromSelection above) — the selection is left alone, exactly as it
-  // would be after any other copy. This flag only drives the button's own
-  // "Copied" label, and reverts itself after COPY_CONFIRM_MS below so the
-  // button is clickable again without the user having to reopen the menu.
-  const [copied, setCopied] = useState(false)
+const QUICK_ACTIONS: { mode: Exclude<InlineMode, 'custom'>; label: string }[] = [
+  { mode: 'micro-explain', label: 'Explain' }
+]
 
-  // Revert "Copied" back to "Copy" after COPY_CONFIRM_MS. The cleanup here
-  // matters: if the popover unmounts mid-confirmation (the user dismissed it
-  // before the timer fired), there is no `copied` state left to set.
+/**
+ * The toolbar row shared by the selection menu and the expanded AI card:
+ * colours, Note, Copy, then Explain / Ask… and Add to Study.
+ */
+function SelectionToolbar({
+  busy,
+  activeMode,
+  asking,
+  onSwatch,
+  onNote,
+  onCopy,
+  onMode,
+  onAsk,
+  onAttach
+}: {
+  busy: boolean
+  activeMode: InlineMode | null
+  asking: boolean
+  onSwatch: (color: string) => void
+  onNote: () => void
+  onCopy: () => Promise<boolean>
+  onMode: (mode: Exclude<InlineMode, 'custom'>) => void
+  onAsk: () => void
+  onAttach?: () => void
+}): React.JSX.Element {
+  // Copying leaves the selection and menu alone (see copyFromSelection). This
+  // flag only drives the button's "Copied" label and reverts itself after
+  // COPY_CONFIRM_MS; the cleanup matters if the menu unmounts mid-confirmation.
+  const [copied, setCopied] = useState(false)
   useEffect(() => {
     if (!copied) return
     const timer = setTimeout(() => setCopied(false), COPY_CONFIRM_MS)
     return () => clearTimeout(timer)
   }, [copied])
 
-  // `rect` is page-relative and already scaled; the popover is placed in
-  // viewport coordinates, so it needs the page's own position added.
-  const anchor = useCallback((): DOMRect | null => {
-    const pageEl = document.querySelector(`[data-pdf-page="${pageIndex}"]`)
-    if (!pageEl) return null
-    const box = pageEl.getBoundingClientRect()
-    return new DOMRect(
-      box.left + rect.origin.x,
-      box.top + rect.origin.y,
-      rect.size.width,
-      rect.size.height
-    )
-  }, [rect, pageIndex])
-
-  const run = async (color: string, withNote: boolean): Promise<void> => {
-    setBusy(true)
-    try {
-      await onCreate(color, withNote)
-    } finally {
-      setBusy(false)
-    }
-  }
-
   return (
-    <FloatingPopover anchor={anchor}>
-      <SwatchRow active={null} disabled={busy} onPick={(color) => void run(color, false)} />
+    <div className="kh-toolbar">
+      <SwatchRow active={null} disabled={busy} onPick={onSwatch} />
       <div className="kh-sep" />
-      <PopButton
-        label="Note"
-        icon={ICON_NOTE}
-        disabled={busy}
-        onClick={() => void run(DEFAULT_HIGHLIGHT_COLOR, true)}
-        data-kk-note=""
-      />
+      <PopButton label="Note" icon={ICON_NOTE} disabled={busy} onClick={onNote} data-kk-note="" />
       {/* Copy sits right next to Note, mirroring where it lands on an
           existing highlight's popover (HighlightPopover below). */}
       <PopButton
@@ -1727,23 +2076,243 @@ function SelectionMenu({
         disabled={busy || copied}
         onClick={() => {
           void (async () => {
-            // Only confirm if the copy actually happened — otherwise the
-            // button would be stuck showing "Copied" for a copy that never
-            // reached the clipboard (e.g. an empty selection).
-            const ok = (await onCopy?.()) ?? false
-            if (ok) setCopied(true)
+            // Only confirm if the copy actually happened.
+            if (await onCopy()) setCopied(true)
           })()
         }}
         data-kk-copy=""
       />
       <div className="kh-sep" />
+      {QUICK_ACTIONS.map((a) => (
+        <PopButton
+          key={a.mode}
+          label={a.label}
+          disabled={busy}
+          data-on={activeMode === a.mode ? '1' : undefined}
+          onClick={() => onMode(a.mode)}
+          data-kk-ai-mode={a.mode}
+        />
+      ))}
       <PopButton
-        label="Ask AI"
-        icon="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"
+        label="Ask…"
         disabled={busy}
-        onClick={() => onAskAi?.('micro-explain')}
-        data-kk-ai=""
+        data-on={asking || activeMode === 'custom' ? '1' : undefined}
+        onClick={onAsk}
+        data-kk-ai-mode="custom"
       />
+      {onAttach && (
+        <PopButton
+          label="Add to Study"
+          icon={ICON_STUDY_ATTACH}
+          iconOnly
+          disabled={busy}
+          onClick={onAttach}
+          data-kk-study-attach=""
+        />
+      )}
+    </div>
+  )
+}
+
+/**
+ * The plain toolbar shown against a live text selection. Choosing an AI
+ * action hands over to the AiCard (held by PdfSurface, so it outlives this
+ * menu); while that card is open this menu steps aside.
+ */
+function SelectionMenu({
+  rect,
+  pageIndex,
+  cardOpen,
+  onCreate,
+  onCopy,
+  onCapture,
+  onOpenCard,
+  onStudyAttach
+}: {
+  rect: Rect
+  pageIndex: number
+  cardOpen: boolean
+  onCreate: (color: string, withNote: boolean) => Promise<string | null>
+  onCopy?: () => Promise<boolean>
+  onCapture: () => Promise<SelectionCapture | null>
+  onOpenCard: (card: AiCardState) => void
+  onStudyAttach?: (attachment: StudyAttachment) => void
+}): React.JSX.Element | null {
+  const [busy, setBusy] = useState(false)
+
+  // `rect` is page-relative and already scaled; the popover is placed in
+  // viewport coordinates, so it needs the page's own position added.
+  const anchor = useCallback(
+    (): DOMRect | null => anchorForPageRect(pageIndex, rect),
+    [rect, pageIndex]
+  )
+
+  const guard = async (fn: () => Promise<void>): Promise<void> => {
+    setBusy(true)
+    try {
+      await fn()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const open = (view: AiCardState['view'], asking: boolean): Promise<void> =>
+    guard(async () => {
+      const cap = await onCapture()
+      if (cap) onOpenCard({ cap, rect, pageIndex, view, asking })
+    })
+
+  if (cardOpen) return null
+
+  return (
+    <FloatingPopover anchor={anchor}>
+      <SelectionToolbar
+        busy={busy}
+        activeMode={null}
+        asking={false}
+        onSwatch={(color) => void guard(async () => void (await onCreate(color, false)))}
+        onNote={() => void guard(async () => void (await onCreate(DEFAULT_HIGHLIGHT_COLOR, true)))}
+        onCopy={async () => (await onCopy?.()) ?? false}
+        onMode={(mode) => void open({ mode }, false)}
+        onAsk={() => void open(null, true)}
+        onAttach={
+          onStudyAttach
+            ? () =>
+                void guard(async () => {
+                  const cap = await onCapture()
+                  if (cap) onStudyAttach(textAttachment(cap.selectionText, cap.page, cap.surroundingContext))
+                })
+            : undefined
+        }
+      />
+    </FloatingPopover>
+  )
+}
+
+/**
+ * The toolbar grown into an answer card. It is anchored to the page and rect
+ * captured when it opened (like the floating HUD it replaced), so it keeps
+ * its place and its stream when the selection plugin remounts or drops the
+ * in-page menu. Esc, a press outside, or Continue closes it.
+ */
+function AiCard({
+  card,
+  onChange,
+  onClose,
+  onCreate,
+  onSaveAiNote,
+  onStudyAttach,
+  onStudyContinue,
+  docTitle,
+  sourceUrl,
+  author
+}: {
+  card: AiCardState
+  onChange: (card: AiCardState) => void
+  onClose: () => void
+  onCreate: (color: string, withNote: boolean) => Promise<void>
+  onSaveAiNote: (note: string) => Promise<void>
+  onStudyAttach?: (attachment: StudyAttachment) => void
+  onStudyContinue?: (messages: StudyMessage[]) => void
+  docTitle: string
+  sourceUrl?: string
+  author?: string
+}): React.JSX.Element {
+  const { cap, view, asking } = card
+  const [busy, setBusy] = useState(false)
+  const [question, setQuestion] = useState('')
+  const anchor = useCallback(
+    (): DOMRect | null => anchorForPageRect(card.pageIndex, card.rect),
+    [card.pageIndex, card.rect]
+  )
+  const attachment = textAttachment(cap.selectionText, cap.page, cap.surroundingContext)
+
+  const guard = async (fn: () => Promise<void>): Promise<void> => {
+    setBusy(true)
+    try {
+      await fn()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <FloatingPopover anchor={anchor} className="kh-ai-mode" onDismiss={onClose}>
+      <SelectionToolbar
+        busy={busy}
+        activeMode={view?.mode ?? null}
+        asking={asking}
+        onSwatch={(color) => void guard(() => onCreate(color, false))}
+        onNote={() => void guard(() => onCreate(DEFAULT_HIGHLIGHT_COLOR, true))}
+        onCopy={async () => {
+          try {
+            await navigator.clipboard.writeText(cap.selectionText)
+            return true
+          } catch {
+            return false
+          }
+        }}
+        onMode={(mode) => onChange({ ...card, view: { mode }, asking: false })}
+        onAsk={() => onChange({ ...card, asking: !asking })}
+        onAttach={
+          onStudyAttach
+            ? () => {
+                onStudyAttach(attachment)
+                onClose()
+              }
+            : undefined
+        }
+      />
+
+      {asking && (
+        <form
+          className="kh-ai-input"
+          onSubmit={(e) => {
+            e.preventDefault()
+            const q = question.trim()
+            if (!q) return
+            onChange({ ...card, view: { mode: 'custom', prompt: q }, asking: false })
+          }}
+        >
+          <input
+            className="kh-input"
+            autoFocus
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            placeholder="Ask about this selection…"
+            aria-label="Ask about this selection"
+          />
+          <button type="submit" className="kh-btn kh-primary" disabled={!question.trim()}>
+            <span>Ask</span>
+          </button>
+        </form>
+      )}
+
+      {view && (
+        <InlineAnswer
+          key={`${view.mode}:${view.prompt ?? ''}`}
+          mode={view.mode}
+          prompt={view.prompt}
+          selectionText={cap.selectionText}
+          surroundingContext={cap.surroundingContext}
+          pageText={cap.pageText}
+          docTitle={docTitle}
+          docKind="pdf"
+          sourceUrl={sourceUrl}
+          author={author}
+          onSaveAsNote={onSaveAiNote}
+          onContinue={
+            onStudyContinue
+              ? (text) => {
+                  onStudyContinue(
+                    buildContinueMessages({ mode: view.mode, prompt: view.prompt, answer: text, attachment })
+                  )
+                  onClose()
+                }
+              : undefined
+          }
+        />
+      )}
     </FloatingPopover>
   )
 }

@@ -1,4 +1,5 @@
 import type { PdfDocumentObject, PdfEngine, PdfPageGeometry } from '@embedpdf/models'
+import { findQuote } from '../../../shared/quoteMatch'
 
 /**
  * Anchoring PDF highlights into Karakeep's highlight model.
@@ -171,10 +172,12 @@ export async function resolveAnchor(
   const hintPage = direct[0]?.page ?? 0
   for (const page of pagesByDistance(hintPage, index.pageStarts.length)) {
     const text = await pageText(page)
-    const at = indexOfNormalized(text, quote)
-    if (at < 0) continue
-    const globalStart = index.pageStarts[page] + at
-    const spans = spansForRange(index, globalStart, globalStart + quote.length)
+    const hit = locateQuote(text, quote)
+    if (!hit) continue
+    const globalStart = index.pageStarts[page]
+    // The hit's own end, not the quote's length: a match that skipped a
+    // hyphenated line break or a ligature is longer or shorter than the quote.
+    const spans = spansForRange(index, globalStart + hit.start, globalStart + hit.end)
     if (spans.length > 0) return { spans, quality: 'relocated' }
   }
 
@@ -182,7 +185,7 @@ export async function resolveAnchor(
 }
 
 /** Page numbers ordered by distance from `from`: 3, 2, 4, 1, 5, ... */
-function pagesByDistance(from: number, total: number): number[] {
+export function pagesByDistance(from: number, total: number): number[] {
   const out: number[] = []
   for (let d = 0; d < total; d++) {
     if (from - d >= 0) out.push(from - d)
@@ -192,31 +195,14 @@ function pagesByDistance(from: number, total: number): number[] {
 }
 
 /**
- * Whitespace-insensitive `indexOf` that reports the offset in the *original*
- * string, so the hit can be turned back into glyph indices.
+ * Where `quote` sits in a page's text, as offsets into the original string. An
+ * exact (case-sensitive) occurrence wins over a looser match that happens to
+ * come earlier; only then does the tolerant matcher shared with Study's
+ * references (see `findQuote`) run, which copes with hyphenated line breaks,
+ * ligatures, curly quotes and case, all of which PDF text is full of.
  */
-function indexOfNormalized(haystack: string, needle: string): number {
-  const direct = haystack.indexOf(needle)
-  if (direct >= 0) return direct
-
-  const map: number[] = []
-  let flat = ''
-  let pendingSpace = false
-  for (let i = 0; i < haystack.length; i++) {
-    const ch = haystack[i]
-    if (/\s/.test(ch)) {
-      pendingSpace = flat.length > 0
-      continue
-    }
-    if (pendingSpace) {
-      flat += ' '
-      map.push(i)
-      pendingSpace = false
-    }
-    flat += ch.toLowerCase()
-    map.push(i)
-  }
-
-  const hit = flat.indexOf(normalizeQuote(needle))
-  return hit < 0 ? -1 : map[hit]
+export function locateQuote(text: string, quote: string): { start: number; end: number } | null {
+  const exact = text.indexOf(quote)
+  if (exact >= 0) return { start: exact, end: exact + quote.length }
+  return findQuote(text, quote)
 }
