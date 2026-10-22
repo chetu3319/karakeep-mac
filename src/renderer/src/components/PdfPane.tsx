@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { createPortal, flushSync } from 'react-dom'
 import { EmbedPDF, useDocumentState, type PluginBatchRegistrations } from '@embedpdf/core/react'
 import { usePdfiumEngine } from '@embedpdf/engines/react'
 import { DocumentManagerPluginPackage } from '@embedpdf/plugin-document-manager/react'
@@ -18,7 +18,7 @@ import {
   useSelectionCapability,
   type SelectionSelectionMenuProps
 } from '@embedpdf/plugin-selection/react'
-import { Viewport, ViewportPluginPackage } from '@embedpdf/plugin-viewport/react'
+import { Viewport, ViewportPluginPackage, useViewportCapability, useViewportPlugin } from '@embedpdf/plugin-viewport/react'
 import { ZoomMode, ZoomPluginPackage, useZoom } from '@embedpdf/plugin-zoom/react'
 import type { PdfDocumentObject, PdfEngine, PdfPageGeometry, Rect } from '@embedpdf/models'
 // The wasm ships inside the package; loading it from disk rather than the
@@ -148,7 +148,13 @@ export interface PdfPaneProps {
 
 export default function PdfPane(props: PdfPaneProps): React.JSX.Element {
   const { assetId, fileName, title } = props
-  const [buffer, setBuffer] = useState<ArrayBuffer | null>(null)
+  // The bytes are kept with the asset they belong to. Switching bookmarks
+  // renders once with the new `assetId` before the effect below can clear
+  // anything, and handing that render the previous document's bytes mounted
+  // the viewer under an id its registry had never opened: <Viewport> threw
+  // "Viewport state not found" and blanked the whole window.
+  const [loaded, setLoaded] = useState<{ assetId: string; buffer: ArrayBuffer } | null>(null)
+  const buffer = loaded?.assetId === assetId ? loaded.buffer : null
   const [loadError, setLoadError] = useState<string | null>(null)
   const { engine, isLoading: engineLoading, error: engineError } = usePdfiumEngine({
     // Absolute, deliberately. The worker engine runs from a blob: URL, and a
@@ -168,12 +174,11 @@ export default function PdfPane(props: PdfPaneProps): React.JSX.Element {
 
   useEffect(() => {
     let cancelled = false
-    setBuffer(null)
     setLoadError(null)
     window.kk.assets
       .getBytes(assetId)
       .then((bytes) => {
-        if (!cancelled) setBuffer(bytes)
+        if (!cancelled) setLoaded({ assetId, buffer: bytes })
       })
       .catch((err: Error) => {
         if (!cancelled) setLoadError(err.message || 'Could not download this PDF')
@@ -220,7 +225,9 @@ export default function PdfPane(props: PdfPaneProps): React.JSX.Element {
 
   return (
     <div className="flex h-full flex-col bg-neutral-100 dark:bg-neutral-950">
-      <EmbedPDF engine={engine as PdfEngine} plugins={plugins}>
+      {/* Keyed so each document gets a fresh plugin registry rather than
+          the previous one's state. */}
+      <EmbedPDF key={assetId} engine={engine as PdfEngine} plugins={plugins}>
         <PdfSurface {...props} engine={engine as PdfEngine} />
       </EmbedPDF>
     </div>
@@ -286,9 +293,21 @@ function PdfSurface({
   // result to 0.01, which swallows the small per-event deltas of a pinch, so
   // this asks for an absolute level instead (the plugin still clamps it to
   // its min/max and keeps the point under `center` fixed while scrolling).
+  //
+  // The plugin anchors on its *cached* scroll offset and applies the new one
+  // a frame later. Mid-pinch that cache is always a frame stale (the scroll
+  // event from the last request lands after the next request has been made),
+  // so each step anchored a little off and the page crept up or down; and
+  // every new scale was painted once at the old offset before the deferred
+  // scroll caught up. So each request starts from the live DOM offset, lays
+  // the new scale out synchronously, and scrolls before the frame paints.
   const pinchHostRef = useRef<HTMLDivElement>(null)
   const zoomRef = useRef(zoom)
   zoomRef.current = zoom
+  const { plugin: viewportPlugin } = useViewportPlugin()
+  const { provides: viewport } = useViewportCapability()
+  const viewportRef = useRef({ plugin: viewportPlugin, viewport })
+  viewportRef.current = { plugin: viewportPlugin, viewport }
   useEffect(() => {
     const host = pinchHostRef.current
     if (!host) return
@@ -303,7 +322,23 @@ function PdfSurface({
       if (!z) return
       const level = z.getState().currentZoomLevel * factor
       factor = 1
-      z.requestZoom(level, center)
+      // <Viewport> is the host's only child and is the scrolling element.
+      const scroller = host.firstElementChild as HTMLElement | null
+      const { plugin: vp, viewport: vpCap } = viewportRef.current
+      if (!scroller || !vp || !vpCap) {
+        z.requestZoom(level, center)
+        return
+      }
+      vp.setViewportScrollMetrics(documentId, {
+        scrollTop: scroller.scrollTop,
+        scrollLeft: scroller.scrollLeft
+      })
+      flushSync(() => z.requestZoom(level, center))
+      // requestZoom left the offset it wants in the metrics; the plugin's own
+      // deferred scrollTo to the same spot is then a no-op.
+      const { scrollLeft, scrollTop } = vpCap.forDocument(documentId).getMetrics()
+      scroller.scrollLeft = scrollLeft
+      scroller.scrollTop = scrollTop
     }
     const onWheel = (e: WheelEvent): void => {
       if (!e.ctrlKey) return
@@ -320,7 +355,7 @@ function PdfSurface({
       host.removeEventListener('wheel', onWheel)
       if (frame) cancelAnimationFrame(frame)
     }
-  }, [])
+  }, [documentId])
 
   // ── Find in document ──────────────────────────────────────────────────
   // The search plugin finds and keeps the results; it does not scroll, so
