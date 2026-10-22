@@ -171,18 +171,6 @@ export function buildPromptPayload(req: AiStreamRequest): {
       userPrompt = `${contextSnippets.join('\n\n')}\n\nSelected Text to Explain:\n"${req.selectionText || ''}"`
       break
 
-    case 'micro-define':
-      systemInstruction +=
-        `\nTask: Give a tight definition of the highlighted term. Cover both its general meaning and, if different, the specific sense it carries in this ${noun}. Answer in at most 3 sentences.`
-      userPrompt = `${contextSnippets.join('\n\n')}\n\nTerm to Define:\n"${req.selectionText || ''}"`
-      break
-
-    case 'micro-formula':
-      systemInstruction +=
-        `\nTask: Mathematical and formula breakdown. Unpack the notation: the core intuition (what is this computing?), what each symbol represents, and why this formula is used here in the ${noun}. Answer in at most 3 sentences.`
-      userPrompt = `${contextSnippets.join('\n\n')}\n\nEquation / Math Notation to Decode:\n"${req.selectionText || ''}"`
-      break
-
     case 'custom':
     default:
       systemInstruction +=

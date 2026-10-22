@@ -890,9 +890,7 @@ function karakeepInit(): void {
   }
 
   const QUICK_ACTIONS: { mode: Exclude<InlineMode, 'custom'>; label: string }[] = [
-    { mode: 'micro-explain', label: 'Explain' },
-    { mode: 'micro-define', label: 'Define' },
-    { mode: 'micro-formula', label: 'Math' }
+    { mode: 'micro-explain', label: 'Explain' }
   ]
 
   /** Replaces the text of a button's label span (the one that is not the icon). */
@@ -920,7 +918,7 @@ function karakeepInit(): void {
 
   /**
    * Popover for a fresh text selection. Same toolbar as the PDF reader:
-   * swatches, Note, Copy | Explain, Define, Math, Ask..., Add to Study. An AI
+   * swatches, Note, Copy | Explain, Ask..., Add to Study. An AI
    * action grows the same card downward with the answer; from then on the card
    * ignores selection changes and only Esc, a press outside, or an action that
    * finishes with it closes it.

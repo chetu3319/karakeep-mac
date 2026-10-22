@@ -1989,14 +1989,12 @@ function SwatchRow({
 }
 
 const QUICK_ACTIONS: { mode: Exclude<InlineMode, 'custom'>; label: string }[] = [
-  { mode: 'micro-explain', label: 'Explain' },
-  { mode: 'micro-define', label: 'Define' },
-  { mode: 'micro-formula', label: 'Math' }
+  { mode: 'micro-explain', label: 'Explain' }
 ]
 
 /**
  * The toolbar row shared by the selection menu and the expanded AI card:
- * colours, Note, Copy, then Explain / Define / Math / Ask… and Add to Study.
+ * colours, Note, Copy, then Explain / Ask… and Add to Study.
  */
 function SelectionToolbar({
   busy,

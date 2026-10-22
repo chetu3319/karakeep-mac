@@ -64,7 +64,7 @@ The user's framing, which this design keeps:
 
 **Selection toolbar (PDF and web).**
 
-- The existing selection toolbar holds the highlight colour dots. It gains these text actions after a thin divider: **Explain · Define · Math · Ask…**
+- The existing selection toolbar holds the highlight colour dots. It gains these text actions after a thin divider: **Explain · Ask…**
 - *Dejargonify* is folded into Explain. (My call; the Explain prompt already asks for plain language.)
 - Clicking an action expands an answer area under the same toolbar: the same card and the same `.kh-pop` look, with no separate window.
 - The answer area has three footer actions: **Copy**, **Save as note** (the existing behaviour: create a highlight carrying the answer as its note) and **Continue in Study →**.

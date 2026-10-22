@@ -1,12 +1,10 @@
 import type { StudyAttachment, StudyMessage } from './study'
 
-/** The four quick actions the selection toolbar offers. */
-export type InlineMode = 'micro-explain' | 'micro-define' | 'micro-formula' | 'custom'
+/** The quick actions the selection toolbar offers. */
+export type InlineMode = 'micro-explain' | 'custom'
 
 const MODE_LABEL: Record<Exclude<InlineMode, 'custom'>, string> = {
-  'micro-explain': 'Explain',
-  'micro-define': 'Define',
-  'micro-formula': 'Math'
+  'micro-explain': 'Explain'
 }
 
 /** What the user "said" in the Study thread for this quick answer. */

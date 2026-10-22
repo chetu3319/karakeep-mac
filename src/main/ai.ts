@@ -12,7 +12,7 @@ import { buildPromptPayload } from './aiPrompt'
 type ThinkingLevel = 'low' | 'medium' | 'high'
 
 /**
- * The in-situ modes (Explain/Define/Math) exist specifically to
+ * The in-situ modes (Explain) exist specifically to
  * answer *without* pulling the reader out of flow — that's the whole design
  * goal of that surface (see BRIEF's product spec). A "high" or even
  * "medium" thinking budget adds seconds of latency before the first token,
@@ -22,8 +22,6 @@ type ThinkingLevel = 'low' | 'medium' | 'high'
 function thinkingLevelFor(mode: AiStreamRequest['mode']): ThinkingLevel {
   switch (mode) {
     case 'micro-explain':
-    case 'micro-define':
-    case 'micro-formula':
     case 'custom':
       return 'low'
     case 'study':
@@ -42,8 +40,6 @@ function thinkingLevelFor(mode: AiStreamRequest['mode']): ThinkingLevel {
 function maxOutputTokensFor(mode: AiStreamRequest['mode']): number {
   switch (mode) {
     case 'micro-explain':
-    case 'micro-define':
-    case 'micro-formula':
     case 'custom':
       return 2048
     case 'study':

@@ -261,13 +261,11 @@ export interface AuthResult {
 }
 
 // ─────────────────────────── AI Assistant (Gemini) ───────────────────────────
-// The in-situ modes are Explain, Define and Math (`micro-formula`); `custom`
+// The in-situ modes is Explain; `custom`
 // answers a typed question about a selection, and `study` is the whole-document
 // chat.
 export type AiMode =
   | 'micro-explain'
-  | 'micro-define'
-  | 'micro-formula'
   | 'custom'
   | 'study'
 

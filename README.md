@@ -27,7 +27,7 @@ every highlight synced back to Karakeep.
   up to Karakeep as an attached `karakeep-desktop-study.html`, which reads as a
   transcript in the Karakeep web app.
 - **Inline answers** — selecting text in the PDF or web pane offers quick AI
-  answers in the selection toolbar (Explain, Define, Math, Ask), and Add to
+  answers in the selection toolbar (Explain, Ask…), and Add to
   Study or Continue in Study to move the exchange into the panel.
 
 ## Running it
