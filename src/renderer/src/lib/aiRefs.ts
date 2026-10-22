@@ -11,6 +11,8 @@
 
 export interface AiRef {
   index: number
+  /** Number shown to the reader; identical refs (same quote, same page) share one. */
+  number: number
   quote: string
   page?: number
   figure: boolean
@@ -21,7 +23,7 @@ export type RefSegment = { type: 'text'; text: string } | { type: 'ref'; ref: Ai
 const OPEN = '[[ref'
 const BODY = /^((?:\s+(?:fig|p=\d+))*)\s+"([\s\S]*)"\s*$/
 
-function parseBody(inner: string): Omit<AiRef, 'index'> | null {
+function parseBody(inner: string): Omit<AiRef, 'index' | 'number'> | null {
   const m = BODY.exec(inner)
   if (!m) return null
   const quote = m[2].trim()
@@ -48,6 +50,7 @@ export function parseRefs(text: string, opts: { streaming?: boolean } = {}): Ref
   }
 
   let index = 0
+  const numbers = new Map<string, number>()
   let pos = 0
   while (pos < text.length) {
     const open = text.indexOf(OPEN, pos)
@@ -62,13 +65,26 @@ export function parseRefs(text: string, opts: { streaming?: boolean } = {}): Ref
     if (close < 0) break // unfinished: hidden while streaming, dropped after
 
     const parsed = parseBody(text.slice(open + OPEN.length, close))
-    if (parsed) out.push({ type: 'ref', ref: { index: index++, ...parsed } })
+    if (parsed) {
+      const key = `${parsed.page ?? ''}|${parsed.quote.replace(/\s+/g, ' ').toLowerCase()}`
+      let number = numbers.get(key)
+      if (number === undefined) {
+        number = numbers.size + 1
+        numbers.set(key, number)
+      }
+      out.push({ type: 'ref', ref: { index: index++, number, ...parsed } })
+    }
     pos = close + 2
   }
   return out
 }
 
-export function refLabel(ref: AiRef, paged: boolean): string {
-  if (!paged || ref.page === undefined) return String(ref.index + 1)
-  return ref.figure ? `Fig. · p.${ref.page}` : `p.${ref.page}`
+export function refLabel(ref: AiRef): string {
+  return String(ref.number)
+}
+
+/** Tooltip and sources-list detail: `p.4 — "quote"`, without the page on the web. */
+export function refDetail(ref: AiRef): string {
+  const page = ref.page === undefined ? '' : ref.figure ? `Fig. · p.${ref.page} — ` : `p.${ref.page} — `
+  return `${page}"${ref.quote}"`
 }

@@ -128,7 +128,7 @@ The user's framing, which this design keeps:
 - **Parsing.**
   - A parser in the renderer (new `lib/aiRefs.ts`) turns these markers into tag elements.
   - While a stream is in progress, an unfinished `[[` is held back, not shown raw.
-- **Labels.** PDF tags read `p.4` (or `Fig. · p.4` for figures). Web tags are numbered `1`, `2`, `3` in order. The full quote shows as a tooltip.
+- **Labels.** Tags are numbered `[1]`, `[2]`, … for both readers, in order of first appearance; identical refs (same quote, same page) in one answer share a number. A quiet sources list under each finished answer shows `1  p.4  “quote”` (no page on the web), each row clickable like the tag. The tooltip shows page and quote (`p.4 — "quote"`).
 - **On click, PDF:**
   - Find the quote using the logic in `pdfAnchor.ts`: search the hinted page first, then nearby pages, ignoring whitespace differences.
   - Scroll there and draw a temporary flash overlay over the quote's text, the same treatment a focused highlight gets (`flashId` / `animate-pulse`), for about 1.5s.
@@ -217,4 +217,4 @@ These were settled as my calls after a fresh builder read this document.
 - One thread per bookmark, with Clear.
 - Re-send images from about the last four turns only.
 - Document budget of about 400k characters, with pages around the focus kept when trimming.
-- Web reference tags are numbered rather than labelled by section.
+- All reference tags are numbered (not just web), at the user's request: page-labelled tags ("p.1 p.1 p.1") were useless as links.

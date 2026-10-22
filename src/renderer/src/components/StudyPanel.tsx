@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import type { StudyAttachment, StudyMessage, StudyThread, SyncState } from '../../../shared/study'
-import { parseRefs, refLabel, type AiRef } from '../lib/aiRefs'
+import { parseRefs, refDetail, refLabel, type AiRef } from '../lib/aiRefs'
 import { renderMarkdown } from '../lib/miniMarkdown'
 import ConfirmDialog from './ConfirmDialog'
 import { applyRevealResult, type RefQuality, type RevealResult } from '../lib/revealRef'
@@ -13,7 +13,7 @@ export interface StudyPanelProps {
   scopeLine: string
   /** Whether the document text has been gathered; questions wait for it. */
   documentReady: boolean
-  /** PDF page markers in the text, so reference tags read "p.4" rather than "1". */
+  /** PDF page markers in the text, (no longer used for labels; tags are always numbered). */
   paged: boolean
   thread: StudyThread | null
   chatReady: boolean
@@ -73,17 +73,15 @@ function AttachmentLabel({ attachment }: { attachment: StudyAttachment }): React
  * each into a sentinel that the markdown renderer swaps for a tag, and hides
  * a marker that is still being typed while the answer streams.
  */
-function Answer({
+export function Answer({
   text,
   streaming,
-  paged,
   onRevealRef,
   onResolveRef,
   refSource
 }: {
   text: string
   streaming: boolean
-  paged: boolean
   onRevealRef: StudyPanelProps['onRevealRef']
   onResolveRef: StudyPanelProps['onResolveRef']
   refSource: unknown
@@ -146,7 +144,7 @@ function Answer({
     let cancelled = false
     void (async () => {
       for (const ref of parsed.refs) {
-        if (!ref || qualityRef.current[ref.index]) continue
+        if (!ref || qualityRef.current[ref.number]) continue
         let q: RefQuality | 'unknown'
         try {
           q = await resolveRef.current(ref)
@@ -154,7 +152,7 @@ function Answer({
           q = 'unknown'
         }
         if (cancelled) return
-        if (q !== 'unknown') setQuality((prev) => (prev[ref.index] === q ? prev : { ...prev, [ref.index]: q }))
+        if (q !== 'unknown') setQuality((prev) => (prev[ref.number] === q ? prev : { ...prev, [ref.number]: q }))
       }
     })()
     return () => {
@@ -162,73 +160,127 @@ function Answer({
     }
   }, [parsed, streaming, refSource])
 
+  // One entry per number: the first ref that carries it.
+  const sources = useMemo(() => {
+    const seen = new Map<number, AiRef>()
+    for (const r of parsed.refs) if (r && !seen.has(r.number)) seen.set(r.number, r)
+    return [...seen.values()]
+  }, [parsed])
+
+  function reveal(ref: AiRef): void {
+    const n = ref.number
+    if (pendingRef.current.has(n)) return
+    pendingRef.current.add(n)
+    setPending(new Set(pendingRef.current))
+    void onRevealRef(ref)
+      .catch((): RevealResult => 'unavailable')
+      .then((result) => {
+        if (result === 'unavailable') flagNotReady(n)
+        const next = applyRevealResult(qualityRef.current[n], result)
+        if (next) setQuality((prev) => (prev[n] === next ? prev : { ...prev, [n]: next }))
+      })
+      .finally(() => {
+        pendingRef.current.delete(n)
+        setPending(new Set(pendingRef.current))
+      })
+  }
+
+  function stateOf(ref: AiRef): { missing: boolean; approx: boolean; busy: boolean; unready: boolean; title: string } {
+    const n = ref.number
+    const q = quality[n]
+    const approx = q === 'approximate'
+    const missing = q === 'missing'
+    const busy = pending.has(n)
+    const unready = notReady.has(n)
+    const title = busy
+      ? 'Looking for this passage…'
+      : unready
+        ? 'Page not ready — try again'
+        : missing
+          ? "Couldn't find this passage"
+          : approx
+            ? `Jumped to page ${ref.page} — exact passage not found`
+            : refDetail(ref)
+    return { missing, approx, busy, unready, title }
+  }
+
   const body = useMemo(
     () =>
       renderMarkdown(parsed.source, {
         renderRef: (i) => {
           const ref = parsed.refs[i]
           if (!ref) return null
-          const q = quality[i]
-          const approx = q === 'approximate'
-          const missing = q === 'missing'
-          const busy = pending.has(i)
-          const unready = notReady.has(i)
-          const title = unready
-            ? 'Page not ready — try again'
-            : missing
-            ? "Couldn't find this passage"
-            : approx
-              ? `Jumped to page ${ref.page} — exact passage not found`
-              : ref.quote
+          const { missing, approx, busy, unready, title } = stateOf(ref)
           return (
             <>
-            <button
-              type="button"
-              disabled={missing}
-              aria-busy={busy}
-              title={busy ? 'Looking for this passage…' : title}
-              onClick={() => {
-                if (pendingRef.current.has(i)) return
-                pendingRef.current.add(i)
-                setPending(new Set(pendingRef.current))
-                void onRevealRef(ref)
-                  .catch((): RevealResult => 'unavailable')
-                  .then((result) => {
-                    if (result === 'unavailable') flagNotReady(i)
-                    const next = applyRevealResult(qualityRef.current[i], result)
-                    if (next) setQuality((prev) => (prev[i] === next ? prev : { ...prev, [i]: next }))
-                  })
-                  .finally(() => {
-                    pendingRef.current.delete(i)
-                    setPending(new Set(pendingRef.current))
-                  })
-              }}
-              className={`mx-0.5 inline-block rounded border px-1 align-baseline text-[10px] leading-4 ${
-                busy ? 'animate-pulse' : ''
-              } ${
-                missing
-                  ? 'cursor-default border-neutral-200 text-neutral-300 dark:border-neutral-800 dark:text-neutral-600'
-                  : `text-neutral-500 hover:border-emerald-500 hover:text-emerald-700 dark:text-neutral-400 dark:hover:border-emerald-500 dark:hover:text-emerald-400 ${
-                      approx
-                        ? 'border-dashed border-neutral-400 dark:border-neutral-500'
-                        : 'border-neutral-300 dark:border-neutral-700'
-                    }`
-              }`}
-            >
-              {refLabel(ref, paged)}
-            </button>
-            {unready && (
-              <span role="status" className="mr-0.5 text-[10px] text-amber-600 dark:text-amber-400">
-                Page not ready — try again
-              </span>
-            )}
+              <button
+                type="button"
+                disabled={missing}
+                aria-busy={busy}
+                title={title}
+                onClick={() => reveal(ref)}
+                className={`mx-px inline-block rounded border px-0.5 align-super text-[10px] leading-3 ${
+                  busy ? 'animate-pulse' : ''
+                } ${
+                  missing
+                    ? 'cursor-default border-neutral-200 text-neutral-300 dark:border-neutral-800 dark:text-neutral-600'
+                    : `text-neutral-500 hover:border-emerald-500 hover:text-emerald-700 dark:text-neutral-400 dark:hover:border-emerald-500 dark:hover:text-emerald-400 ${
+                        approx
+                          ? 'border-dashed border-neutral-400 dark:border-neutral-500'
+                          : 'border-neutral-300 dark:border-neutral-700'
+                      }`
+                }`}
+              >
+                [{refLabel(ref)}]
+              </button>
+              {unready && (
+                <span role="status" className="mr-0.5 text-[10px] text-amber-600 dark:text-amber-400">
+                  Page not ready — try again
+                </span>
+              )}
             </>
           )
         }
       }),
-    [parsed, quality, pending, notReady, paged, onRevealRef]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [parsed, quality, pending, notReady, onRevealRef]
   )
-  return <>{body}</>
+  return (
+    <>
+      {body}
+      {!streaming && sources.length > 0 && (
+        <ol aria-label="Sources" className="mt-2 flex flex-col gap-0.5 border-t border-neutral-200 pt-1.5 dark:border-neutral-800">
+          {sources.map((ref) => {
+            const { missing, approx, busy, title } = stateOf(ref)
+            return (
+              <li key={ref.number}>
+                <button
+                  type="button"
+                  disabled={missing}
+                  aria-busy={busy}
+                  title={title}
+                  onClick={() => reveal(ref)}
+                  className={`flex w-full items-baseline gap-1.5 rounded text-left text-[11px] leading-4 ${
+                    busy ? 'animate-pulse' : ''
+                  } ${
+                    missing
+                      ? 'cursor-default text-neutral-300 dark:text-neutral-600'
+                      : 'text-neutral-500 hover:text-emerald-700 dark:text-neutral-400 dark:hover:text-emerald-400'
+                  } ${approx ? 'italic' : ''}`}
+                >
+                  <span className="w-4 flex-shrink-0 tabular-nums">{refLabel(ref)}</span>
+                  {ref.page !== undefined && (
+                    <span className="flex-shrink-0 tabular-nums">{ref.figure ? `Fig. p.${ref.page}` : `p.${ref.page}`}</span>
+                  )}
+                  <span className="line-clamp-2 min-w-0">“{ref.quote}”</span>
+                </button>
+              </li>
+            )
+          })}
+        </ol>
+      )}
+    </>
+  )
 }
 
 function UserTurn({ message }: { message: StudyMessage }): React.JSX.Element {
@@ -253,7 +305,6 @@ export default function StudyPanel(props: StudyPanelProps): React.JSX.Element {
     onClose,
     scopeLine,
     documentReady,
-    paged,
     thread,
     chatReady,
     syncState,
@@ -342,7 +393,7 @@ export default function StudyPanel(props: StudyPanelProps): React.JSX.Element {
             <UserTurn key={m.id} message={m} />
           ) : (
             <div key={m.id} className="text-neutral-800 dark:text-neutral-200">
-              <Answer text={m.text} streaming={false} paged={paged} onRevealRef={onRevealRef} onResolveRef={onResolveRef} refSource={refSource} />
+              <Answer text={m.text} streaming={false} onRevealRef={onRevealRef} onResolveRef={onResolveRef} refSource={refSource} />
             </div>
           )
         )}
@@ -350,7 +401,7 @@ export default function StudyPanel(props: StudyPanelProps): React.JSX.Element {
         {streaming && (
           <div className="text-neutral-800 dark:text-neutral-200">
             {streamText ? (
-              <Answer text={streamText} streaming paged={paged} onRevealRef={onRevealRef} onResolveRef={onResolveRef} refSource={refSource} />
+              <Answer text={streamText} streaming onRevealRef={onRevealRef} onResolveRef={onResolveRef} refSource={refSource} />
             ) : (
               <span className="italic text-neutral-400">Reading the document…</span>
             )}

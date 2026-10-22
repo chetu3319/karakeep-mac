@@ -43,6 +43,16 @@ describe('buildPromptPayload study', () => {
     expect(systemInstruction).toContain('[[ref')
   })
 
+  it('steers citations to the evidence, whole sentences and varied passages', () => {
+    const { systemInstruction: si } = buildPromptPayload({ ...base, studyMessages: [userMsg('1', 'hi')] })
+    expect(si).toContain('not the abstract or introduction')
+    expect(si).toContain('Use the abstract only when')
+    expect(si).toContain('complete sentence')
+    expect(si).toContain('mid-phrase')
+    expect(si).toContain('reader attached a passage')
+    expect(si).toContain('different supporting passages')
+  })
+
   it('keeps the system instruction identical across turns', () => {
     const a = buildPromptPayload({ ...base, studyMessages: [userMsg('1', 'hi')], currentPage: 1 })
     const b = buildPromptPayload({

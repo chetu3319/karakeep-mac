@@ -23,6 +23,10 @@ const STUDY_INSTRUCTIONS = [
   '- p is the number of the nearest preceding [[page N]] marker in the DOCUMENT, when the document has them. Omit p when it has none.',
   '- Use the fig form only for a figure or region the reader attached; its quote is a short label or caption.',
   '- Put the marker right after the claim, before the closing punctuation. Use one marker per claim; several markers in a row are fine for several claims.',
+  "- Cite the passage that actually contains the evidence: the specific methods, results, discussion text or figure/table caption, not the abstract or introduction's summary of it. Use the abstract only when the question is about the abstract itself or nothing else supports the claim.",
+  "- Quote a complete sentence (or a complete clause that stands on its own), at most 25 words. Never start or end a quote mid-phrase.",
+  "- When the reader attached a passage, claims about that passage cite it, using its own page.",
+  "- Prefer different supporting passages for different claims rather than reusing one.",
   '- If the document does not say something, say so plainly instead of guessing, and do not add a marker.',
   'Write in plain language; explain jargon the first time it appears.'
 ].join('\n')

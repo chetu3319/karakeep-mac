@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { applyRevealResult, locatePdfRef } from './revealRef'
 import type { AiRef } from './aiRefs'
 
-const ref = (quote: string, page?: number): AiRef => ({ index: 0, quote, page, figure: false })
+const ref = (quote: string, page?: number): AiRef => ({ index: 0, number: 1, quote, page, figure: false })
 const pagesOf = (pages: string[]) => async (i: number) => pages[i] ?? ''
 
 describe('locatePdfRef', () => {
