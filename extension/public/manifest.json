@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "Karakeep",
+  "version": "0.1.0",
+  "description": "Save pages to your Karakeep server, and highlight, annotate and ask AI about them right in the tab.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Karakeep",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": ["storage", "contextMenus", "activeTab", "scripting", "tabs"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "commands": {
+    "open-highlight-toolbar": {
+      "suggested_key": { "default": "Alt+Shift+H" },
+      "description": "Highlight the selected text"
+    },
+    "save-page": {
+      "suggested_key": { "default": "Alt+Shift+S" },
+      "description": "Save this page to Karakeep"
+    }
+  }
+}
