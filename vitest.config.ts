@@ -5,7 +5,7 @@ import { defineConfig } from 'vitest/config'
 // its entry points, and nothing imports a *.test.ts.
 export default defineConfig({
   test: {
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'extension/src/**/*.test.ts'],
     environment: 'node'
   }
 })

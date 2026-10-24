@@ -14,7 +14,11 @@
     "smoke": "node scripts/smoke-screenshot.mjs",
     "icon": "node scripts/make-icon.mjs",
     "package": "electron-vite build && electron-builder --mac",
-    "test": "vitest run"
+    "test": "vitest run",
+    "ext:build": "node extension/build.mjs",
+    "ext:watch": "node extension/build.mjs --watch",
+    "ext:typecheck": "tsc -p extension/tsconfig.json",
+    "ext:e2e": "node extension/build.mjs --e2e && xvfb-run -a -s \"-screen 0 1280x960x24\" node extension/e2e/run.mjs"
   },
   "dependencies": {
     "@embedpdf/core": "^2.15.0",
@@ -41,6 +45,7 @@
   "devDependencies": {
     "@testing-library/dom": "^10.4.2",
     "@testing-library/react": "^16.3.3",
+    "@types/chrome": "^0.3.6",
     "@types/node": "^22.7.5",
     "@types/react": "^18.3.11",
     "@types/react-dom": "^18.3.1",

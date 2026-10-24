@@ -21,3 +21,8 @@ reference/
 
 # Brainstorming mockups (local only)
 .superpowers/
+
+# Chrome extension builds
+extension/dist/
+extension/dist-e2e/
+extension/e2e/out/

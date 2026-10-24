@@ -30,6 +30,10 @@ every highlight synced back to Karakeep.
   answers in the selection toolbar (Explain, Ask…), and Add to
   Study or Continue in Study to move the exchange into the panel.
 
+- **Chrome extension** ([`extension/`](extension/README.md)): save the page
+  you're on, see your highlights on it, and highlight, annotate and ask AI
+  about passages in any tab, with the same toolbar as the desktop reader.
+
 ## Running it
 
 ```bash
